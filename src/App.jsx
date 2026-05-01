@@ -3688,6 +3688,14 @@ function RobotQCCard(props) {
   allSamples.forEach(function(s){initialSel[s.key]=true;});
   var _sel = useState(initialSel), sel = _sel[0], setSel = _sel[1];
 
+  // Gate: this analysis only applies to robot-validation experiments where samples are theoretical
+  // replicates from one stock. Default off so the card doesn't auto-run on regular analytical runs
+  // (where the slope-CV interpretation would be misleading).
+  var _enabled = useState(false), enabled = _enabled[0], setEnabled = _enabled[1];
+
+  // Dropdown picker open state — replaces the wall-of-checkboxes UI for runs with many samples.
+  var _pickerOpen = useState(false), pickerOpen = _pickerOpen[0], setPickerOpen = _pickerOpen[1];
+
   var toggle = function(key){
     setSel(function(prev){
       var n = {};
@@ -3726,8 +3734,12 @@ function RobotQCCard(props) {
     var xs = validPts.map(function(d){return d.df;});
     var ys = validPts.map(function(d){return d.avgA;});
     var fit = linReg(xs, ys);
-    // Within-rep CV per level = the cv field already computed during analysis (from cor[] reps)
-    var levelCVs = validPts.map(function(d){return {di:d.di, df:d.df, cv:d.cv, n:(d.cor||[]).length};}).filter(function(L){return L.cv != null && isFinite(L.cv);});
+    // Within-rep CV per level. d.cv is stored as a fraction in dbD (e.g., 0.019 for 1.9% CV).
+    // Convert to percentage at the source so all downstream logic (threshold checks, table
+    // display, interpretation text) operates on percentage values consistently.
+    var levelCVs = validPts
+      .map(function(d){return {di:d.di, df:d.df, cv:(d.cv != null && isFinite(d.cv)) ? d.cv*100 : null, n:(d.cor||[]).length};})
+      .filter(function(L){return L.cv != null && isFinite(L.cv);});
     var cvVals = levelCVs.map(function(L){return L.cv;});
     var meanCV = cvVals.length ? avg(cvVals) : null;
     var worstCV = cvVals.length ? Math.max.apply(null, cvVals) : null;
@@ -3893,12 +3905,12 @@ function RobotQCCard(props) {
       <text x={plotW/2} y={plotH-22} fontSize="10" fill="#30437a" textAnchor="middle" fontFamily="system-ui" fontWeight="600">Relative well concentration (stock = 1)</text>
       <text x={plotW/2} y={plotH-7} fontSize="9" fill="#8e9bb5" textAnchor="middle" fontFamily="system-ui" fontStyle="italic">From your dilution scheme · multiply x by stock conc for absolute concentration</text>
       <text x={14} y={plotH/2} fontSize="10" fill="#30437a" textAnchor="middle" fontFamily="system-ui" fontWeight="600" transform={"rotate(-90, 14, "+(plotH/2)+")"}>Response (blank-corrected)</text>
-      {/* Per-sample: fit line first (under the data line), then connecting polyline, then dots */}
+      {/* Per-sample: solid fit line + data point dots. No connect-the-dots polyline — the fit line
+          is the meaningful trend, and for clean serial-dilution data the two would overlap anyway. */}
       {lines.map(function(L){
         return <g key={L.key}>
-          {L.fitLine && <line x1={L.fitLine.x0} y1={L.fitLine.y0} x2={L.fitLine.x1} y2={L.fitLine.y1} stroke={L.color} strokeWidth="1" strokeDasharray="4,3" opacity="0.45" />}
-          <path d={L.path} stroke={L.color} strokeWidth="1.5" fill="none" opacity="0.85" />
-          {L.pts.map(function(p,pi){return <circle key={pi} cx={p.x} cy={p.y} r="3" fill={L.color} stroke="#fff" strokeWidth="1" />;})}
+          {L.fitLine && <line x1={L.fitLine.x0} y1={L.fitLine.y0} x2={L.fitLine.x1} y2={L.fitLine.y1} stroke={L.color} strokeWidth="1.5" opacity="0.85" />}
+          {L.pts.map(function(p,pi){return <circle key={pi} cx={p.x} cy={p.y} r="3.5" fill={L.color} stroke="#fff" strokeWidth="1.2" />;})}
         </g>;
       })}
     </svg>;
@@ -3938,31 +3950,45 @@ function RobotQCCard(props) {
   var tdS = {padding:"6px 10px",fontSize:11,color:"#1d1d1f",borderBottom:"1px solid #f0f0f3"};
 
   return <div style={{background:"#fff",borderRadius:14,border:"1px solid #e5e5ea",padding:"1.25rem",marginBottom:"1.25rem"}}>
-    <div style={{marginBottom:"0.75rem"}}>
-      <h4 style={{fontSize:14,fontWeight:700,margin:"0 0 4px 0",color:"#30437a"}}>🤖 Robot QC: Per-Sample Curve Quality</h4>
-      <p style={{fontSize:11,color:"#6e6e73",margin:0,lineHeight:1.55}}>Each sample is treated as its own mini standard curve: response vs 1/DF is fit linearly, R²/slope/intercept reported. Per-sample within-replicate CV checks dispense reproducibility; cross-sample slope CV checks aliquoting reproducibility. <strong>Most useful when selected samples are theoretical replicates (e.g., aliquots of one stock), but also works for any single sample.</strong></p>
+    <div style={{marginBottom:enabled?"0.75rem":0}}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,flexWrap:"wrap"}}>
+        <h4 style={{fontSize:14,fontWeight:700,margin:0,color:"#30437a"}}>🤖 Robot QC: Per-Sample Curve Quality</h4>
+        <div style={{display:"flex",gap:6,alignItems:"center"}}>
+          <span style={{fontSize:11,color:"#6e6e73",fontStyle:"italic",marginRight:4}}>Robot validation run?</span>
+          <button onClick={function(){setEnabled(true);}} style={{fontSize:11,padding:"4px 12px",border:"1px solid "+(enabled?"#1b7f6a":"#c6d3e8"),borderRadius:6,background:enabled?"#e8f5ea":"#fff",color:enabled?"#1b5a4d":"#30437a",cursor:"pointer",fontWeight:enabled?700:600}}>Yes</button>
+          <button onClick={function(){setEnabled(false);}} style={{fontSize:11,padding:"4px 12px",border:"1px solid "+(!enabled?"#6f7fa0":"#c6d3e8"),borderRadius:6,background:!enabled?"#f4f4f6":"#fff",color:!enabled?"#1d1d1f":"#30437a",cursor:"pointer",fontWeight:!enabled?700:600}}>No</button>
+        </div>
+      </div>
+      {enabled && <p style={{fontSize:11,color:"#6e6e73",margin:"6px 0 0 0",lineHeight:1.55}}>Each sample is treated as its own mini standard curve: response vs concentration is fit linearly, R²/slope/intercept reported. Per-sample within-replicate CV checks dispense reproducibility; cross-sample slope CV checks aliquoting reproducibility. <strong>Most useful when selected samples are theoretical replicates (e.g., aliquots of one stock), but also works for any single sample.</strong></p>}
+      {!enabled && <p style={{fontSize:11,color:"#8e9bb5",margin:"6px 0 0 0",lineHeight:1.55,fontStyle:"italic"}}>Click "Yes" if your samples are theoretical replicates from a shared stock (e.g., a robot pipetting validation run). Otherwise this analysis isn't meaningful for your data.</p>}
     </div>
 
-    {/* Sample picker */}
-    <div style={{marginBottom:"0.85rem",padding:"8px 10px",background:"#f7faff",border:"1px solid #e5e9f0",borderRadius:8}}>
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6,flexWrap:"wrap",gap:8}}>
-        <div style={{fontSize:11,fontWeight:700,color:"#30437a"}}>Samples ({selectedSamples.length} of {allSamples.length} selected)</div>
-        <div style={{display:"flex",gap:6}}>
+    {enabled && <div>
+
+    {/* Sample picker — dropdown style for runs with many samples */}
+    <div style={{marginBottom:"0.85rem",position:"relative"}}>
+      <button onClick={function(){setPickerOpen(!pickerOpen);}} style={{width:"100%",padding:"8px 12px",background:"#f7faff",border:"1px solid #e5e9f0",borderRadius:8,fontSize:12,color:"#30437a",cursor:"pointer",fontWeight:600,textAlign:"left",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <span>Samples in replicate group: <strong>{selectedSamples.length} of {allSamples.length}</strong> selected</span>
+        <span style={{fontSize:10,color:"#6e6e73"}}>{pickerOpen ? "▲ close" : "▼ change"}</span>
+      </button>
+      {pickerOpen && <div style={{marginTop:6,padding:"10px 12px",background:"#fff",border:"1px solid #c6d3e8",borderRadius:8,boxShadow:"0 8px 20px rgba(11,42,111,0.10)",maxHeight:280,overflowY:"auto"}}>
+        <div style={{display:"flex",justifyContent:"flex-end",gap:6,marginBottom:8,paddingBottom:8,borderBottom:"1px solid #f0f0f3"}}>
           <button onClick={function(){setAll(true);}} style={{fontSize:10,padding:"3px 8px",border:"1px solid #c6d3e8",borderRadius:6,background:"#fff",color:"#30437a",cursor:"pointer",fontWeight:600}}>Select all</button>
           <button onClick={function(){setAll(false);}} style={{fontSize:10,padding:"3px 8px",border:"1px solid #c6d3e8",borderRadius:6,background:"#fff",color:"#30437a",cursor:"pointer",fontWeight:600}}>Clear</button>
         </div>
-      </div>
-      <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
-        {allSamples.map(function(s, idx){
-          var isSel = !!sel[s.key];
-          var idxInSel = selectedSamples.findIndex(function(ss){return ss.key===s.key;});
-          var col = isSel && idxInSel>=0 ? sampleColors[idxInSel % sampleColors.length] : "#aeaeb2";
-          return <label key={s.key} style={{display:"flex",alignItems:"center",gap:5,padding:"3px 8px",background:isSel?"#fff":"#f4f4f6",border:"1px solid "+(isSel?col:"#d8dfeb"),borderRadius:6,fontSize:11,cursor:"pointer",userSelect:"none"}}>
-            <input type="checkbox" checked={isSel} onChange={function(){toggle(s.key);}} style={{margin:0,cursor:"pointer"}} />
-            <span style={{fontWeight:isSel?700:500,color:isSel?col:"#6e6e73"}}>{s.name}</span>
-          </label>;
-        })}
-      </div>
+        <div style={{display:"flex",flexDirection:"column",gap:4}}>
+          {allSamples.map(function(s, idx){
+            var isSel = !!sel[s.key];
+            var idxInSel = selectedSamples.findIndex(function(ss){return ss.key===s.key;});
+            var col = isSel && idxInSel>=0 ? sampleColors[idxInSel % sampleColors.length] : "#aeaeb2";
+            return <label key={s.key} style={{display:"flex",alignItems:"center",gap:8,padding:"4px 8px",borderRadius:6,fontSize:12,cursor:"pointer",userSelect:"none",background:isSel?"#f7faff":"transparent",border:"1px solid "+(isSel?col:"transparent")}}>
+              <input type="checkbox" checked={isSel} onChange={function(){toggle(s.key);}} style={{margin:0,cursor:"pointer"}} />
+              <span style={{display:"inline-block",width:10,height:10,background:isSel?col:"#d8dfeb",borderRadius:2}}></span>
+              <span style={{fontWeight:isSel?700:500,color:isSel?col:"#6e6e73"}}>{s.name}</span>
+            </label>;
+          })}
+        </div>
+      </div>}
     </div>
 
     {/* Plot — works with even 1 sample selected */}
@@ -4021,7 +4047,7 @@ function RobotQCCard(props) {
       <div style={{padding:"8px 10px",background:"#f4f7fb",border:"1px solid #d8dfeb",borderRadius:6}}>
         <div style={{fontSize:9,fontWeight:700,color:"#6e6e73",textTransform:"uppercase",letterSpacing:0.4,marginBottom:2}}>Mean slope</div>
         <div style={{fontSize:14,fontWeight:800,color:"#30437a"}}>{slopeMean != null ? sig3(slopeMean) : "—"}</div>
-        <div style={{fontSize:9,color:"#8e9bb5",marginTop:1}}>signal per (1/DF) unit</div>
+        <div style={{fontSize:9,color:"#8e9bb5",marginTop:1}}>signal per unit relative conc</div>
       </div>
     </div>}
 
@@ -4033,6 +4059,8 @@ function RobotQCCard(props) {
     {/* Instructor-mode ICH/ISO context */}
     {instructor && <div style={{padding:"8px 12px",background:"#fffaf0",border:"1px solid #f0d6a0",borderRadius:8,fontSize:10,color:"#8a6420",lineHeight:1.55}}>
       <strong>For reference:</strong> Per-sample R² ≥ 0.99 is the conventional acceptance for a calibration curve (ICH Q2(R2)). Within-replicate CV ≤ 5% is tighter than ICH M10's bioanalytical limit (15%, or 20% at LLOQ) — the rationale is to flag robot dispense issues before they consume your validation budget. ISO 8655 specifies pipettor imprecision (CV) ≤ 1–3% for fixed-volume pipettes. Cross-sample slope CV ≤ 5% indicates that aliquots from a shared stock produce similar calibration curves — the canonical robot-prep reproducibility check.
+    </div>}
+
     </div>}
   </div>;
 }
@@ -8174,7 +8202,7 @@ export default function App() {
         {cfg.layout!=="autosampler" && <div style={{marginTop:"1.25rem",background:"linear-gradient(180deg,#fbfeff,#f4fbff)",border:"1px solid #e5edf7",borderRadius:20,padding:"1.2rem 1.25rem",boxShadow:"inset 0 1px 0 rgba(255,255,255,0.8)"}}>
           <label style={{display:"block",fontSize:13,fontWeight:800,marginBottom:4,color:"#18233f"}}>Plate orientation</label>
           <div style={{fontSize:12,color:"#6f7fa0",marginBottom:14}}>Pick the orientation that matches how you loaded the plate. The math is the same; only the wells map differently.</div>
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:14}}>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(3, minmax(0, 1fr))",gap:14}}>
             {(function(){
               var renderOpt=function(id, title, blurb, svg){
                 var sel = cfg.layout===id;
@@ -8210,7 +8238,7 @@ export default function App() {
                 var wellW = (plateW - 26) / cols;
                 var wellH = (plateH - 22) / rows;
                 var wellR = Math.min(wellW, wellH) * 0.38;
-                return <svg viewBox={"0 0 "+W+" "+H} width={W} height={H} xmlns="http://www.w3.org/2000/svg">
+                return <svg viewBox={"0 0 "+W+" "+H} style={{width:"100%",height:"auto",maxWidth:W,display:"block"}} xmlns="http://www.w3.org/2000/svg">
                   {/* Plate outer shell */}
                   <rect x={plateX} y={plateY} width={plateW} height={plateH} rx={8} fill="#eef2f7" stroke="#9aa4b8" strokeWidth="1"/>
                   {/* Column numbers */}
