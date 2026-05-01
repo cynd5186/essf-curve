@@ -5,9 +5,21 @@ var sdc = function(a) { if (a.length<2) return 0; var m=avg(a); return Math.sqrt
 var cvc = function(a) { var m=avg(a); return m ? sdc(a)/Math.abs(m) : Infinity; };
 var med = function(a) { var s=a.slice().sort(function(x,y){return x-y;}); var m=Math.floor(s.length/2); return s.length%2 ? s[m] : (s[m-1]+s[m])/2; };
 var APP_NAME = "eSSF Curve";
-var APP_VERSION = "v5ar";
+var APP_VERSION = "v5d3";
+
+// Plain-language tooltip texts — used in many places via `title` attr on inline spans so
+// analysts (who don't have the time/context for the long instructor-mode prose) can still
+// hover for a definition. Keeping them at module scope so they're shared across components.
+//
+// DILUTIONAL_LINEARITY_TIP is intentionally written for a high-school-junior reading level —
+// the long version is in DILUTIONAL_LINEARITY_LONG and shown in click-to-expand panels.
+var DILUTIONAL_LINEARITY_TIP = "Dilutional linearity (in plain English): if you dilute a sample by 1:10 and 1:100 and measure both, you should get the same answer back after multiplying each by its dilution factor. If they don't match (within 80–120%), something's interfering with the measurement.";
+var DILUTIONAL_LINEARITY_LONG = "Imagine a stock solution at 100 mg/mL. You dilute 1:10 (now 10 mg/mL), measure it, multiply your reading by 10 to undo the dilution — you should get back to 100 mg/mL.\n\nNow dilute the same stock 1:100 (now 1 mg/mL). Measure, multiply by 100. You should still get 100 mg/mL.\n\nIf both dilutions give about the same answer (within ±20% — say 90 to 110 mg/mL), the assay has DILUTIONAL LINEARITY. The math works. You can trust readings at any of those dilution levels.\n\nIf they don't agree — say 1:10 reads 100 mg/mL but 1:100 reads 130 mg/mL — something's wrong. Common causes:\n\n• MATRIX INTERFERENCE: stuff in the sample (salts, lipids, other proteins) messes with the measurement at high concentration. Diluting more lets the matrix get diluted away too.\n• HOOK EFFECT: at very high concentrations, the signal saturates and even drops back down. So a less-diluted reading may be falsely LOW.\n• NON-PARALLELISM: the sample's signal-vs-concentration curve has a different shape than the standard's curve. The standard is pure protein in clean buffer; your sample is the same protein in real biology, which doesn't always behave the same.\n\nThis is why ICH M10 wants neighboring dilutions to agree: passing dilutional linearity gives you confidence that the answer you're reporting reflects what's actually in the sample.";
+var LLOQ_TIP = "LLOQ = Lower Limit of Quantitation: the lowest concentration the assay can quantitate with acceptable accuracy and precision. ICH M10 allows wider acceptance at LLOQ (accuracy 75–125%, CV ≤20%) because measurement noise is intrinsically larger at the bottom of the curve.";
+var BLOQ_TIP = "BLOQ = Below Limit of Quantitation: a sample whose result fell below the LLOQ. Should not be reported as a numeric concentration; flag as <LLOQ instead.";
+var SST_TIP = "SST = System Suitability sample: an independently-prepared known concentration that travels through the assay alongside unknowns. Its observed result is compared to the expected. If accuracy is within 80–120%, the workflow (matrix + dilutions + curve fit) is quantitating accurately for that concentration.";
 var APP_TAGLINE = "Curve analysis, fitting & quantitation";
-var APP_SUBTITLE = "Plate-based assay analysis & quantitation";
+var APP_SUBTITLE = "Curve, qualify, validate.";
 var APP_SUPPORT = "Designed for plate-based assay workflows";
 var BRAND_IMAGE = "./assets/essf-curve-brand-board.png";
 var BRAND_LOGO = "./assets/essf-curve-logo-clean.png";
@@ -36,10 +48,26 @@ var sig3 = function(v) {
   }
   return Number(v).toPrecision(3);
 };
+// fmtResponse: format optical-response / peak-area values. For LC-MS peak areas (1e6+), uses
+// scientific notation (e.g. "1.23e7"). For smaller values (absorbance, fluorescence units),
+// falls back to sig3. Threshold = 1e5 — below that, normal display is fine.
+var fmtResponse = function(v) {
+  if (v==null||isNaN(v)) return "---";
+  if (v===0) return "0.00";
+  var abs = Math.abs(v);
+  if (abs >= 1e5 || abs < 0.001) {
+    // Scientific notation with 3 sig figs
+    var exp = Math.floor(Math.log10(abs));
+    var mantissa = v / Math.pow(10, exp);
+    return mantissa.toFixed(2) + "e" + (exp >= 0 ? "+" + exp : exp);
+  }
+  return sig3(v);
+};
 var fm4 = function(v) { if (v==null||isNaN(v)) return "---"; return Number(v).toFixed(4); };
 var fpct = function(v) { if (v==null||isNaN(v)||!isFinite(v)) return "---"; return (v*100).toFixed(1)+"%"; };
 var LE = "ABCDEFGH";
 var pDil = function(s) { if (!s) return NaN; var t=s.trim(); if (t.indexOf("/")>=0) { var p=t.split("/"); return p[1]*1 ? p[0]*1/(p[1]*1) : NaN; } return parseFloat(t); };
+var pOptionalDil = function(s) { var v=pDil(s); return (!isNaN(v)&&isFinite(v)&&v>0) ? v : 1; };
 // Format a dilution factor (the "N" in "1:N" or "N×") for compact display.
 // Numbers up to `sciThreshold` show as integers when clean, otherwise 3 sig figs.
 // Numbers ≥ sciThreshold switch to compact scientific notation like "1e+4" or "5e+5".
@@ -79,7 +107,139 @@ var buildDilutionPreview = function(xf1, xs, n, format, sciThreshold) {
   }
   return out;
 };
+var buildBackcalcPreview = function(xf1, xs, n, sciThreshold) {
+  if (!isFinite(xf1) || !isFinite(xs) || xf1 <= 0 || xs <= 0 || n <= 0) return null;
+  var out = [];
+  for (var d = 0; d < n; d++) {
+    var df = xf1 * Math.pow(xs, d);
+    if (!isFinite(df) || df <= 0) return null;
+    out.push(fmtDilNum(1 / df, sciThreshold || 100000) + "×");
+  }
+  return out;
+};
 function linReg(x,y) { var n=x.length; if(n<2) return {slope:0,intercept:0,r2:0}; var sx=0,sy=0,sxx=0,sxy=0,syy=0; for(var i=0;i<n;i++){sx+=x[i];sy+=y[i];sxx+=x[i]*x[i];sxy+=x[i]*y[i];syy+=y[i]*y[i];} var d=n*sxx-sx*sx; if(Math.abs(d)<1e-15) return {slope:0,intercept:0,r2:0}; var sl=(n*sxy-sx*sy)/d, ic=(sy-sl*sx)/n, tot=syy-sy*sy/n, rs=syy-ic*sy-sl*sxy; return {slope:sl,intercept:ic,r2:tot?1-rs/tot:0}; }
+
+// Log-log linear regression: fits log10(y) = slope*log10(x) + intercept. The model is y = (10^intercept) * x^slope,
+// equivalently a power law. Useful in LC-MS and other wide-dynamic-range assays where a single-pass linear fit
+// on un-transformed data is dominated by the high-conc points and underweights the low end.
+//   To predict y from x:  y = pow(10, slope * log10(x) + intercept)
+//   To predict x from y:  x = pow(10, (log10(y) - intercept) / slope)
+// Both transforms require x > 0 and y > 0; pairs with non-positive values are skipped.
+// Returns {slope, intercept, r2} on the LOG-TRANSFORMED data (so r2 reflects fit quality on log-log axes).
+function logLogReg(x,y) {
+  var lx=[], ly=[];
+  for(var i=0;i<x.length;i++){
+    if(x[i]>0 && y[i]>0 && isFinite(x[i]) && isFinite(y[i])){
+      lx.push(Math.log10(x[i]));
+      ly.push(Math.log10(y[i]));
+    }
+  }
+  if(lx.length < 2) return {slope:0, intercept:0, r2:0};
+  return linReg(lx, ly);
+}
+
+// Autosampler-mode standard-curve helpers
+//
+// In vials mode, the data-entry table references standards by integer level (1, 2, 3, ...). The
+// actual concentration for each level is computed from General Information settings:
+//   - cfg.asStdMode === "serial": top conc × DF^(level-1). User enters top conc + DF once, every
+//     level gets its concentration via geometric series.
+//   - cfg.asStdMode === "discrete": each level's concentration is typed individually into a small
+//     editable list stored in cfg.asDiscreteLevels (JSON array of strings).
+//
+// asStandardConcForLevel(level, cfg) returns the actual concentration for a given level number.
+// Returns null if the level cannot be resolved (e.g., discrete mode but level beyond the list).
+//
+// The unit returned is whatever the analyst set as cfg.unit. The serial dilution factor uses the
+// pDil parser so accepts "1/2", "1:2", or "0.5" — same as the plate workflow.
+function asStandardConcForLevel(level, cfg) {
+  level = parseInt(level);
+  if (!isFinite(level) || level < 1) return null;
+  // Determine the level order. Default "highest" preserves backward compat: Level 1 = top, Level N = bottom.
+  // "lowest" inverts: Level 1 = bottom, Level N = top.
+  var levelOrder = (cfg && cfg.asLevelOrder) || "highest";
+  if (cfg.asStdMode === "discrete") {
+    var list = (function(){try{var x=JSON.parse(cfg.asDiscreteLevels||"[]");return Array.isArray(x)?x:[];}catch(_){return[];}})();
+    var nonEmpty = list.filter(function(v){return parseFloat(v) > 0;});
+    if (level > nonEmpty.length) return null;
+    // For "lowest" mode: level 1 → list[N-1], level N → list[0]. Sort the list by VALUE first
+    // so the inversion is conceptually "lowest concentration at top". For "highest" mode (default):
+    // use the list as the analyst entered it (level 1 = first entry).
+    var idx = (levelOrder === "lowest") ? (nonEmpty.length - level) : (level - 1);
+    var v = parseFloat(nonEmpty[idx]);
+    return isFinite(v) && v > 0 ? v : null;
+  }
+  // Default: serial dilution
+  var top = parseFloat(cfg.asTopConc);
+  if (!isFinite(top) || top <= 0) return null;
+  var df = pDil(cfg.asSerialDF);
+  if (!isFinite(df) || df <= 0 || df >= 1) return null;  // DF must be a real dilution-down step
+  if (levelOrder === "lowest") {
+    // Need a total level count for the inversion. Use cfg.asNStdLevels.
+    var total = parseInt(cfg.asNStdLevels) || 6;
+    if (level > total) return null;
+    // Level 1 = top × df^(total-1) (lowest); Level total = top (highest)
+    return top * Math.pow(df, total - level);
+  }
+  // "highest" — Level 1 = top, Level N = top × df^(N-1)
+  return top * Math.pow(df, level - 1);
+}
+
+// Returns the count of standard levels currently configured in General Info.
+//   - Discrete mode: count of non-empty entries in cfg.asDiscreteLevels
+//   - Serial mode: returns a default of 6 levels (the typical autosampler curve length).
+//     There's no inherent count in serial mode — the DF series is open-ended — so we pick a
+//     sensible default and let the user adjust on Data Entry by adding/removing dilution rows.
+//
+// Used by Data Entry to size the standard-block grid.
+function asNumLevels(cfg) {
+  if (cfg.asStdMode === "discrete") {
+    var list = (function(){try{var x=JSON.parse(cfg.asDiscreteLevels||"[]");return Array.isArray(x)?x:[];}catch(_){return[];}})();
+    var nonEmpty = list.filter(function(v){return parseFloat(v) > 0;}).length;
+    return nonEmpty > 0 ? nonEmpty : 6;
+  }
+  // Serial mode: default to 6 levels (most LC-MS calibration curves are 5-8 levels).
+  return 6;
+}
+
+var logisticY=function(x,p,model){var A=p.A,D=p.D,C=Math.max(p.C,1e-12),B=Math.max(p.B,1e-6),G=model==="5pl"?Math.max(p.G,1e-6):1;return D+(A-D)/Math.pow(1+Math.pow(Math.max(x,1e-12)/C,B),G);};
+var logisticInv=function(y,p,model){var A=p.A,D=p.D,C=Math.max(p.C,1e-12),B=Math.max(p.B,1e-6),G=model==="5pl"?Math.max(p.G,1e-6):1;var denom=y-D;if(Math.abs(denom)<1e-12)return null;var q=(A-D)/denom;if(q<=0)return null;var inner=Math.pow(q,1/G)-1;if(inner<=0||!isFinite(inner))return null;var x=C*Math.pow(inner,1/B);return isFinite(x)&&x>0?x:null;};
+function fitLogistic(x,y,model){
+  var n=x.length;if(n<(model==="5pl"?5:4))return null;
+  var minX=Math.min.apply(null,x.filter(function(v){return v>0;})),maxX=Math.max.apply(null,x),minY=Math.min.apply(null,y),maxY=Math.max.apply(null,y);
+  if(!isFinite(minX)||!isFinite(maxX)||maxX<=0||maxY===minY)return null;
+  var tot=y.reduce(function(s,v){return s+Math.pow(v-avg(y),2);},0);
+  // More initial guesses than before — improves convergence on noisy data with limited replicates.
+  // Cover B from 0.5 to 3.0 (typical biological slopes), plus one assuming inverted curve direction.
+  var starts = [];
+  [0.5, 0.8, 1.0, 1.4, 2.0, 3.0].forEach(function(b){
+    starts.push({A:minY, D:maxY, C:Math.sqrt(minX*maxX), B:b, G:1});
+    starts.push({A:maxY, D:minY, C:Math.sqrt(minX*maxX), B:b, G:1});  // inverted (signal decreases with conc)
+  });
+  var best=null;
+  var score=function(p){var s=0;for(var i=0;i<n;i++){var e=logisticY(x[i],p,model)-y[i];if(!isFinite(e))return Infinity;s+=e*e;}return s;};
+  starts.forEach(function(st){
+    var p={A:st.A,D:st.D,C:st.C,B:st.B,G:st.G},step={A:(maxY-minY)||1,D:(maxY-minY)||1,C:Math.log(maxX/minX||10),B:0.75,G:0.5};
+    var theta=function(){return [p.A,p.D,Math.log(p.C),Math.log(p.B),Math.log(p.G)];};
+    var apply=function(t){p.A=t[0];p.D=t[1];p.C=Math.exp(t[2]);p.B=Math.exp(t[3]);p.G=Math.exp(t[4]);};
+    var stp=[step.A,step.D,step.C,step.B,step.G],t=theta(),cur=score(p);
+    for(var iter=0;iter<220;iter++){
+      var improved=false;
+      for(var j=0;j<(model==="5pl"?5:4);j++){
+        var cand=t.slice();cand[j]+=stp[j];apply(cand);var sc=score(p);
+        if(sc<cur){t=cand;cur=sc;improved=true;continue;}
+        cand=t.slice();cand[j]-=stp[j];apply(cand);sc=score(p);
+        if(sc<cur){t=cand;cur=sc;improved=true;continue;}
+        apply(t);
+      }
+      if(!improved){for(j=0;j<stp.length;j++)stp[j]*=0.72;if(Math.max.apply(null,stp)<1e-6)break;}
+    }
+    apply(t);cur=score(p);
+    if(!best||cur<best.sse)best={p:{A:p.A,D:p.D,C:p.C,B:p.B,G:p.G},sse:cur};
+  });
+  if(!best)return null;
+  return {model:model,params:best.p,sse:best.sse,r2:tot?1-best.sse/tot:0};
+}
 var EP = function() { return Array.from({length:8}, function(){return Array(12).fill("");}); };
 // Wilcoxon signed-rank test for paired samples. Returns {W, p, n} or null if N<3.
 // Uses normal approximation for larger N (N>=10), exact p unavailable.
@@ -157,15 +317,51 @@ var SM = [
   {id:"lowest_cv",short:"Best CV",name:"Lowest CV only",desc:"Single lowest %CV."},
 ];
 
-function selAll(dils,midA) {
+function selAll(dils,midA,assayKind) {
   var ir=dils.filter(function(d){return d.ir&&d.cv<.20&&d.cS!=null;});var r={};
   SM.forEach(function(m) {
     if(!ir.length){r[m.id]={conc:null,dil:null,cv:null,note:"No qualified",meth:m.short};return;}
-    if(m.id==="literature"){var q=ir.filter(function(d){return d.cv<=.15;});if(!q.length){r[m.id]={conc:null,dil:null,cv:null,note:"None CV<=15%",meth:m.short};return;}q.sort(function(a,b){return a.di-b.di;});r[m.id]={conc:q[0].cS,dil:q[0].di,cv:q[0].cv,note:"Least-diluted (#"+q[0].di+")",meth:m.short};}
+    if(m.id==="literature"){
+      var q=ir.filter(function(d){return d.cv<=.15;});
+      if(assayKind==="elisa"){
+        var qLba=q.filter(function(d){return d.lbaOK;});
+        if(qLba.length){q=qLba;}
+      }
+      if(!q.length){r[m.id]={conc:null,dil:null,cv:null,note:"None CV<=15%",meth:m.short};return;}
+      q.sort(function(a,b){return a.di-b.di;});
+      r[m.id]={conc:q[0].cS,dil:q[0].di,cv:q[0].cv,note:(assayKind==="elisa"?(q[0].lbaOK?"Least-diluted qualified + dilutionally linear":"Least-diluted in range; no parallel neighbor"):"Least-diluted (#"+q[0].di+")"),meth:m.short};
+    }
     else if(m.id==="mid_curve"){var so=ir.slice().sort(function(a,b){return Math.abs(a.avgA-midA)-Math.abs(b.avgA-midA);});r[m.id]={conc:so[0].cS,dil:so[0].di,cv:so[0].cv,note:"Mid-curve",meth:m.short};}
-    else if(m.id==="avg_all_ir"){r[m.id]={conc:avg(ir.map(function(d){return d.cS;})),dil:null,cv:null,note:"Avg "+ir.length,meth:m.short};}
-    else if(m.id==="weighted_avg"){var wt=ir.map(function(d){return d.cv>0?1/d.cv:100;});var ws=wt.reduce(function(s,w){return s+w;},0);r[m.id]={conc:ir.reduce(function(s,d,i){return s+d.cS*wt[i];},0)/ws,dil:null,cv:null,note:"Weighted",meth:m.short};}
-    else if(m.id==="median_ir"){r[m.id]={conc:med(ir.map(function(d){return d.cS;})),dil:null,cv:null,note:"Median",meth:m.short};}
+    // For averaging strategies, the meaningful CV is the SPREAD of the averaged sample concentrations (cS),
+    // not any individual dilution's replicate CV. Small CV here means the dilutions agree well = good
+    // dilutional linearity. Large CV means the dilutions disagree = report is suspect.
+    else if(m.id==="avg_all_ir"){
+      var concs = ir.map(function(d){return d.cS;});
+      var mean = avg(concs);
+      var sdSq = concs.length > 1 ? concs.reduce(function(s,v){return s + (v-mean)*(v-mean);}, 0) / (concs.length - 1) : 0;
+      var sd = Math.sqrt(sdSq);
+      var aggCv = (mean > 0 && concs.length > 1) ? sd/mean : null;
+      r[m.id]={conc:mean,dil:null,cv:aggCv,note:"Avg "+ir.length,meth:m.short};
+    }
+    else if(m.id==="weighted_avg"){
+      var wt=ir.map(function(d){return d.cv>0?1/d.cv:100;});
+      var ws=wt.reduce(function(s,w){return s+w;},0);
+      var wmean = ir.reduce(function(s,d,i){return s+d.cS*wt[i];},0)/ws;
+      // Weighted variance: sum(w * (x-wmean)^2) / sum(w)
+      var wvar = ir.length > 1 ? ir.reduce(function(s,d,i){return s + wt[i]*(d.cS-wmean)*(d.cS-wmean);}, 0) / ws : 0;
+      var wsd = Math.sqrt(wvar);
+      var aggCv2 = (wmean > 0 && ir.length > 1) ? wsd/wmean : null;
+      r[m.id]={conc:wmean,dil:null,cv:aggCv2,note:"Weighted",meth:m.short};
+    }
+    else if(m.id==="median_ir"){
+      var medVal = med(ir.map(function(d){return d.cS;}));
+      var concs2 = ir.map(function(d){return d.cS;});
+      var mean2 = avg(concs2);
+      var sdSq2 = concs2.length > 1 ? concs2.reduce(function(s,v){return s + (v-mean2)*(v-mean2);}, 0) / (concs2.length - 1) : 0;
+      var sd2 = Math.sqrt(sdSq2);
+      var aggCv3 = (mean2 > 0 && concs2.length > 1) ? sd2/mean2 : null;
+      r[m.id]={conc:medVal,dil:null,cv:aggCv3,note:"Median",meth:m.short};
+    }
     else if(m.id==="lowest_cv"){var b2=ir.slice().sort(function(a,b){return a.cv-b.cv;})[0];r[m.id]={conc:b2.cS,dil:b2.di,cv:b2.cv,note:"Best CV",meth:m.short};}
   });return r;
 }
@@ -175,17 +371,26 @@ function cvTx(v){if(v==null||isNaN(v)||!isFinite(v))return"#999";var p=v*100;if(
 function CVB(props){return <span style={{background:cvBg(props.val),color:cvTx(props.val),padding:"3px 10px",borderRadius:20,fontSize:11,fontWeight:600,display:"inline-block"}}>{fpct(props.val)}</span>;}
 
 function MathWalk(props) {
-  var d=props.d,m=props.slope,b=props.intercept,sn=props.sn,target=props.target,unit=props.unit,instructor=props.instructor;
+  var d=props.d,m=props.slope,b=props.intercept,sn=props.sn,target=props.target,unit=props.unit,instructor=props.instructor,curveModel=props.curveModel||"linear";
+  var params=props.params||{};
   if(!d) return null;
   // Display-unit conversion: if displayUnit differs from input unit, convert slope and conc outputs.
   // Intercept does NOT change. Optical-response (avgA, blank, raw) does NOT change.
   var dispUnit = props.displayUnit || unit;
   var convFactor = convertConc(1, unit, dispUnit);
   if (convFactor == null || !isFinite(convFactor) || convFactor === 0) convFactor = 1;
-  var mDisp = m / convFactor;
+  var mDisp = m!=null ? m / convFactor : null;
   var bDisp = b;
   var cWDisp = d.cW != null ? d.cW * convFactor : null;
   var cSDisp = d.cS != null ? d.cS * convFactor : null;
+  // Helper to render a number as superscript using Unicode superscript chars where possible,
+  // falling back to <sup> for arbitrary numbers (decimals, large numbers).
+  var sup = function(val){
+    return <sup style={{fontSize:"0.75em",verticalAlign:"super",lineHeight:0}}>{val}</sup>;
+  };
+  var sub = function(val){
+    return <sub style={{fontSize:"0.75em",verticalAlign:"sub",lineHeight:0}}>{val}</sub>;
+  };
   var bx={padding:"10px 14px",margin:"8px 0",background:"#f8fafd",borderRadius:10,fontSize:13,lineHeight:1.9,fontFamily:"monospace",borderLeft:"3px solid #0071e3"};
   var lb={fontSize:11,color:"#6e6e73",fontWeight:700,textTransform:"uppercase",letterSpacing:.5,marginTop:14,marginBottom:4};
   return (
@@ -193,26 +398,50 @@ function MathWalk(props) {
       <div style={{fontSize:15,fontWeight:700,color:"#30437a",marginBottom:14}}>Calculation walkthrough: Dilution #{d.di}</div>
       <div style={lb}>Step 1: Standard curve equation</div>
       <div style={bx}>
-        <div>y = mx + b</div>
-        <div>y = ({sig3(mDisp)}) x + ({sig3(bDisp)})</div>
+        {curveModel==="linear" ? <div>
+          <div>y = mx + b</div>
+          <div>y = ({sig3(mDisp)}) x + ({sig3(bDisp)})</div>
+        </div> : (curveModel==="loglog" ? <div>
+          <div>log{sub("10")}(y) = m · log{sub("10")}(x) + b</div>
+          <div>log{sub("10")}(y) = ({sig3(m)}) · log{sub("10")}(x) + ({sig3(b)})</div>
+        </div> : <div>
+          <div style={{marginBottom:6}}>{curveModel.toUpperCase()} logistic fit:</div>
+          {/* Render equation as a proper fraction: y = D + (A - D) / (1 + (x/C)^B)^G */}
+          <div style={{display:"flex",alignItems:"center",gap:6,fontSize:14,marginTop:4,flexWrap:"wrap"}}>
+            <span>y =</span>
+            <span>{params.D!=null ? sig3(params.D*convFactor) : "D"}</span>
+            <span>+</span>
+            <Fraction
+              top={<span style={{whiteSpace:"nowrap"}}>{params.A!=null && params.D!=null ? sig3((params.A-params.D)*convFactor) : "(A − D)"}</span>}
+              bottom={<span style={{whiteSpace:"nowrap"}}>
+                (1 + (x / {params.C!=null ? sig3(params.C*convFactor) : "C"}){sup(params.B!=null ? sig3(params.B) : "B")})
+                {curveModel==="5pl" && <span>{sup(params.G!=null ? sig3(params.G) : "G")}</span>}
+              </span>}
+              w={260}
+            />
+          </div>
+          {params.A!=null && <div style={{fontSize:11,color:"#6e6e73",marginTop:8,fontStyle:"italic",fontFamily:"system-ui,-apple-system,sans-serif"}}>
+            Fitted parameters: A (top asymptote) = {sig3(params.A*convFactor)} {dispUnit}; D (bottom asymptote) = {sig3(params.D*convFactor)} {dispUnit}; C (inflection point) = {sig3(params.C*convFactor)} {dispUnit}; B (slope factor) = {sig3(params.B)}
+            {curveModel==="5pl" && params.G!=null && <span>; G (asymmetry) = {sig3(params.G)}</span>}
+          </div>}
+        </div>)}
         {instructor && <div style={{marginTop:8,paddingTop:8,borderTop:"1px dashed #cfd8e3",color:"#6e6e73",fontSize:12}}>
           <div style={{fontStyle:"italic",marginBottom:2,fontFamily:"system-ui,-apple-system,sans-serif",textTransform:"none",letterSpacing:0}}>What the variables represent here:</div>
           <div>y = optical signal (absorbance / fluorescence read by the plate reader)</div>
           <div>x = concentration of {sn} in the well ({dispUnit})</div>
-          <div>m = slope of the standard curve = {sig3(mDisp)}</div>
-          <div>b = y-intercept = {sig3(bDisp)}</div>
+          {curveModel==="linear" ? <div><div>m = slope of the standard curve = {sig3(mDisp)}</div><div>b = y-intercept = {sig3(bDisp)}</div></div> : (curveModel==="loglog" ? <div>The app converts the linear log{sub("10")}–log{sub("10")} fit back to natural y for back-calculation.</div> : <div>The app solves the logistic curve backward to find x from the measured signal.</div>)}
         </div>}
       </div>
       <div style={lb}>Step 2: Blank correction</div>
       <div style={bx}><div>Raw replicates: {d.raw?d.raw.map(function(v){return v.toFixed(3);}).join(", "):"N/A"}</div><div>Blank: {fm4(d.blank)}</div><div>Corrected = Raw - Blank</div><div>Corrected: {d.cor?d.cor.map(function(v){return v.toFixed(4);}).join(", "):"N/A"}</div></div>
       <div style={lb}>Step 3: Average + CV</div>
-      <div style={bx}><div>Avg corrected = {fm4(d.avgA)}</div><div>CV = SD(corrected) / Mean(corrected) = {fpct(d.cv)}</div></div>
+      <div style={bx}><div>Avg corrected = {fmtResponse(d.avgA)}</div><div>CV = SD(corrected) / Mean(corrected) = {fpct(d.cv)}</div></div>
       <div style={lb}>Step 4: Solve for [{sn}] in well</div>
       <div style={bx}>
         {instructor && <div style={{marginBottom:10,paddingBottom:10,borderBottom:"1px dashed #cfd8e3",fontFamily:"system-ui,-apple-system,sans-serif",letterSpacing:0,textTransform:"none"}}>
           <div style={{fontSize:11,color:"#6337b9",fontWeight:700,textTransform:"uppercase",letterSpacing:0.5,marginBottom:6}}>How we rearrange the equation</div>
           <div style={{fontSize:13,color:"#30437a",lineHeight:1.8,fontFamily:"monospace"}}>
-            <div>Start with the standard curve:</div>
+            {curveModel==="linear" ? <div><div>Start with the standard curve:</div>
             <div style={{marginLeft:12,marginTop:2,marginBottom:6}}>y = m x + b</div>
             <div>where y = optical signal, x = [Protein], m = slope, b = intercept.</div>
             <div style={{marginTop:8}}>Subtract b from both sides:</div>
@@ -220,11 +449,14 @@ function MathWalk(props) {
             <div>Divide both sides by m:</div>
             <div style={{marginLeft:12,marginTop:2,marginBottom:6}}>(y &minus; b) / m = x</div>
             <div>Which gives us [Protein] in the well:</div>
-            <div style={{marginLeft:12,marginTop:2,fontWeight:700,color:"#0b2a6f"}}>[Protein]<sub>well</sub> = (y &minus; b) / m</div>
+            <div style={{marginLeft:12,marginTop:2,fontWeight:700,color:"#0b2a6f"}}>[Protein]<sub>well</sub> = (y &minus; b) / m</div></div> : <div>
+              <div>For ELISA, the curve is S-shaped rather than linear.</div>
+              <div style={{marginTop:6}}>The app fits a {curveModel.toUpperCase()} logistic model to the standards, then uses the inverse logistic equation to solve for concentration.</div>
+            </div>}
           </div>
         </div>}
-        <div>x = (y - b) / m</div>
-        <div>x = ({fm4(d.avgA)} - {sig3(bDisp)}) / {sig3(mDisp)}</div>
+        {curveModel==="linear" && <div><div>x = (y - b) / m</div><div>x = ({fmtResponse(d.avgA)} - {sig3(bDisp)}) / {sig3(mDisp)}</div></div>}
+        {curveModel!=="linear" && <div>x = inverse {curveModel.toUpperCase()}({fmtResponse(d.avgA)})</div>}
         <div><strong>x = [{sn}]_well = {cWDisp!=null?sig3(cWDisp):"---"} {dispUnit}</strong></div>
       </div>
       {d.cS!=null&&(<div><div style={lb}>Step 5: Back-calculate sample concentration</div><div style={bx}><div>[{target}]_sample = [{sn}]_well / dilution factor</div><div>= {sig3(cWDisp)} / {fm4(d.df)}</div><div style={{fontSize:15,marginTop:6}}><strong>= {sig3(cSDisp)} {dispUnit}</strong></div></div></div>)}
@@ -238,25 +470,43 @@ function MathWalk(props) {
 
 function StdChart(props) {
   var ref = useRef(null);
+  // Multi-series overlay support:
+  //   When props.series is provided, draw all curves overlaid. Each series object: {label, pts, fn, fL, r2, slope, intercept, params, model, color}.
+  //   props.activeIdx selects which series gets the bold/highlight rendering; others are faded.
+  //   Equation/R² text in the chart header reflects the ACTIVE series only (the focus).
+  //   When props.series is omitted, behavior is identical to the legacy single-curve mode (uses props.pts/fn/fl/r2/slope/intercept/params/curveModel directly).
   useEffect(function() {
-    var cv=ref.current; if(!cv||!props.pts.length) return;
+    var cv=ref.current; if(!cv) return;
+    var multi = Array.isArray(props.series) && props.series.length>0;
+    // Normalize to a series array internally so the draw logic is uniform.
+    var seriesAll = multi ? props.series : [{
+      label: null, pts: props.pts, fn: props.fn, fL: props.fl, r2: props.r2,
+      slope: props.slope, intercept: props.intercept, params: props.params, model: props.curveModel,
+      color: "#2d74ea"
+    }];
+    var activeIdx = multi ? Math.max(0, Math.min(seriesAll.length-1, props.activeIdx||0)) : 0;
+    var active = seriesAll[activeIdx];
+    if(!active || !active.pts || !active.pts.length) return;
     // Display-unit conversion: pts are stored in props.unit; if displayUnit differs, convert x-axis values + slope.
     // y-axis (optical response) does NOT change. Intercept does NOT change.
     var inUnit = props.unit;
     var dispUnit = props.displayUnit || props.unit;
-    // 1 inUnit = (mgMlToUnit(concToMgMl(1, inUnit), dispUnit)) dispUnits
-    // x_disp = x_in * convFactor; slope_disp = slope_in / convFactor; intercept unchanged
     var convFactor = convertConc(1, inUnit, dispUnit);
     if (convFactor == null || !isFinite(convFactor) || convFactor === 0) convFactor = 1;
-    var displaySlope = props.slope / convFactor;
-    var displayIntercept = props.intercept;
+    var displaySlope = active.slope!=null ? active.slope / convFactor : null;
+    var displayIntercept = active.intercept;
     var w=520,h=332,ctx=cv.getContext("2d"),dpr=window.devicePixelRatio||1;
     cv.width=w*dpr; cv.height=h*dpr; ctx.scale(dpr,dpr);
     var pd={top:52,right:30,bottom:60,left:88};
     var cw2=w-pd.left-pd.right, ch=h-pd.top-pd.bottom;
-    var pts=props.pts.map(function(p){return {conc: p.conc*convFactor, avg:p.avg, sd:p.sd};});
-    var xM=Math.max.apply(null,pts.map(function(p){return p.conc;}))*1.15;
-    var yM=Math.max.apply(null,pts.map(function(p){return p.avg+(p.sd||0);}))*1.25;
+    // Map every series' pts into display units; compute combined extents so all curves fit.
+    var seriesPts = seriesAll.map(function(s){
+      return (s.pts||[]).map(function(p){return {conc: p.conc*convFactor, avg:p.avg, sd:p.sd};});
+    });
+    var allPts = seriesPts.reduce(function(a,b){return a.concat(b);},[]);
+    if(!allPts.length) return;
+    var xM=Math.max.apply(null,allPts.map(function(p){return p.conc;}))*1.15;
+    var yM=Math.max.apply(null,allPts.map(function(p){return p.avg+(p.sd||0);}))*1.25;
     var sx=function(v){return pd.left+(v/xM)*cw2;};
     var sy=function(v){return pd.top+ch-(v/yM)*ch;};
     ctx.clearRect(0,0,w,h);
@@ -266,10 +516,12 @@ function StdChart(props) {
     ctx.fillStyle=outer;
     ctx.fillRect(0,0,w,h);
     ctx.fillStyle="#15213d"; ctx.font="700 16px -apple-system,system-ui,sans-serif"; ctx.textAlign="center";
-    ctx.fillText("Standard Curve",w/2,24);
+    ctx.fillText(multi ? "Standard Curves (all plates)" : "Standard Curve", w/2, 24);
     ctx.fillStyle="#7283a7";
     ctx.font="500 11px -apple-system,system-ui,sans-serif";
-    ctx.fillText("Average optical response with SD error bars",w/2,40);
+    // Subtitle: only shown for single-plate (where there's no in-chart dropdown to disambiguate).
+    // Multi-plate suppresses the subtitle to avoid colliding with the Focus dropdown overlay.
+    if(!multi) ctx.fillText("Average optical response with SD error bars", w/2, 40);
     var grad=ctx.createLinearGradient(pd.left,pd.top,pd.left,pd.top+ch);
     grad.addColorStop(0,"#f2f7fd");
     grad.addColorStop(1,"#fbfdff");
@@ -288,59 +540,242 @@ function StdChart(props) {
     for(i=0;i<=5;i++) ctx.fillText(sig3(yM*(5-i)/5),pd.left-8,pd.top+ch/5*i+4);
     ctx.textAlign="center";
     for(i=0;i<=5;i++) ctx.fillText(sig3(xM*i/5),pd.left+cw2/5*i,pd.top+ch+18);
-    if(props.fn){
-      ctx.strokeStyle="rgba(52,120,246,0.12)";
-      ctx.lineWidth=8;
-      ctx.lineCap="round";
-      ctx.beginPath();
-      // xv here is in display units; we need to convert back to props.unit before calling fn
-      for(i=0;i<=200;i++){var xv=xM*i/200,yv=props.fn(xv/convFactor);var px=sx(xv),py=sy(Math.max(0,Math.min(yM*2,yv)));if(i===0)ctx.moveTo(px,py);else ctx.lineTo(px,py);}
-      ctx.stroke();
-      ctx.strokeStyle="#2d74ea";
-      ctx.lineWidth=3;
-      ctx.beginPath();
-      for(i=0;i<=200;i++){xv=xM*i/200;yv=props.fn(xv/convFactor);px=sx(xv);py=sy(Math.max(0,Math.min(yM*2,yv)));if(i===0)ctx.moveTo(px,py);else ctx.lineTo(px,py);}
-      ctx.stroke();
-    }
-    for(i=0;i<pts.length;i++){
-      var p=pts[i],px2=sx(p.conc),py2=sy(p.avg);
-      if(p.sd>0){var yt=sy(p.avg+p.sd),yb=sy(Math.max(0,p.avg-p.sd));
-        ctx.strokeStyle="#10b3c8";ctx.lineWidth=2.4;
-        ctx.beginPath();ctx.moveTo(px2,yt);ctx.lineTo(px2,yb);ctx.stroke();
-        ctx.beginPath();ctx.moveTo(px2-7,yt);ctx.lineTo(px2+7,yt);ctx.stroke();
-        ctx.beginPath();ctx.moveTo(px2-7,yb);ctx.lineTo(px2+7,yb);ctx.stroke();
+    // Helper: parse a hex color "#rrggbb" into rgba string with given alpha
+    var toRgba = function(hex, a){
+      if(!hex || hex.charAt(0)!=="#" || hex.length!==7) return "rgba(45,116,234,"+a+")";
+      var r=parseInt(hex.slice(1,3),16), g=parseInt(hex.slice(3,5),16), b=parseInt(hex.slice(5,7),16);
+      return "rgba("+r+","+g+","+b+","+a+")";
+    };
+    // Draw inactive series first (faded), so the active one renders on top.
+    var drawOrder = [];
+    for(var di=0; di<seriesAll.length; di++) if(di!==activeIdx) drawOrder.push(di);
+    drawOrder.push(activeIdx);
+    drawOrder.forEach(function(idx){
+      var s = seriesAll[idx];
+      var spts = seriesPts[idx];
+      if(!spts.length) return;
+      var isActive = (idx === activeIdx);
+      var color = s.color || "#2d74ea";
+      // Inactive plates: clearly visible fit line (so analyst can compare curve shapes across plates)
+      // but no markers/error bars (those would clutter when there are many plates).
+      // Active plate: full color line + markers + error bars + glow.
+      var alpha = isActive ? 1.0 : 0.55;
+      // Draw fitted curve line
+      if(s.fn){
+        if(isActive){
+          ctx.strokeStyle=toRgba(color, 0.12);
+          ctx.lineWidth=8;
+          ctx.lineCap="round";
+          ctx.beginPath();
+          {
+            var lastValid = false;
+            for(i=0;i<=200;i++){
+              var xv=xM*i/200, yv=s.fn(xv/convFactor);
+              if (yv == null || !isFinite(yv) || isNaN(yv)) { lastValid = false; continue; }
+              var py_clamped = sy(Math.max(0,Math.min(yM*2,yv)));
+              var px=sx(xv);
+              if (!lastValid) { ctx.moveTo(px, py_clamped); lastValid = true; }
+              else ctx.lineTo(px, py_clamped);
+            }
+          }
+          ctx.stroke();
+        } else {
+          // Subtle dashing for inactive lines so they're visually distinct from the active one even at similar colors
+          ctx.setLineDash([5,3]);
+        }
+        ctx.strokeStyle=toRgba(color, alpha);
+        ctx.lineWidth=isActive ? 3 : 2;
+        ctx.beginPath();
+        {
+          var lastValid2 = false;
+          for(i=0;i<=200;i++){
+            xv=xM*i/200; yv=s.fn(xv/convFactor);
+            if (yv == null || !isFinite(yv) || isNaN(yv)) { lastValid2 = false; continue; }
+            px=sx(xv); var py_c = sy(Math.max(0,Math.min(yM*2,yv)));
+            if (!lastValid2) { ctx.moveTo(px, py_c); lastValid2 = true; }
+            else ctx.lineTo(px, py_c);
+          }
+        }
+        ctx.stroke();
+        ctx.setLineDash([]);
       }
-      ctx.shadowColor="rgba(45,116,234,0.24)";ctx.shadowBlur=10;
-      ctx.fillStyle="#2d74ea";ctx.beginPath();ctx.arc(px2,py2,6.5,0,Math.PI*2);ctx.fill();
-      ctx.shadowBlur=0;
-      ctx.fillStyle="#ffffff";ctx.beginPath();ctx.arc(px2,py2,3.2,0,Math.PI*2);ctx.fill();
-      ctx.strokeStyle="#dff7fb";ctx.lineWidth=1.5;ctx.beginPath();ctx.arc(px2,py2,6.5,0,Math.PI*2);ctx.stroke();
-    }
+      // Markers + error bars only for the active series (keeps the chart readable when 10+ plates).
+      if(isActive){
+        for(i=0;i<spts.length;i++){
+          var p=spts[i],px2=sx(p.conc),py2=sy(p.avg);
+          if(p.sd>0){
+            var yt=sy(p.avg+p.sd),yb=sy(Math.max(0,p.avg-p.sd));
+            ctx.strokeStyle=toRgba("#10b3c8", alpha);ctx.lineWidth=2.4;
+            ctx.beginPath();ctx.moveTo(px2,yt);ctx.lineTo(px2,yb);ctx.stroke();
+            ctx.beginPath();ctx.moveTo(px2-7,yt);ctx.lineTo(px2+7,yt);ctx.stroke();
+            ctx.beginPath();ctx.moveTo(px2-7,yb);ctx.lineTo(px2+7,yb);ctx.stroke();
+          }
+          ctx.shadowColor=toRgba(color, 0.24);ctx.shadowBlur=10;
+          ctx.fillStyle=color;ctx.beginPath();ctx.arc(px2,py2,6.5,0,Math.PI*2);ctx.fill();
+          ctx.shadowBlur=0;
+          ctx.fillStyle="#ffffff";ctx.beginPath();ctx.arc(px2,py2,3.2,0,Math.PI*2);ctx.fill();
+          ctx.strokeStyle="#dff7fb";ctx.lineWidth=1.5;ctx.beginPath();ctx.arc(px2,py2,6.5,0,Math.PI*2);ctx.stroke();
+        }
+      }
+    });
     // x-axis label is rendered as HTML overlay outside the canvas (so the unit can be a clickable UnitPill).
     // Y-axis label still drawn in canvas (rotated text doesn't pair well with HTML overlay).
     ctx.fillStyle="#556682"; ctx.font="500 12px -apple-system,system-ui,sans-serif";
     ctx.save();ctx.translate(18,pd.top+ch/2);ctx.rotate(-Math.PI/2);ctx.textAlign="center";ctx.fillText("Optical Response (avg +/- SD)",0,0);ctx.restore();
-    ctx.fillStyle="#2d74ea";ctx.font="600 12px -apple-system,system-ui,sans-serif";ctx.textAlign="left";
-    ctx.fillText(props.fl+" fit",pd.left+12,pd.top+18);
-    ctx.fillStyle="#71819f";ctx.textAlign="right";
-    ctx.fillText("R\u00b2 = "+sig3(props.r2),pd.left+cw2-12,pd.top+18);
+    var activeColor = active.color || "#2d74ea";
+    // Fit label is rendered as HTML overlay (props.onFitChange enables click-to-change), so the canvas
+    // skips drawing it here. The R² label stays canvas-drawn since it's not interactive.
+    ctx.fillStyle="#71819f";ctx.font="600 12px -apple-system,system-ui,sans-serif";ctx.textAlign="right";
+    ctx.fillText("R\u00b2 = "+sig3(active.r2),pd.left+cw2-12,pd.top+18);
     ctx.textAlign="left";
     ctx.fillStyle="#556682";
     ctx.font="600 13px -apple-system,system-ui,sans-serif";
-    ctx.fillText("y = ("+sig3(displaySlope)+") x + ("+sig3(displayIntercept)+")", pd.left+12, pd.top+34);
+    var activeModel = active.model;
+    // All equations render as HTML overlay below (proper math typesetting + automatic update on
+    // fit change). Canvas only shows R² in the upper-right. This keeps linear/log-log/4PL/5PL
+    // visually consistent.
     if(props.instructor){
       ctx.fillStyle="#8e9bb5";
       ctx.font="italic 500 10.5px -apple-system,system-ui,sans-serif";
-      ctx.fillText("Optical Response = (slope) \u00d7 ["+props.sn+"] + (intercept)", pd.left+12, pd.top+50);
+      var teachLine = (activeModel==="4pl"||activeModel==="5pl")
+        ? "A=top signal, D=bottom signal, C=midpoint concentration, B=slope; inverse solves concentration from signal"
+        : (activeModel==="loglog"
+            ? "Power law: peak area scales as concentration^slope. Slope=1 means linear, slope>1 means area grows faster than concentration."
+            : "Optical Response = (slope) \u00d7 ["+props.sn+"] + (intercept)");
+      ctx.fillText(teachLine, pd.left+12, pd.top+(activeModel==="4pl"||activeModel==="5pl"?64:50));
     }
-  },[props.pts,props.fn,props.sn,props.fl,props.r2,props.unit,props.instructor,props.displayUnit,props.slope,props.intercept]);
+  },[props.pts,props.fn,props.sn,props.fl,props.r2,props.unit,props.instructor,props.displayUnit,props.slope,props.intercept,props.curveModel,props.params,props.series,props.activeIdx]);
   // Wrapper holds canvas + HTML x-axis label with clickable UnitPill positioned over where the canvas text was.
   // Canvas is 520x332 with the x-axis label horizontally centered; the label sits ~10px above the canvas bottom edge.
+  // props.overlay (optional): a React node positioned absolute, bottom-right of the canvas, INSIDE the plot area.
+  // Plot area spans from pd.left to w-pd.right horizontally and from pd.top to h-pd.bottom vertically; the
+  // bottom-right corner of the plot area is at (w-pd.right, h-pd.bottom) = (490, 272) on the 520x332 canvas.
+  // We position the overlay just inside that corner so it sits within the plot's gradient background.
   return <div style={{position:"relative",display:"inline-block"}}>
     <canvas ref={ref} style={{width:520,height:332,maxWidth:"100%",borderRadius:16,display:"block"}} />
     <div style={{position:"absolute",left:0,right:0,bottom:6,textAlign:"center",fontSize:12,color:"#556682",fontWeight:500,pointerEvents:"none"}}>
       <span style={{pointerEvents:"auto"}}>[{props.sn}] (<UnitPill unit={props.displayUnit||props.unit} onChange={props.onDisplayUnitChange||function(){}} size={12} color="#556682" hoverColor="#0b2a6f" weight={500} />)</span>
     </div>
+    {/* Clickable fit-type changer at the canvas text position (pd.left+12=100, pd.top+18=70 on 520x332).
+        As percentages: left ≈ 19%, top ≈ 17%. Underline shows it's clickable; dropdown changes the fit
+        and parent re-runs analysis. */}
+    {props.onFitChange && (function(){
+      var activeFL = (function(){
+        if (props.series && props.activeIdx != null && props.series[props.activeIdx]) return props.series[props.activeIdx].fL;
+        return props.fl || "Linear";
+      })();
+      var activeColor = (function(){
+        if (props.series && props.activeIdx != null && props.series[props.activeIdx] && props.series[props.activeIdx].color) return props.series[props.activeIdx].color;
+        return "#2d74ea";
+      })();
+      var activeModel = (function(){
+        if (props.series && props.activeIdx != null && props.series[props.activeIdx]) return props.series[props.activeIdx].model;
+        return props.curveModel || "linear";
+      })();
+      var fitOptions = [
+        {value:"auto", label:"Auto (best fit)"},
+        {value:"linear", label:"Linear"},
+        {value:"loglog", label:"Log-log"},
+        {value:"4pl", label:"4PL"},
+        {value:"5pl", label:"5PL"}
+      ];
+      // For the dropdown's selected value: if cfg told us "auto" but the actual fit ended up "loglog",
+      // we should still show "auto" as selected (so the user knows it's auto-picked). Use a separate
+      // prop `autoMode` for that. Falls back to activeModel when not provided.
+      var dropdownValue = props.autoMode ? "auto" : activeModel;
+      return <div style={{position:"absolute",left:"18%",top:"17%",fontSize:11,fontWeight:600,color:activeColor,fontFamily:"-apple-system,system-ui,sans-serif"}}>
+        <span style={{position:"relative",display:"inline-block"}}>
+          <span style={{borderBottom:"1px dotted "+activeColor,cursor:"pointer",pointerEvents:"none"}}>{props.autoMode ? activeFL+" fit (auto best fit)" : activeFL+" fit"}</span>
+          <select
+            value={dropdownValue}
+            onChange={function(e){
+              var newFm = e.target.value;
+              if (newFm === dropdownValue) return;
+              props.onFitChange(newFm);
+            }}
+            style={{position:"absolute",inset:0,opacity:0,cursor:"pointer",fontSize:12,fontFamily:"inherit",border:"none",background:"transparent",appearance:"none",WebkitAppearance:"none"}}
+            title="Click to change curve fit"
+          >
+            {fitOptions.map(function(o){return <option key={o.value} value={o.value}>{o.label}</option>;})}
+          </select>
+        </span>
+      </div>;
+    })()}
+    {/* Equation overlay — proper math typesetting for all fit types (linear, log-log, 4PL, 5PL).
+        Replaces canvas-drawn equations entirely so all fits get consistent typography and live
+        update on fit change. Positioned just under the fit-picker. */}
+    {(function(){
+      var active = (function(){
+        if (props.series && props.activeIdx != null && props.series[props.activeIdx]) return props.series[props.activeIdx];
+        return {model: props.curveModel, params: props.params, slope: props.slope, intercept: props.intercept};
+      })();
+      var model = active && active.model;
+      if (!model) return null;
+      var disp = props.displayUnit || props.unit;
+      var convF = (function(){var f = convertConc(1, props.unit, disp); return (f && isFinite(f) && f !== 0) ? f : 1;})();
+      var sup = function(val){return <sup style={{fontSize:"0.75em",verticalAlign:"super",lineHeight:0}}>{val}</sup>;};
+      var sub = function(val){return <sub style={{fontSize:"0.75em",verticalAlign:"sub",lineHeight:0}}>{val}</sub>;};
+      var bg = "#f5f9fd";  // matches plot gradient at this vertical position — formula "melts" into plot
+      var wrapStyle = {position:"absolute",left:"18%",top:"23%",fontSize:11,color:"#0b2a6f",fontFamily:"-apple-system,system-ui,sans-serif",pointerEvents:"none",background:bg,padding:"3px 6px",borderRadius:5,maxWidth:"50%"};
+      if (model === "linear") {
+        // Linear: y = (m) · x + (b). m and b are reported in the active display unit's space.
+        if (active.slope == null || active.intercept == null) return null;
+        // Slope conversion: slope has units of [signal/concentration]. Converting display unit
+        // multiplies x by convF, so to keep y unchanged the slope divides by convF.
+        var mDisp = active.slope / convF;
+        var bDisp = active.intercept;
+        return <div style={wrapStyle}>
+          <div style={{display:"flex",alignItems:"center",gap:5}}>
+            <span>y = </span>
+            <span>{sig3(mDisp)}</span>
+            <span> · x + </span>
+            <span>{sig3(bDisp)}</span>
+          </div>
+        </div>;
+      }
+      if (model === "loglog") {
+        if (active.slope == null || active.intercept == null) return null;
+        // Log-log fit: log₁₀(y) = m · log₁₀(x) + b. Power-law form: y = 10^b · x^m.
+        return <div style={wrapStyle}>
+          <div style={{display:"flex",alignItems:"center",gap:5}}>
+            <span>log{sub("10")}(y) = </span>
+            <span>{sig3(active.slope)}</span>
+            <span> · log{sub("10")}(x) + </span>
+            <span>{sig3(active.intercept)}</span>
+          </div>
+        </div>;
+      }
+      if (model === "4pl" || model === "5pl") {
+        if (!active.params) return null;
+        var A = active.params.A;  // signal — no conv
+        var D = active.params.D;  // signal — no conv
+        var C = active.params.C * convF;  // concentration — convert
+        var B = active.params.B;
+        var G = active.params.G;
+        return <div style={wrapStyle}>
+          <div style={{display:"flex",alignItems:"center",gap:5,flexWrap:"nowrap"}}>
+            <span>y =</span>
+            <span>{sig3(D)}</span>
+            <span>+</span>
+            <Fraction
+              top={<span style={{whiteSpace:"nowrap"}}>{sig3(A - D)}</span>}
+              bottom={<span style={{whiteSpace:"nowrap"}}>
+                (1 + (x/{sig3(C)}){sup(sig3(B))})
+                {model==="5pl" && sup(sig3(G))}
+              </span>}
+              w={130}
+            />
+          </div>
+        </div>;
+      }
+      return null;
+    })()}
+    {/* Overlay: bottom-right INSIDE the plot rectangle. Plot area on the 520x332 canvas spans
+        x: 88..490 (cw=402, padding 88L/30R) and y: 52..272 (ch=220, padding 52T/60B).
+        Bottom-right corner = (490, 272) → right offset = (520-490)/520 = 5.8%, bottom offset = (332-272)/332 = 18.1%.
+        We add a small inset so the overlay sits a few px inside the plot edge (not flush against it).
+        Percentage offsets ensure the overlay tracks the canvas as it scales down on narrow viewports. */}
+    {props.overlay && <div style={{position:"absolute",bottom:"20%",right:"7.5%",zIndex:2}}>{props.overlay}</div>}
   </div>;
 }
 
@@ -355,22 +790,51 @@ function LogoMark(){return <div style={{width:40,height:40,borderRadius:12,backg
 
 function Wordmark(props){var compact=props.compact;return <div><div style={{display:"flex",alignItems:"baseline",gap:6}}><span style={{fontSize:compact?24:48,fontWeight:300,color:"#0b2a6f"}}>eSSF</span><span style={{fontSize:compact?24:48,fontWeight:300,color:"#139cb6"}}>Curve</span></div></div>;}
 
-function BrandHero(){return <div style={{marginBottom:"1.5rem"}}><img src={ESSF_LOGO_B64} alt="eSSF Curve" style={{height:64,objectFit:"contain",marginBottom:8,display:"block"}} /><div style={{fontSize:12,color:"#6f7fa0",marginBottom:8}}>Plate-based assay analysis and quantitation</div><div style={{height:1,background:"#cfd9ea"}} /></div>;}
+function BrandHero(){return <div style={{marginBottom:"1.5rem"}}><img src={ESSF_LOGO_B64} alt="eSSF Curve" style={{height:96,objectFit:"contain",marginBottom:10,display:"block"}} /><div style={{fontSize:14,color:"#5a6984",marginBottom:12,fontWeight:500}}>Curve, qualify, validate.</div><div style={{height:1,background:"#cfd9ea"}} /></div>;}
 
-var thS={padding:"8px 10px",borderBottom:"2px solid #e5e5ea",fontSize:11,color:"#6e6e73",fontWeight:700,letterSpacing:0,background:"#fafafa",whiteSpace:"normal"};
-var tdS={padding:"8px 10px",borderBottom:"1px solid #f0f0f3",fontSize:12,whiteSpace:"normal"};
-var TABS=["Data Entry","Analysis","Results","Recommendations","Tools"];
+var thS={padding:"8px 10px",borderBottom:"2px solid #e5e5ea",fontSize:11,color:"#6e6e73",fontWeight:700,letterSpacing:0,background:"#fafafa",whiteSpace:"normal",textAlign:"center"};
+var tdS={padding:"8px 10px",borderBottom:"1px solid #f0f0f3",fontSize:12,whiteSpace:"normal",textAlign:"center"};
+var TABS=["Data Entry","Analysis","Results","Method Review","Tools"];
 
 var ESSF_LOGO_B64 = "data:image/png;base64,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ZUuX3HXXXZMP3N7/+Sc///l5H3+yfPHmLVu5pa2dM1mbU5k8b9+xR23YuPnDm2666cBt/Ygl/OenZvxsxer1n27dtjPflkhxRzLHrW0d/NmWbcm577434+qrr+4/fvx4079Onyjxk5/8/LtLPvpk2979LdyeznNbop2bWpr5s61bef777/PqtWu5I5XkvG2xrZygBuUoh20rz8ys57y/hHv1O2TcwdalZCUrWcm+nNXXu5FB9yGjn397ocXMKmfb7GjH+1JsK82WrTiXtzlvK844zElbczKf545kkpPtCU6lktyRz3NbMsmWY7FtZziTjrOtbe5Qmtc1NvOCz/bwX+Z/yre+vJjPf+hl/sofXubwxGv3muNuYOPoG7IY/3MH467XdMS1+cgxv2L0vHjFq++vWdyRTvG3Lv+eU92tx4cArgdQV1tbO6G+vj52INj6jreopyh8yimnjOzWrdshB166P3L9AJAJIsuKrl0PHf+Vo0eNGTNmbASRfsVp0b/nhIv7kvoPGXLYD667bsI9Dzxw+NenTDmyS48eAw72uYO9dvkVVxyxcOGSoz/+ePmxW7ZsGX3WWVMG+u8tXbr0wF4rrxzk2tXfu3rEO+/MP2HZslXHvPbWvLEAqrwP4YorrjD/zhrU/vyXvzxt4cLFk996663jHnz4weNGjRo1rmu3mr/94JqredWa1SpvW+woF5xs5bCtFStHMTPb8Wyep1525W0HrmHJSlaykn2pyMl3Jg0NDerEi66+6rEH7njokG6VjuMogw0B0hbAIUgi0D/gZzkAUjmFRCqJpK2wO5HV25rb9P6kEit3NmJPokPsTKSQgomsBQAaYAOQQP/23S073tnShPLyYbIiTKA8tJLg/fHNJxzde95bT//moq1bN5U/9sgjumvXmpf79+27bO/e/Ttef/75hQuXLt1FRLjgggvkLK9jvGhiLADEZsyY0fedd+Yd3qt7LzOVTe+bNeu/VjU2Njb5DvuACbiBGgSAHitWrOA//OHhI2JduiQMKc2+vQZs+vGPr9xXBIL6ICBDQghmZvTq1Su2cOHC8r/8ZUb322+ftuvVV181zz777JaiY3+uj2r69OnmVVddZXvn0OWee+6p/OST5ZP69u392VlTz9o98ciJaQBtB9mepk+fbhRti8ceu7fmvfeWDh04cCAvX75895w5c3Yf7Nxnzpwp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";
 
 
 function PageHeader(props){
-  return <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:16,padding:"10px 16px 12px 16px",background:"linear-gradient(180deg,#ffffff,#f7fbff)",borderBottom:"1px solid #dfe7f2",marginBottom:"1rem",borderRadius:"14px 14px 0 0"}}>
-    <div style={{display:"flex",alignItems:"center",gap:12}}>
-      <img src={ESSF_LOGO_B64} alt="eSSF Curve" style={{height:38,objectFit:"contain",display:"block"}} />
-      <div style={{fontSize:10,color:"#6f7fa0",fontFamily:"Georgia,serif",letterSpacing:1,paddingLeft:8,borderLeft:"1px solid #dfe7f2"}}>{APP_VERSION}</div>
+  var doReset = function(){
+    if (typeof props.onReset === "function") {
+      if (window.confirm("Start over? This will clear your data, plate setup, and analysis results.\n\nThis cannot be undone.")) {
+        props.onReset();
+      }
+    }
+  };
+  var large = !!props.large;
+  var logoH = large ? 96 : 38;
+  return <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:16,padding:large?"18px 20px 18px 20px":"10px 16px 12px 16px",background:"linear-gradient(180deg,#ffffff,#f7fbff)",borderBottom:"1px solid #dfe7f2",marginBottom:"1rem",borderRadius:"14px 14px 0 0"}}>
+    <div style={{display:"flex",alignItems:"center",gap:large?16:12}}>
+      <img src={ESSF_LOGO_B64} alt="eSSF Curve" style={{height:logoH,objectFit:"contain",display:"block"}} />
+      <div onClick={props.onSecretTap} style={{fontSize:large?12:10,color:"#6f7fa0",fontFamily:"Georgia,serif",letterSpacing:1,paddingLeft:large?12:8,borderLeft:"1px solid #dfe7f2",cursor:"default",userSelect:"none"}}>{APP_VERSION}</div>
     </div>
-    <ModeToggle instructor={props.instructor} setInstructor={props.setInstructor} />
+    <div style={{display:"flex",alignItems:"center",gap:14}}>
+      <ModeToggle instructor={props.instructor} setInstructor={props.setInstructor} />
+      {props.onReset && <button
+        onClick={doReset}
+        title="Clear data and return to setup"
+        style={{
+          background:"#fdecec",
+          border:"1px solid #e8b8b8",
+          color:"#8a3a3a",
+          padding:"7px 14px",
+          borderRadius:8,
+          fontSize:12,
+          fontWeight:700,
+          cursor:"pointer",
+          letterSpacing:0.3,
+          boxShadow:"0 1px 2px rgba(138,58,58,0.08)"
+        }}
+        onMouseEnter={function(e){e.currentTarget.style.background="#fbdcdc";e.currentTarget.style.borderColor="#d99a9a";}}
+        onMouseLeave={function(e){e.currentTarget.style.background="#fdecec";e.currentTarget.style.borderColor="#e8b8b8";}}
+      >↺ Start over</button>}
+    </div>
   </div>;
 }
 
@@ -400,7 +864,7 @@ function ModeToggle(props){
 }
 
 function defaultCfg() {
-  return {sn:"GFP",sc:"1",sdf:"1/10",sds:"1/2",xdf:"1/10",xds:"1/2",np:"1",tp:"no",at:"direct",fm:"linear",names:"",sr:"3",xr:"3",unit:"mg/mL",target:"GFP",tmpl:"bca",spikeUsed:"no",requireUnspiked:"yes",layout:"classical",forceOriginInCurve:"no"};
+  return {sn:"GFP",sc:"1",sdf:"1/10",sds:"1/2",xdf:"1/10",xds:"1/2",stdPredil:"",smpPredil:"",np:"1",tp:"no",at:"direct",fm:"linear",names:"",sr:"3",xr:"3",unit:"mg/mL",target:"GFP",tmpl:"bca",spikeUsed:"no",requireUnspiked:"yes",layout:"classical",forceOriginInCurve:"no",sstExpected:"{}",sstFlags:"{}",stdMode:"top_plus_df",stdLevels:"[]",msSamples:"[]",msInjections:"[]",yAxisLabel:"Peak area",asStdMode:"serial",asTopConc:"",asSerialDF:"1/2",asDiscreteLevels:"[]",asNSamples:"3",asHasBlank:"yes",asGrid:"{}",asSampleNames:"[]",asSampleTypes:"[]",asNDilutions:"3",asNStdLevels:"6",asLevelOrder:"highest",xrMix:"3,3,2"};
 }
 
 function Fraction(props){
@@ -486,17 +950,17 @@ function SpikeGuide(props){
 
 var concToMgMl = function(v, unit) {
   if (v==null || isNaN(v)) return null;
-  if (unit==="mg/mL" || unit==="ug/uL") return v;
-  if (unit==="ug/mL") return v/1000;
-  if (unit==="ng/mL") return v/1000000;
+  if (unit==="mg/mL" || unit==="ug/uL" || unit==="g/L") return v;
+  if (unit==="mg/L" || unit==="ug/mL" || unit==="ng/uL") return v/1000;
+  if (unit==="ug/L" || unit==="ng/mL" || unit==="pg/uL") return v/1000000;
   if (unit==="pg/mL") return v/1000000000;
   return null;
 };
 var mgMlToUnit = function(v, unit) {
   if (v==null || isNaN(v)) return null;
-  if (unit==="mg/mL" || unit==="ug/uL") return v;
-  if (unit==="ug/mL") return v*1000;
-  if (unit==="ng/mL") return v*1000000;
+  if (unit==="mg/mL" || unit==="ug/uL" || unit==="g/L") return v;
+  if (unit==="mg/L" || unit==="ug/mL" || unit==="ng/uL") return v*1000;
+  if (unit==="ug/L" || unit==="ng/mL" || unit==="pg/uL") return v*1000000;
   if (unit==="pg/mL") return v*1000000000;
   return null;
 };
@@ -508,7 +972,10 @@ var convertConc = function(v, fromUnit, toUnit) {
   if (asMgMl == null) return null;
   return mgMlToUnit(asMgMl, toUnit);
 };
-// Cycle through available display units (in descending order of magnitude)
+// Common mass-per-volume concentration units used across direct assays, protein assays, and ELISAs.
+var CONC_UNITS = ["mg/mL", "mg/L", "ug/uL", "ug/mL", "ug/L", "ng/uL", "ng/mL", "pg/uL", "pg/mL"];
+var SPIKE_STOCK_UNITS = ["mg/mL", "ug/uL", "ug/mL", "ng/uL", "ng/mL", "pg/uL", "pg/mL"];
+// Cycle through compact display units (descending order of magnitude).
 var DISPLAY_UNITS = ["mg/mL", "ug/mL", "ng/mL", "pg/mL"];
 var cycleDisplayUnit = function(current) {
   var idx = DISPLAY_UNITS.indexOf(current);
@@ -837,7 +1304,7 @@ function SpikeCalculatorCard(props){
         <div style={{fontSize:12,fontWeight:800,color:"#8a4000",marginBottom:8}}>Sample &amp; curve context</div>
         <div style={{display:"grid",gridTemplateColumns:"1fr",gap:"0.8rem"}}>
           {fldUnit("Sample volume before spike was added","sampleVol","sampleVolUnit",["uL","mL"])}
-          {fldUnit("Estimated unspiked sample concentration","endoConc","assayUnit",["ng/mL","ug/mL","mg/mL"])}
+          {fldUnit("Estimated unspiked sample concentration","endoConc","assayUnit",CONC_UNITS)}
           <div>
             <label style={{display:"block",fontSize:11,fontWeight:700,marginBottom:6,color:"#18233f"}}>Standard curve range (same units as endogenous)</label>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0.6rem"}}>
@@ -850,7 +1317,7 @@ function SpikeCalculatorCard(props){
       <div style={{background:"#f7f1ff",border:"1px solid #e2d7fb",borderRadius:14,padding:"12px 14px"}}>
         <div style={{fontSize:12,fontWeight:800,color:"#6337b9",marginBottom:8}}>Spike stock</div>
         <div style={{display:"grid",gridTemplateColumns:"1fr",gap:"0.8rem"}}>
-          {fldUnit("Stock concentration of the spike","stockConc","stockUnit",["ng/mL","ug/mL","mg/mL","ug/uL"])}
+          {fldUnit("Stock concentration of the spike","stockConc","stockUnit",SPIKE_STOCK_UNITS)}
           {fldUnit("Volume of stock spike added to the sample","spikeVol","spikeVolUnit",["uL","mL"])}
         </div>
       </div>
@@ -1075,6 +1542,8 @@ async function parsePdfFile(file){
 }
 
 function ElisaDesignerCard(props){
+  var dilFormat = props.dilFormat || "ratio";
+  var setDilFormat = props.setDilFormat || function(){};
   // === STATE ===
   // Top-level mode selector
   var _md = useState("plan");
@@ -1236,10 +1705,9 @@ function ElisaDesignerCard(props){
     } else {
       step = Math.min(curveRatio, 3);
     }
-    // Number of points needed to cover sampSpan
-    var nPoints = Math.max(3, Math.ceil(Math.log(sampSpan)/Math.log(step)) + 1);
-    // Cap at 8 (since you fit on a column of a 96-well plate)
-    if(nPoints > 8) nPoints = 8;
+    // Use a full column pilot by default: 7 dilution rows + 1 blank row.
+    // This matches how many analysts already run serial dilutions and avoids wasting the column.
+    var nPoints = 7;
     // Starting dilution: place most-dilute sample at top of curve.
     // For unknown samples, start moderate (1:5 typical for kits) — this gives coverage even for low-abundance analytes.
     var dStart;
@@ -1300,15 +1768,19 @@ function ElisaDesignerCard(props){
     Vt = Math.round(Vt*100)/100;
     var Vd = Math.round((Vf - Vt)*100)/100; // diluent pre-load for wells 2…N
     var firstWellTotal = Vf + Vt; // first well needs extra so transfer out leaves Vf
-    var Vsample = firstWellTotal / dStart;
+    var preDilutionNeeded = false;
+    var preDilutionFactor = 0;
+    var preDilutionSource = "";
+    var onPlateFirstDilution = dStart;
+    var Vsample = firstWellTotal / onPlateFirstDilution;
     Vsample = Math.round(Vsample*100)/100;
     var firstWellDiluent = Math.round((firstWellTotal - Vsample)*100)/100;
     // If Vsample is impractically small, suggest a pre-dilution
-    var preDilutionNeeded = Vsample < 2 && dStart > 1;
-    var preDilutionFactor = 0;
     var preDilutedSampleVol = 0;
     var preDilutedDiluentVol = 0;
-    if(preDilutionNeeded){
+    if(Vsample < 2 && dStart > 1){
+      preDilutionNeeded = true;
+      preDilutionSource = "suggested";
       // Pick a pre-dilution that brings Vsample to at least ~10µL (a comfortable pipette volume)
       // We want: firstWellTotal / preDilutionFactor / dStart' = "comfortable Vsample"
       // where dStart' is the effective starting dilution after pre-dilution.
@@ -1326,7 +1798,8 @@ function ElisaDesignerCard(props){
       preDilutedSampleVol = Math.round((preVol / preDilutionFactor)*100)/100;
       preDilutedDiluentVol = preVol - preDilutedSampleVol;
       // Recompute Vsample (now from pre-diluted source)
-      Vsample = firstWellTotal * preDilutionFactor / dStart;
+      onPlateFirstDilution = dStart / preDilutionFactor;
+      Vsample = firstWellTotal / onPlateFirstDilution;
       Vsample = Math.round(Vsample*100)/100;
       firstWellDiluent = Math.round((firstWellTotal - Vsample)*100)/100;
     }
@@ -1384,6 +1857,8 @@ function ElisaDesignerCard(props){
       transferVol: Vt,
       preDilutionNeeded: preDilutionNeeded,
       preDilutionFactor: preDilutionFactor,
+      preDilutionSource: preDilutionSource,
+      onPlateFirstDilution: onPlateFirstDilution,
       preDilutedSampleVol: preDilutedSampleVol,
       preDilutedDiluentVol: preDilutedDiluentVol,
       benchWarn: benchWarn,
@@ -1499,8 +1974,8 @@ function ElisaDesignerCard(props){
   // === RENDER ===
   return <div style={card}>
     <div style={hdr}>
-      <div style={hdrTitle}>ELISA Designer</div>
-      <div style={hdrSub}>Plan dilution schemes, interpret pilot runs, and lay out the real plate.</div>
+      <div style={hdrTitle}>Dilution Planner</div>
+      <div style={hdrSub}>Plan sample dilution schemes for ELISA, BCA, Bradford, Pierce 660, and other plate assays.</div>
     </div>
 
     {/* Mode tabs */}
@@ -1536,13 +2011,13 @@ function ElisaDesignerCard(props){
       {/* === MODE 1: PLAN === */}
       {mode==="plan" && <div>
         <p style={{fontSize:13, color:"#5a6984", lineHeight:1.6, margin:"0 0 16px"}}>
-          Tell us about your kit and your sample. We'll design a pilot dilution series that brackets your sample's likely concentration and lands at least one well in your standard curve.
+          Tell us the measuring range for your assay and what you know about your sample. We'll design a pilot dilution series that brings at least one well into the usable curve range.
         </p>
 
-        {/* Kit picker */}
+        {/* Assay preset picker */}
         <div style={{display:"grid", gridTemplateColumns:"1fr", gap:14, marginBottom:14}}>
           <div>
-            <label style={labelStyle}>Kit (optional)</label>
+            <label style={labelStyle}>Assay / kit preset (optional)</label>
             <select value={planSt.kit} onChange={function(e){
               var v=e.target.value; pu("kit",v);
               var p = KIT_PRESETS[v];
@@ -1576,9 +2051,9 @@ function ElisaDesignerCard(props){
           <div style={{padding:"12px 14px", border:"1px dashed #c5d3e8", borderRadius:10, background:"#fafbfd"}}>
             <div style={{display:"flex", alignItems:"center", justifyContent:"space-between", gap:10, flexWrap:"wrap"}}>
               <div style={{flex:"1 1 280px"}}>
-                <div style={{fontSize:12, fontWeight:700, color:"#30437a", marginBottom:2}}>Or upload your kit's SOP / datasheet (PDF)</div>
+                <div style={{fontSize:12, fontWeight:700, color:"#30437a", marginBottom:2}}>Or upload the assay SOP / datasheet (PDF)</div>
                 <div style={{fontSize:10, color:"#6e6e73", lineHeight:1.5}}>
-                  We'll scan the text for "standard curve range", "LLOQ", and concentration ranges to pre-fill the fields below. Best-effort extraction — always verify against your kit insert.
+                  We'll scan the text for "standard curve range", "LLOQ", and concentration ranges to pre-fill the fields below. Best-effort extraction — always verify against your assay insert.
                 </div>
               </div>
               <input type="file" accept="application/pdf,.pdf" id="elisa-pdf-upload" style={{display:"none"}} onChange={function(e){
@@ -1641,17 +2116,17 @@ function ElisaDesignerCard(props){
           <div>
             <label style={labelStyle}>Unit</label>
             <select value={planSt.curveUnit} onChange={function(e){pu("curveUnit",e.target.value);}} style={selectBox}>
-              {["pg/mL","pg/uL","ng/mL","ng/uL","ug/mL","ug/uL","mg/mL"].map(function(u){return <option key={u} value={u}>{u}</option>;})}
+              {CONC_UNITS.map(function(u){return <option key={u} value={u}>{u}</option>;})}
             </select>
           </div>
         </div>
 
         {/* Estimate */}
-        <h5 style={sectionH}>What do you know about your sample's concentration?</h5>
+        <h5 style={sectionH}>What is in your original tube?</h5>
         <div style={{display:"grid", gridTemplateColumns:"repeat(3, 1fr)", gap:8, marginBottom:14}}>
           {[
-            {id:"value", label:"I have a number", desc:"From a literature value or prior measurement"},
-            {id:"range", label:"I have a range", desc:"e.g. \"between 1 and 100 ng/mL\""},
+            {id:"value", label:"I have a number", desc:"Concentration before any dilution"},
+            {id:"range", label:"I have a range", desc:"Range before any dilution"},
             {id:"unknown", label:"I have no idea", desc:"This is my first time with this sample"},
           ].map(function(opt){
             var active = planSt.estimateMode===opt.id;
@@ -1667,39 +2142,38 @@ function ElisaDesignerCard(props){
         </div>
         {planSt.estimateMode==="value" && <div style={{display:"grid", gridTemplateColumns:"2fr 1fr", gap:14, marginBottom:14}}>
           <div>
-            <label style={labelStyle}>Best-guess concentration</label>
+            <label style={labelStyle}>Original/neat concentration</label>
             <input value={planSt.estimateVal} onChange={function(e){pu("estimateVal",e.target.value);}} placeholder="e.g. 100" style={monoInputBox} />
+            <div style={{fontSize:10, color:"#6e6e73", marginTop:4, lineHeight:1.4}}>This is the concentration in the starting tube before any tube or plate dilution.</div>
           </div>
           <div>
             <label style={labelStyle}>Unit</label>
             <select value={planSt.estimateUnit} onChange={function(e){pu("estimateUnit",e.target.value);}} style={selectBox}>
-              {["pg/mL","pg/uL","ng/mL","ng/uL","ug/mL","ug/uL","mg/mL"].map(function(u){return <option key={u} value={u}>{u}</option>;})}
+              {CONC_UNITS.map(function(u){return <option key={u} value={u}>{u}</option>;})}
             </select>
           </div>
         </div>}
         {planSt.estimateMode==="range" && <div style={{display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:14, marginBottom:14}}>
           <div>
-            <label style={labelStyle}>Low end</label>
+            <label style={labelStyle}>Low end before dilution</label>
             <input value={planSt.estimateLo} onChange={function(e){pu("estimateLo",e.target.value);}} placeholder="e.g. 10" style={monoInputBox} />
           </div>
           <div>
-            <label style={labelStyle}>High end</label>
+            <label style={labelStyle}>High end before dilution</label>
             <input value={planSt.estimateHi} onChange={function(e){pu("estimateHi",e.target.value);}} placeholder="e.g. 1000" style={monoInputBox} />
           </div>
           <div>
             <label style={labelStyle}>Unit</label>
             <select value={planSt.estimateUnit} onChange={function(e){pu("estimateUnit",e.target.value);}} style={selectBox}>
-              {["pg/mL","pg/uL","ng/mL","ng/uL","ug/mL","ug/uL","mg/mL"].map(function(u){return <option key={u} value={u}>{u}</option>;})}
+              {CONC_UNITS.map(function(u){return <option key={u} value={u}>{u}</option>;})}
             </select>
           </div>
         </div>}
-
         {/* Result */}
         {planResult && <div style={{marginTop:18, paddingTop:18, borderTop:"2px solid "+BORDER}}>
           <div style={{fontSize:12, fontWeight:700, color:"#0f5c6a", textTransform:"uppercase", letterSpacing:0.5, marginBottom:10}}>Recommended pilot dilution series</div>
 
           {/* Number-line diagram */}
-          <PlanDiagram result={planResult} planSt={planSt} fromPgMl={fromPgMl} />
 
           {/* Working volume input */}
           <div style={{marginTop:18, padding:"12px 14px", background:"#fff", border:"1px solid "+BORDER, borderRadius:10, display:"flex", alignItems:"center", gap:14, flexWrap:"wrap"}}>
@@ -1717,7 +2191,66 @@ function ElisaDesignerCard(props){
 
           {/* === BENCH PROTOCOL === on-plate serial dilution, column-down */}
           <div style={{marginTop:18}}>
-            <BenchWorkflowDiagram result={planResult} dilFormat={dilFormat} setDilFormat={setDilFormat} />
+            {/* Numerical table shown by default */}
+            <div style={{background:"#fafbfd", borderRadius:10, border:"1px solid "+BORDER, overflow:"auto", marginBottom:8}}>
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"8px 12px 0",flexWrap:"wrap",gap:8}}>
+                <div style={{fontSize:11, fontWeight:700, color:"#0b2a6f", textTransform:"uppercase", letterSpacing:0.5}}>How to do it at the bench</div>
+                <div style={{fontSize:10, color:"#aeaeb2", display:"flex", alignItems:"baseline", gap:4}}>
+                  show dilutions as: <FormatPill value={dilFormat} onChange={setDilFormat}
+                    labelOf={function(f){return f==="ratio"?"ratio (1:N)":"factor (N×)";}}
+                    toggleOf={function(f){return f==="ratio"?"factor":"ratio";}}
+                    size={10} color="#aeaeb2" hoverColor="#0b2a6f" />
+                </div>
+              </div>
+              {planResult.preDilutionNeeded && <div style={{margin:"8px 12px 0",padding:"7px 10px",background:"#fff8ea",border:"1px solid #e8c77d",borderRadius:8,fontSize:11,color:"#7a5800",lineHeight:1.5}}>
+                <strong>Step 1 — Pre-dilute in a tube first:</strong> Add {sig3(planResult.preDilutedSampleVol)} µL of your stock to {sig3(planResult.preDilutedDiluentVol)} µL of diluent. Mix. This gives you a {fmtDilution(1/planResult.preDilutionFactor,dilFormat,100000)} working dilution to load into A1.
+              </div>}
+              <div style={{padding:"6px 12px 4px",fontSize:10,color:"#6e6e73",fontStyle:"italic"}}>{planResult.preDilutionNeeded ? "Step 2 — " : "Step 1 — "}Pre-load diluent into all wells, then add {sig3(planResult.preDilutionNeeded ? planResult.benchProtocol[0].sampleVol : planResult.benchProtocol[0].sampleVol)} µL {planResult.preDilutionNeeded ? "of pre-dilution" : "of sample"} to A1. Transfer {sig3(planResult.transferVol)} µL down from each well to the next. Mix before each transfer.</div>
+              <table style={{width:"100%", borderCollapse:"collapse", fontSize:12}}>
+                <thead>
+                  <tr style={{background:"#0b2a6f", color:"#fff"}}>
+                    <th style={{padding:"7px 10px", textAlign:"left", fontWeight:700, fontSize:11}}>Well</th>
+                    <th style={{padding:"7px 10px", textAlign:"left", fontWeight:700, fontSize:11}}>Dilution</th>
+                    <th style={{padding:"7px 10px", textAlign:"left", fontWeight:700, fontSize:11, minWidth:220}}>What to do</th>
+                    <th style={{padding:"7px 10px", textAlign:"left", fontWeight:700, fontSize:11}}>Then</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {planResult.benchProtocol.map(function(b,i){
+                    var bg = b.feasible ? (i%2 ? "#fafbfd" : "#fff") : "#fde2dd";
+                    var stepDesc, thenDesc;
+                    if(b.isFirst){
+                      stepDesc = <span>
+                        Add <strong style={{fontFamily:"monospace", color:"#bf7a1a"}}>{sig3(b.sampleVol)} µL</strong> of {b.sampleSource}{b.diluentVol > 0 ? <span> + <strong style={{fontFamily:"monospace", color:"#0b2a6f"}}>{sig3(b.diluentVol)} µL</strong> diluent</span> : null}
+                      </span>;
+                    } else {
+                      stepDesc = <span>
+                        Pre-load <strong style={{fontFamily:"monospace", color:"#0b2a6f"}}>{sig3(b.preload)} µL</strong> diluent. Transfer <strong style={{fontFamily:"monospace", color:"#bf7a1a"}}>{sig3(b.transferIn)} µL</strong> from <strong>{b.transferInFrom}</strong>. Mix.
+                      </span>;
+                    }
+                    if(b.transferOut > 0){
+                      thenDesc = <span>Transfer <strong style={{fontFamily:"monospace"}}>{sig3(b.transferOut)} µL</strong> → <strong>{b.nextWell}</strong></span>;
+                    } else {
+                      thenDesc = <span style={{color:"#1a6b32", fontWeight:700}}>Last well — done</span>;
+                    }
+                    return <tr key={i} style={{borderTop:i?"1px solid #eef2f7":"none", background:bg}}>
+                      <td style={{padding:"7px 10px", fontFamily:"monospace", fontWeight:800, color:"#30437a", fontSize:13, whiteSpace:"nowrap"}}>{b.wellLabel}</td>
+                      <td style={{padding:"7px 10px", fontFamily:"monospace", fontWeight:700, color:"#6337b9", whiteSpace:"nowrap"}}>{fmtDilution(1/b.dilution, dilFormat, 100000)}</td>
+                      <td style={{padding:"7px 10px", color:"#1d1d1f", fontSize:11, lineHeight:1.5}}>{stepDesc}</td>
+                      <td style={{padding:"7px 10px", color:"#5a6984", fontSize:11, whiteSpace:"nowrap"}}>{thenDesc}</td>
+                    </tr>;
+                  })}
+                </tbody>
+              </table>
+              <div style={{padding:"6px 12px 8px", fontSize:10, color:"#6e6e73", fontStyle:"italic"}}>Each well ends at <strong>{planResult.workingVol} µL</strong>. Transfer = <strong>{sig3(planResult.transferVol)} µL</strong>. Pre-load diluent into all wells first (multichannel), then add sample to A1.</div>
+            </div>
+            {/* Graphical view — optional expand */}
+            <details style={{marginTop:6}}>
+              <summary style={{fontSize:11, color:"#3478F6", fontWeight:600, cursor:"pointer", userSelect:"none"}}>Show graphical diagram</summary>
+              <div style={{marginTop:8}}>
+                <BenchWorkflowDiagram result={planResult} dilFormat={dilFormat} setDilFormat={setDilFormat} />
+              </div>
+            </details>
           </div>
 
           {/* Apply-to-Data-Entry button: pushes the planned series into the General Info dilution fields */}
@@ -1730,19 +2263,47 @@ function ElisaDesignerCard(props){
             var xdsStr = "1/" + planResult.step;
             var firstLabel = fmtDilution(1/planResult.dStart, dilFormat, 100000);
             var stepLabel = fmtDilution(1/planResult.step, dilFormat, 100000);
-            return <div style={{marginTop:14, padding:"14px 16px", background:"linear-gradient(135deg,#eaf6f8,#dff0f4)", border:"1.5px solid #0F8AA2", borderRadius:10, display:"flex", alignItems:"center", justifyContent:"space-between", gap:14, flexWrap:"wrap"}}>
-              <div style={{flex:"1 1 240px", fontSize:12, color:"#0f5c6a", lineHeight:1.6}}>
-                <div style={{fontSize:12, fontWeight:800, color:"#0f5c6a", marginBottom:4, textTransform:"uppercase", letterSpacing:0.5}}>Use these dilutions for back-calculation?</div>
-                Once you run the plate, the analyzer needs to know your sample dilutions to back-calculate concentrations. Click below to fill in the General Information fields:{" "}
-                <span style={{display:"inline-block", marginTop:4, padding:"2px 8px", background:"#fff", border:"1px solid "+BORDER, borderRadius:4, fontFamily:"monospace", fontSize:11}}>Sample first row = <strong style={{color:"#0b2a6f"}}>{xdfStr}</strong> ({firstLabel}), subsequent rows = <strong style={{color:"#0b2a6f"}}>{xdsStr}</strong> ({stepLabel})</span>
+            var plannedSeries = buildDilutionPreview(1/planResult.dStart, 1/planResult.step, planResult.series.length, dilFormat, 100000);
+            var backcalcSeries = buildBackcalcPreview(1/planResult.dStart, 1/planResult.step, planResult.series.length, 100000);
+            var firstWellOnPlate = planResult.preDilutionNeeded ? (planResult.dStart / planResult.preDilutionFactor) : planResult.dStart;
+            var firstWellOnPlateLabel = fmtDilution(1/firstWellOnPlate, dilFormat, 100000);
+            var tubeDilutionLabel = planResult.preDilutionNeeded ? fmtDilution(1/planResult.preDilutionFactor, dilFormat, 100000) : "none (1:1)";
+            var sourceConcLabel = planSt.estimateMode==="value" && planSt.estimateVal
+              ? planSt.estimateVal + " " + planSt.estimateUnit
+              : "original tube";
+            var totalMathText = planResult.preDilutionNeeded
+              ? fmtDilution(1/planResult.preDilutionFactor, dilFormat, 100000) + " tube pre-dilution × " + firstWellOnPlateLabel + " in A1 = " + firstLabel + " total"
+              : firstLabel + " is made directly in A1";
+            return <div style={{marginTop:14, padding:"12px 14px", background:"linear-gradient(135deg,#eaf6f8,#f7fbfc)", border:"1.5px solid #0F8AA2", borderRadius:10}}>
+              <div style={{display:"flex", alignItems:"center", justifyContent:"space-between", gap:14, flexWrap:"wrap"}}>
+              <div style={{flex:"1 1 280px", fontSize:12, color:"#0f5c6a", lineHeight:1.6}}>
+                <div style={{fontSize:12, fontWeight:800, color:"#0f5c6a", marginBottom:3, textTransform:"uppercase", letterSpacing:0.5}}>Send to Data Entry</div>
+                Use these two sample-dilution fields if you follow this setup.
               </div>
-              <button onClick={function(){props.onApplyDilutions(xdfStr, xdsStr);}} style={{background:"linear-gradient(135deg,#0F8AA2,#0b2a6f)", color:"#fff", border:"none", padding:"10px 18px", borderRadius:10, fontSize:13, fontWeight:800, cursor:"pointer", boxShadow:"0 6px 14px rgba(15,138,162,0.25)", whiteSpace:"nowrap"}}>Apply to Data Entry →</button>
+              <button onClick={function(){props.onApplyDilutions(xdfStr, xdsStr);}} style={{background:"linear-gradient(135deg,#0F8AA2,#0b2a6f)", color:"#fff", border:"none", padding:"10px 18px", borderRadius:10, fontSize:13, fontWeight:800, cursor:"pointer", boxShadow:"0 6px 14px rgba(15,138,162,0.25)", whiteSpace:"nowrap"}}>Apply these values →</button>
+              </div>
+              <div style={{marginTop:10, display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(170px,1fr))", gap:8}}>
+                <div style={{background:"#fff", border:"1.5px solid #0f8aa2", borderRadius:8, padding:"9px 10px"}}>
+                  <div style={{fontSize:10, fontWeight:800, color:"#0f5c6a", textTransform:"uppercase", letterSpacing:0.4}}>Sample — first row</div>
+                  <div style={{fontSize:20, fontWeight:900, color:"#0f5c6a", fontFamily:"monospace", marginTop:4}}>{xdfStr}</div>
+                  <div style={{fontSize:10, color:"#6e6e73", marginTop:4, lineHeight:1.4}}>
+                    {planResult.preDilutionNeeded
+                      ? <span>= {fmtDilution(1/planResult.preDilutionFactor,dilFormat,100000)} tube pre-dil <strong>×</strong> {firstWellOnPlateLabel} in A1 combined into one value. The app uses this single number so the back-calculation is always: in-well conc × {fmtDilNum(planResult.dStart,100000)} = original sample.</span>
+                      : <span>Dilution applied at A1. Back-calc: in-well conc × {fmtDilNum(planResult.dStart,100000)} = original sample.</span>}
+                  </div>
+                </div>
+                <div style={{background:"#fff", border:"1px solid #d8dfeb", borderRadius:8, padding:"9px 10px"}}>
+                  <div style={{fontSize:10, fontWeight:800, color:"#30437a", textTransform:"uppercase", letterSpacing:0.4}}>Sample — subsequent rows</div>
+                  <div style={{fontSize:20, fontWeight:900, color:"#30437a", fontFamily:"monospace", marginTop:4}}>{xdsStr}</div>
+                  <div style={{fontSize:10, color:"#6e6e73", marginTop:4, lineHeight:1.4}}>Additional dilution between each row. Each row after the first is another {fmtDilNum(planResult.step,100000)}× more dilute.</div>
+                </div>
+              </div>
             </div>;
           })()}
 
-          {/* Same protocol as a numerical table for users who prefer numbers (collapsed by default) */}
-          <details style={{marginTop:10}}>
-            <summary style={{fontSize:11, color:"#3478F6", fontWeight:600, cursor:"pointer"}}>Show as numerical table</summary>
+          {/* [Numerical table now shown by default above] */}
+          {false && <details style={{marginTop:10}}>
+            <summary>hidden</summary>
             <div style={{marginTop:8, background:"#fafbfd", borderRadius:10, border:"1px solid "+BORDER, overflow:"auto"}}>
               <table style={{width:"100%", borderCollapse:"collapse", fontSize:12}}>
                 <thead>
@@ -1781,33 +2342,38 @@ function ElisaDesignerCard(props){
                 </tbody>
               </table>
             </div>
-          </details>
+          </details>}
 
-          {/* Dilution windows table — what each dilution detects */}
-          <div style={{marginTop:18, fontSize:11, fontWeight:700, color:"#0b2a6f", textTransform:"uppercase", letterSpacing:0.5, marginBottom:8}}>What each well detects</div>
-          <div style={{background:"#fafbfd", borderRadius:10, border:"1px solid "+BORDER, overflow:"hidden"}}>
-            <table style={{width:"100%", borderCollapse:"collapse", fontSize:12}}>
-              <thead>
-                <tr style={{background:"#eef3f8"}}>
-                  <th style={{padding:"6px 10px", textAlign:"left", fontSize:10, fontWeight:700, color:"#30437a"}}>Well</th>
-                  <th style={{padding:"6px 10px", textAlign:"left", fontSize:10, fontWeight:700, color:"#30437a"}}>Dilution</th>
-                  <th style={{padding:"6px 10px", textAlign:"left", fontSize:10, fontWeight:700, color:"#30437a"}}>Sample concentration this well can detect</th>
-                </tr>
-              </thead>
-              <tbody>
-                {planResult.series.map(function(s,i){
-                  var loS = fromPgMl(s.coversSampleAtBottom, planSt.curveUnit);
-                  var hiS = fromPgMl(s.coversSampleAtTop, planSt.curveUnit);
-                  var wlbl = (["A","B","C","D","E","F","G","H"][i] || "Row"+(i+1)) + "1";
-                  return <tr key={i} style={{borderTop:i?"1px solid #eef2f7":"none", background:s.inRange?"#fff":"#f4f4f6"}}>
-                    <td style={{padding:"6px 10px", fontFamily:"monospace", fontWeight:700, color:"#30437a"}}>{wlbl}</td>
-                    <td style={{padding:"6px 10px", fontFamily:"monospace"}}>{fmtDilution(1/s.dilution, dilFormat, 100000)}</td>
-                    <td style={{padding:"6px 10px", color:"#5a6984"}}>{sig3(loS)} – {sig3(hiS)} {planSt.curveUnit}</td>
-                  </tr>;
-                })}
-              </tbody>
-            </table>
-          </div>
+          {/* Optional dilution coverage table — useful for troubleshooting, hidden by default */}
+          <details style={{marginTop:10}}>
+            <summary style={{fontSize:11, color:"#3478F6", fontWeight:600, cursor:"pointer"}}>Optional: why each dilution is useful</summary>
+            <div style={{marginTop:8, background:"#fafbfd", borderRadius:10, border:"1px solid "+BORDER, overflow:"hidden"}}>
+              <div style={{fontSize:11, color:"#6e6e73", lineHeight:1.5, padding:"8px 10px", borderBottom:"1px solid #eef2f7"}}>
+                Use this only when troubleshooting. It shows which original-sample concentrations each well can measure without falling below or above the standard curve.
+              </div>
+              <table style={{width:"100%", borderCollapse:"collapse", fontSize:12}}>
+                <thead>
+                  <tr style={{background:"#eef3f8"}}>
+                    <th style={{padding:"6px 10px", textAlign:"left", fontSize:10, fontWeight:700, color:"#30437a"}}>Well</th>
+                    <th style={{padding:"6px 10px", textAlign:"left", fontSize:10, fontWeight:700, color:"#30437a"}}>Dilution</th>
+                    <th style={{padding:"6px 10px", textAlign:"left", fontSize:10, fontWeight:700, color:"#30437a"}}>Original sample range that would read in-curve</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {planResult.series.map(function(s,i){
+                    var loS = fromPgMl(s.coversSampleAtBottom, planSt.curveUnit);
+                    var hiS = fromPgMl(s.coversSampleAtTop, planSt.curveUnit);
+                    var wlbl = (["A","B","C","D","E","F","G","H"][i] || "Row"+(i+1)) + "1";
+                    return <tr key={i} style={{borderTop:i?"1px solid #eef2f7":"none", background:s.inRange?"#fff":"#f4f4f6"}}>
+                      <td style={{padding:"6px 10px", fontFamily:"monospace", fontWeight:700, color:"#30437a"}}>{wlbl}</td>
+                      <td style={{padding:"6px 10px", fontFamily:"monospace"}}>{fmtDilution(1/s.dilution, dilFormat, 100000)}</td>
+                      <td style={{padding:"6px 10px", color:"#5a6984"}}>{sig3(loS)} – {sig3(hiS)} {planSt.curveUnit}</td>
+                    </tr>;
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </details>
 
           <div style={{marginTop:14, padding:"12px 14px", background:"#fff7e0", borderRadius:8, border:"1px solid #e8c77d", fontSize:12, color:"#5d4500", lineHeight:1.6}}>
             <div style={{fontWeight:800, marginBottom:4}}>Why these dilutions?</div>
@@ -1815,7 +2381,7 @@ function ElisaDesignerCard(props){
           </div>
 
           {/* Blank picker — visible to all */}
-          <BlankPicker />
+          {props.instructor && <BlankPicker />}
 
           {props.instructor && <BlanksGuide />}
         </div>}
@@ -1843,7 +2409,7 @@ function ElisaDesignerCard(props){
           <div>
             <label style={labelStyle}>Unit</label>
             <select value={pilotSt.curveUnit} onChange={function(e){ppu("curveUnit",e.target.value);}} style={selectBox}>
-              {["pg/mL","pg/uL","ng/mL","ng/uL","ug/mL","ug/uL","mg/mL"].map(function(u){return <option key={u} value={u}>{u}</option>;})}
+              {CONC_UNITS.map(function(u){return <option key={u} value={u}>{u}</option>;})}
             </select>
           </div>
         </div>
@@ -2061,197 +2627,312 @@ function PlanDiagram(props){
   </div>;
 }
 
-// BenchWorkflowDiagram — visual representation of the on-plate serial dilution workflow.
-// Shows (1) optional pre-dilution tube at top, (2) vertical column of plate wells with
-// diluent arrows from the side and transfer arrows down between wells.
-// Goal: a student should be able to look at this and immediately know what to do at the bench.
-// Temporal cue: "STEP A — pre-load diluent (multichannel-friendly)" then "STEP B — sample + serial transfer".
+// BenchWorkflowDiagram — clean visual guide for on-plate serial dilution.
+// Design principles:
+//   • No diluent arrows into wells — diluent shown as pre-filled liquid inside the well
+//   • One amber arrow: sample/tube → A1 only
+//   • Purple transfer arrows going straight down, label shows volume only
+//   • Dilution table below the SVG (removes clutter from the graphic)
+//   • No numbered badges
+//   • Pre-dilution tube: two-color fill (diluent + sample layers distinct)
 function BenchWorkflowDiagram(props){
   var r = props.result;
-  var bench = r.benchProtocol; // array of well objects
+  var bench = r.benchProtocol;
   var Vf = r.workingVol;
   var Vt = r.transferVol;
   var nWells = bench.length;
-  // Display format for dilutions: "ratio" ("1:N") or "factor" ("N×"). Toggle is shown subtly above the diagram.
   var dilFormat = props.dilFormat || "ratio";
   var setDilFormat = props.setDilFormat || function(){};
-  // Tighter sciThreshold for well labels — well circles are small, so anything ≥1000 switches to sci notation.
-  var WELL_SCI = 1000;
-  // The pre-dilution badge inside the dashed section gets a slightly looser threshold (more room).
-  var BADGE_SCI = 10000;
 
-  // Layout constants
-  var rowH = 56;                    // height per well row
-  var preDilH = r.preDilutionNeeded ? 130 : 0;
-  var topGap = 36;                  // padding at top (need room for "Step N" header)
-  var bottomGap = 30;               // padding at bottom
-  var wellR = 18;                   // well circle radius
-  var W = 640;
-  var H = topGap + preDilH + (r.preDilutionNeeded ? 28 : 0) + nWells*rowH + bottomGap;
+  // ── Layout ──────────────────────────────────────────────────────────────
+  var W = 620;
+  var rowH = 78;
+  var wellR = 28;
+  var preDilH = r.preDilutionNeeded ? 195 : 0;  // taller for bigger tubes
+  var preDilGap = r.preDilutionNeeded ? 24 : 0;
+  var topPad = 22;
+  var botPad = 28;
+  var H = topPad + preDilH + preDilGap + nWells * rowH + botPad;
 
-  // X coordinates: diluent reservoir on left, plate column in center-right
-  var xDiluent = 90;       // diluent labels/arrows originate here
-  var xWell = 380;         // center of each well
-  var xSrc = 90;           // source arrows for A1 originate here
-  var xDiscard = W - 50;   // discard target for last transfer
+  // X positions
+  var xWell = 390;         // centre of the well column (shifted right to fit Eppendorf tube left)
+  var xEppX = 52;           // Eppendorf tube centre X (no-predil case only)
 
-  // Y coordinate of each well's center — leaves room for the "Step N" header above
-  var stepHeaderY = (r.preDilutionNeeded ? topGap+preDilH+18 : topGap-4);
-  var yOfWell = function(i){
-    var preTopShift = r.preDilutionNeeded ? (preDilH + 28) : 0;
-    return topGap + preTopShift + i*rowH + rowH/2;
-  };
+  // Y of well centre i (counting from 0)
+  var yWell = function(i){ return topPad + preDilH + preDilGap + i * rowH + rowH / 2; };
 
-  // Volume labels are formatted compactly
-  var fmtVol = function(v){return sig3(v)+" µL";};
+  var fmtVol = function(v){ return sig3(v) + " µL"; };
+  var SCI_WELL  = 1000;    // tight — inside well circles
+  var SCI_BADGE = 10000;   // medium — tube/arrow labels
 
   return <div style={{background:"#fafbfd", borderRadius:10, border:"1px solid "+BORDER, padding:"14px 14px 10px"}}>
-    <div style={{display:"flex", alignItems:"center", justifyContent:"space-between", gap:10, marginBottom:4, flexWrap:"wrap"}}>
+
+    {/* Header row: title + format toggle */}
+    <div style={{display:"flex", alignItems:"center", justifyContent:"space-between", gap:10, marginBottom:6, flexWrap:"wrap"}}>
       <div style={{fontSize:11, fontWeight:700, color:"#0b2a6f", textTransform:"uppercase", letterSpacing:0.5}}>How to do it at the bench</div>
       <div style={{fontSize:10, color:"#aeaeb2", display:"flex", alignItems:"baseline", gap:4}}>
         <span>show dilutions as:</span>
-        <FormatPill
-          value={dilFormat}
-          onChange={setDilFormat}
-          labelOf={function(f){return f === "ratio" ? "ratio (1:N)" : "factor (N×)";}}
-          toggleOf={function(f){return f === "ratio" ? "factor" : "ratio";}}
-          size={10}
-          color="#aeaeb2"
-          hoverColor="#0b2a6f"
-        />
+        <FormatPill value={dilFormat} onChange={setDilFormat}
+          labelOf={function(f){return f==="ratio"?"ratio (1:N)":"factor (N×)";}}
+          toggleOf={function(f){return f==="ratio"?"factor":"ratio";}}
+          size={10} color="#aeaeb2" hoverColor="#0b2a6f" />
       </div>
     </div>
-    <div style={{fontSize:11, color:"#6e6e73", marginBottom:10, lineHeight:1.6}}>
-      {r.preDilutionNeeded ? <span>First make the pre-dilution in a tube. Then on the plate, do these two phases:</span> : <span>Two phases on the plate:</span>}
-      <div style={{marginTop:4, paddingLeft:10}}>
-        <div><span style={{color:"#0b2a6f",fontWeight:700}}>Phase A</span> — pre-load all diluent (multichannel-friendly, all wells at once)</div>
-        <div><span style={{color:"#6337b9",fontWeight:700}}>Phase B</span> — add sample to A1, then serial-transfer down (follow the numbered <span style={{display:"inline-block",width:14,height:14,borderRadius:7,background:"#6337b9",color:"#fff",fontSize:9,fontWeight:800,textAlign:"center",lineHeight:"14px",verticalAlign:"middle"}}>1</span> badges)</div>
-      </div>
-      <div style={{marginTop:6, fontStyle:"italic"}}>Use a fresh tip at every step. Pipette up/down 5× to mix before each transfer.</div>
+
+    {/* One-line instructions */}
+    <div style={{fontSize:11, color:"#6e6e73", marginBottom:10, lineHeight:1.55}}>
+      {r.preDilutionNeeded
+        ? "Make the pre-dilution tube first (Step 1), then pipette into A1 and transfer straight down — one well at a time."
+        : "Pre-load diluent into every well, add sample to A1, then transfer straight down — one well at a time. Mix before each transfer."}
     </div>
-    <svg viewBox={"0 0 "+W+" "+H} width="100%" style={{display:"block", maxHeight: H+"px"}} xmlns="http://www.w3.org/2000/svg">
+
+    {/* ── SVG ── */}
+    <svg viewBox={"0 0 "+W+" "+H} width="100%" style={{display:"block"}} xmlns="http://www.w3.org/2000/svg">
       <defs>
-        <marker id="arrIn" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto" markerUnits="strokeWidth">
-          <path d="M0,0 L9,4.5 L0,9 z" fill="#0b2a6f" />
+        <marker id="bwd-arr-samp" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
+          <path d="M0,0 L8,4 L0,8 z" fill="#bf7a1a" />
         </marker>
-        <marker id="arrSamp" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto" markerUnits="strokeWidth">
-          <path d="M0,0 L9,4.5 L0,9 z" fill="#bf7a1a" />
+        <marker id="bwd-arr-xfer" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
+          <path d="M0,0 L8,4 L0,8 z" fill="#6337b9" />
         </marker>
-        <marker id="arrXfer" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto" markerUnits="strokeWidth">
-          <path d="M0,0 L9,4.5 L0,9 z" fill="#6337b9" />
-        </marker>
-        <marker id="arrDiscard" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto" markerUnits="strokeWidth">
-          <path d="M0,0 L9,4.5 L0,9 z" fill="#8e9bb5" />
+        <marker id="bwd-arr-disc" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
+          <path d="M0,0 L8,4 L0,8 z" fill="#a0a8bb" />
         </marker>
       </defs>
 
-      {/* === PRE-DILUTION SECTION === */}
+      {/* ── PRE-DILUTION STEP (optional) ── */}
       {r.preDilutionNeeded && (function(){
-        var tubeX = 200, tubeY = topGap + 16;
-        var tubeW = 60, tubeH = 80;
-        var preDilLabel = fmtDilution(1 / r.preDilutionFactor, dilFormat, BADGE_SCI);
+        var pLabel = fmtDilution(1/r.preDilutionFactor, dilFormat, SCI_BADGE);
+        var onPlateLabel = fmtDilution(1/(r.dStart/r.preDilutionFactor), dilFormat, SCI_BADGE);
+
+        // Tube geometry — large enough to be legible
+        var T1X = 38,  T1Y = topPad + 36, T1W = 68, T1H = 110;  // neat sample tube
+        var T2X = 270, T2Y = topPad + 36, T2W = 68, T2H = 110;  // pre-dil tube
+
+        // Tube outline path (closed, rounded bottom, flat top)
+        var tubeOutline = function(x,y,w,h){
+          var rr = 10;
+          return "M "+x+" "+y
+            +" L "+x+" "+(y+h-rr)
+            +" Q "+x+" "+(y+h)+" "+(x+rr)+" "+(y+h)
+            +" L "+(x+w-rr)+" "+(y+h)
+            +" Q "+(x+w)+" "+(y+h)+" "+(x+w)+" "+(y+h-rr)
+            +" L "+(x+w)+" "+y+" Z";
+        };
+        var tubeClipPath = function(x,y,w,h){
+          var rr = 8;
+          return "M "+(x+3)+" "+(y+3)
+            +" L "+(x+3)+" "+(y+h-rr)
+            +" Q "+(x+3)+" "+(y+h-2)+" "+(x+rr+1)+" "+(y+h-2)
+            +" L "+(x+w-rr-1)+" "+(y+h-2)
+            +" Q "+(x+w-3)+" "+(y+h-2)+" "+(x+w-3)+" "+(y+h-rr)
+            +" L "+(x+w-3)+" "+(y+3)+" Z";
+        };
+
+        // Arrow 1: tube1 → tube2 (horizontal)
+        var a1x1 = T1X+T1W+6, a1y = T1Y+T1H*0.52;
+        var a1x2 = T2X-5;
+
+        // Arrow 2: tube2 → A1 (curved down-right)
+        var a2x1 = T2X+T2W+6, a2y1 = T2Y+T2H*0.50;
+        var a2x2 = xWell-wellR-5, a2y2 = yWell(0);
+        var cp1x = a2x1+56, cp1y = a2y1-8;
+        var cp2x = a2x2-44, cp2y = a2y2-18;
+
         return <g>
-          <rect x={20} y={topGap} width={W-40} height={preDilH} fill="#fff8ea" stroke="#e8c77d" strokeWidth={1} strokeDasharray="4,3" rx={6} />
-          <text x={32} y={topGap+16} fontSize={10} fontWeight={800} fill="#7a5800" style={{textTransform:"uppercase"}}>Step 1 — Pre-dilution in a tube ({preDilLabel})</text>
+          {/* Step 1 amber-tinted background box */}
+          <rect x={12} y={topPad} width={W-24} height={preDilH}
+            fill="#fff8ea" stroke="#e8c77d" strokeWidth={1} strokeDasharray="4,3" rx={7} />
+          <text x={26} y={topPad+16} fontSize={10} fontWeight={800} fill="#7a5800">Step 1 — Pre-dilution in a tube ({pLabel})</text>
 
-          {/* Tube graphic — rounded-bottom rectangle */}
-          <path d={"M "+tubeX+" "+tubeY+" L "+tubeX+" "+(tubeY+tubeH-12)+" Q "+tubeX+" "+(tubeY+tubeH)+" "+(tubeX+12)+" "+(tubeY+tubeH)+" L "+(tubeX+tubeW-12)+" "+(tubeY+tubeH)+" Q "+(tubeX+tubeW)+" "+(tubeY+tubeH)+" "+(tubeX+tubeW)+" "+(tubeY+tubeH-12)+" L "+(tubeX+tubeW)+" "+tubeY+" Z"} fill="#fff" stroke="#7a5800" strokeWidth={1.2} />
-          {/* Liquid fill (lower 70%) */}
-          <path d={"M "+(tubeX+2)+" "+(tubeY+tubeH*0.3)+" L "+(tubeX+2)+" "+(tubeY+tubeH-13)+" Q "+(tubeX+2)+" "+(tubeY+tubeH-2)+" "+(tubeX+13)+" "+(tubeY+tubeH-2)+" L "+(tubeX+tubeW-13)+" "+(tubeY+tubeH-2)+" Q "+(tubeX+tubeW-2)+" "+(tubeY+tubeH-2)+" "+(tubeX+tubeW-2)+" "+(tubeY+tubeH-13)+" L "+(tubeX+tubeW-2)+" "+(tubeY+tubeH*0.3)+" Z"} fill="#bf7a1a" fillOpacity={0.18} />
-          <text x={tubeX+tubeW/2} y={tubeY+tubeH+14} fontSize={9} fontWeight={700} fill="#7a5800" textAnchor="middle">1 mL tube</text>
+          {/* ── TUBE 1: neat sample ── */}
+          <path d={tubeOutline(T1X,T1Y,T1W,T1H)} fill="#fffaf3" stroke="#bf7a1a" strokeWidth={1.8} />
+          <clipPath id="bwd-t1clip"><path d={tubeClipPath(T1X,T1Y,T1W,T1H)} /></clipPath>
+          {/* Amber fill representing neat sample */}
+          <rect x={T1X+4} y={T1Y+T1H*0.22} width={T1W-8} height={T1H*0.76}
+            fill="#bf7a1a" fillOpacity={0.25} clipPath="url(#bwd-t1clip)" />
+          {/* Liquid surface line */}
+          <ellipse cx={T1X+T1W/2} cy={T1Y+T1H*0.22} rx={T1W/2-5} ry={4}
+            fill="#bf7a1a" fillOpacity={0.35} clipPath="url(#bwd-t1clip)" />
+          {/* Tube opening — subtle rim, no solid cap */}
+          <rect x={T1X} y={T1Y-3} width={T1W} height={4} rx={1} fill="#e8c77d" fillOpacity={0.5} />
+          {/* Text labels */}
+          <text x={T1X+T1W/2} y={T1Y+T1H*0.52} fontSize={10} fontWeight={800} fill="#6a3a00" textAnchor="middle">neat</text>
+          <text x={T1X+T1W/2} y={T1Y+T1H*0.52+14} fontSize={10} fontWeight={800} fill="#6a3a00" textAnchor="middle">sample</text>
+          <text x={T1X+T1W/2} y={T1Y-9} fontSize={9} fontWeight={800} fill="#7a5800" textAnchor="middle">① start here</text>
 
-          {/* Arrow: sample IN to tube */}
-          <line x1={70} y1={tubeY+22} x2={tubeX-3} y2={tubeY+22} stroke="#bf7a1a" strokeWidth={1.5} markerEnd="url(#arrSamp)" />
-          <text x={70} y={tubeY+18} fontSize={9} fontWeight={700} fill="#bf7a1a">{fmtVol(r.preDilutedSampleVol)} neat sample</text>
-
-          {/* Arrow: diluent IN to tube */}
-          <line x1={70} y1={tubeY+50} x2={tubeX-3} y2={tubeY+50} stroke="#0b2a6f" strokeWidth={1.5} markerEnd="url(#arrIn)" />
-          <text x={70} y={tubeY+46} fontSize={9} fontWeight={700} fill="#0b2a6f">{fmtVol(r.preDilutedDiluentVol)} diluent</text>
-
-          {/* "Mix" label inside tube */}
-          <text x={tubeX+tubeW/2} y={tubeY+tubeH/2+4} fontSize={10} fontWeight={700} fill="#7a5800" textAnchor="middle" fontStyle="italic">mix</text>
-
-          {/* Arrow from tube to plate column (down + right) — landing on A1 */}
+          {/* ── ARROW 1: curved from inside tube1 → tube2 ── */}
           {(function(){
-            var fromX = tubeX+tubeW+8, fromY = tubeY+tubeH/2;
-            var toX = xWell - wellR - 4, toY = yOfWell(0);
+            var cpx=(a1x1+a1x2)/2, cpy=a1y-28; // arc upward
             return <g>
-              <path d={"M "+fromX+" "+fromY+" Q "+(fromX+50)+" "+fromY+" "+(fromX+80)+" "+toY+" L "+toX+" "+toY} fill="none" stroke="#bf7a1a" strokeWidth={1.5} markerEnd="url(#arrSamp)" strokeDasharray="0" />
-              <text x={(fromX+toX)/2} y={(fromY+toY)/2 - 6} fontSize={9} fontWeight={700} fill="#bf7a1a" textAnchor="middle">use this →</text>
+              <path d={"M "+a1x1+" "+a1y+" Q "+cpx+" "+cpy+" "+a1x2+" "+a1y}
+                fill="none" stroke="#bf7a1a" strokeWidth={1.6} markerEnd="url(#bwd-arr-samp)" />
+              <text x={cpx} y={cpy-6} fontSize={9} fontWeight={700} fill="#7a5800" textAnchor="middle">{fmtVol(r.preDilutedSampleVol)} aliquot</text>
+            </g>;
+          })()}
+
+          {/* ── TUBE 2: pre-dil tube — two-color fill ── */}
+          <path d={tubeOutline(T2X,T2Y,T2W,T2H)} fill="#f9fbff" stroke="#0b2a6f" strokeWidth={1.8} />
+          <clipPath id="bwd-t2clip"><path d={tubeClipPath(T2X,T2Y,T2W,T2H)} /></clipPath>
+          {/* Navy diluent — lower ~65% */}
+          <rect x={T2X+4} y={T2Y+T2H*0.31} width={T2W-8} height={T2H*0.67}
+            fill="#0b2a6f" fillOpacity={0.18} clipPath="url(#bwd-t2clip)" />
+          {/* Amber sample layer — thin band where it sits on the diluent */}
+          <rect x={T2X+4} y={T2Y+T2H*0.27} width={T2W-8} height={T2H*0.07}
+            fill="#bf7a1a" fillOpacity={0.55} clipPath="url(#bwd-t2clip)" />
+          {/* Surface sheen on sample layer */}
+          <ellipse cx={T2X+T2W/2} cy={T2Y+T2H*0.27} rx={T2W/2-5} ry={4}
+            fill="#bf7a1a" fillOpacity={0.35} clipPath="url(#bwd-t2clip)" />
+          {/* Tube opening rim */}
+          <rect x={T2X} y={T2Y-3} width={T2W} height={4} rx={1} fill="#d8dfeb" fillOpacity={0.5} />
+          {/* Volume labels outside-right to avoid crowding */}
+          <text x={T2X+T2W+10} y={T2Y+T2H*0.24} fontSize={9} fontWeight={700} fill="#6a3a00">
+            {fmtVol(r.preDilutedSampleVol)} sample
+          </text>
+          <text x={T2X+T2W+10} y={T2Y+T2H*0.56} fontSize={9} fontWeight={700} fill="#0b2a6f">
+            {fmtVol(r.preDilutedDiluentVol)} diluent
+          </text>
+          {/* Mix label inside */}
+          <text x={T2X+T2W/2} y={T2Y+T2H*0.80} fontSize={10} fontWeight={800} fill="#5a3a7a" textAnchor="middle" fontStyle="italic">mix</text>
+          {/* Result label — moved right of tube to avoid collision with curved arrow to A1 */}
+          <text x={T2X+T2W+10} y={T2Y+T2H+4} fontSize={10} fontWeight={800} fill="#7a5800">→ {pLabel}</text>
+          <text x={T2X+T2W/2} y={T2Y-9} fontSize={9} fontWeight={800} fill="#30437a" textAnchor="middle">② pre-dil tube</text>
+
+          {/* ── ARROW 2: curved from tube2 → A1 ── */}
+          <path d={"M "+a2x1+" "+a2y1+" C "+cp1x+" "+cp1y+" "+cp2x+" "+cp2y+" "+a2x2+" "+a2y2}
+            fill="none" stroke="#bf7a1a" strokeWidth={1.6} markerEnd="url(#bwd-arr-samp)" />
+          {(function(){
+            var t=0.5, m=1-t;
+            var lx=m*m*m*a2x1+3*m*m*t*cp1x+3*m*t*t*cp2x+t*t*t*a2x2;
+            var ly=m*m*m*a2y1+3*m*m*t*cp1y+3*m*t*t*cp2y+t*t*t*a2y2;
+            return <g>
+              <rect x={lx-62} y={ly+6} width={124} height={17} rx={8} fill="#fff8ea" />
+              <text x={lx} y={ly+19} fontSize={9} fontWeight={700} fill="#7a5800" textAnchor="middle">③ {fmtVol(bench[0].sampleVol)} aliquot → A1</text>
             </g>;
           })()}
         </g>;
       })()}
 
-      {/* === PLATE COLUMN SECTION === */}
-      {/* Step header */}
-      <text x={32} y={stepHeaderY} fontSize={10} fontWeight={800} fill="#0b2a6f" style={{textTransform:"uppercase"}}>{r.preDilutionNeeded ? "Step 2 — " : "Step 1 — "}On-plate serial dilution (column 1)</text>
+      {/* ── PLATE COLUMN ── */}
+      {/* Step label */}
+      <text x={xWell} y={topPad + preDilH + preDilGap - 6} fontSize={10} fontWeight={800} fill="#0b2a6f" textAnchor="middle">
+        {r.preDilutionNeeded ? "Step 2" : "Step 1"} — serial dilution down column 1  (bold blue number inside each well = diluent pre-loaded)
+      </text>
 
-      {/* Wells */}
-      {bench.map(function(b,i){
-        var cy = yOfWell(i);
-        var nextY = i < nWells-1 ? yOfWell(i+1) : null;
-        // Format the well dilution label with sci notation if too big to fit
-        var df = 1 / b.dilution; // b.dilution is the integer dilution factor, df is the fraction
-        var wellLabel = fmtDilution(df, dilFormat, WELL_SCI);
+      {/* ── Eppendorf tube (no-predilution case only, drawn once, aligned with A1) ── */}
+      {!r.preDilutionNeeded && (function(){
+        var cy0 = yWell(0);
+        var ex = xEppX, ey = cy0 - 52, ew = 34, eh = 68;
+        // Eppendorf-style microcentrifuge tube: conical bottom, straight sides, small open top
+        var body = "M "+(ex)+" "+ey
+          +" L "+(ex)+" "+(ey+eh*0.62)
+          +" L "+(ex+ew/2)+" "+(ey+eh)
+          +" L "+(ex+ew)+" "+(ey+eh*0.62)
+          +" L "+(ex+ew)+" "+ey+" Z";
+        var fill = "M "+(ex+3)+" "+(ey+3)
+          +" L "+(ex+3)+" "+(ey+eh*0.58)
+          +" L "+(ex+ew/2)+" "+(ey+eh-3)
+          +" L "+(ex+ew-3)+" "+(ey+eh*0.58)
+          +" L "+(ex+ew-3)+" "+(ey+3)+" Z";
+        // Hinge / lid at top
+        var lidY = ey - 6;
+        return <g>
+          <path d={body} fill="#fffaf3" stroke="#bf7a1a" strokeWidth={1.6} />
+          <path d={fill} fill="#bf7a1a" fillOpacity={0.25} />
+          {/* Liquid surface */}
+          <line x1={ex+3} y1={ey+12} x2={ex+ew-3} y2={ey+12} stroke="#bf7a1a" strokeOpacity={0.4} strokeWidth={1} />
+          {/* Open-top cap suggestion — small rect */}
+          <rect x={ex+4} y={lidY} width={ew-8} height={8} rx={2} fill="#e8c77d" />
+          {/* Label */}
+          <text x={ex+ew/2} y={ey-12} fontSize={9} fontWeight={800} fill="#7a5000" textAnchor="middle">neat sample</text>
+          {/* Arrow: curved from inside tube → A1 well */}
+          {(function(){
+            var ax1 = ex+ew+4, ay1 = ey+eh*0.30;
+            var ax2 = xWell-wellR-4, ay2 = cy0;
+            var cpx1 = ax1+40, cpy1 = ay1-14;
+            var cpx2 = ax2-20, cpy2 = ay2-14;
+            return <g>
+              <path d={"M "+ax1+" "+ay1+" C "+cpx1+" "+cpy1+" "+cpx2+" "+cpy2+" "+ax2+" "+ay2}
+                fill="none" stroke="#bf7a1a" strokeWidth={1.6} markerEnd="url(#bwd-arr-samp)" />
+              <text x={(ax1+ax2)/2} y={ay1-18} fontSize={9} fontWeight={700} fill="#7a5000" textAnchor="middle">
+                {fmtVol(bench[0].sampleVol)} → A1
+              </text>
+            </g>;
+          })()}
+        </g>;
+      })()}
+
+      {bench.map(function(b, i){
+        var cy = yWell(i);
+        var nextY = i < nWells - 1 ? yWell(i + 1) : null;
+        var dv = b.isFirst ? b.diluentVol : b.preload; // diluent volume pre-loaded in this well
+
+        // Liquid fill — use SVG arc path to perfectly follow the well circle, no clipping needed
+        var fillFrac = dv > 0 ? Math.min(dv / Vf, 0.92) : 0;
+        var fillH = fillFrac * (wellR * 1.7);
+        var fillY = cy + wellR - fillH;
+
         return <g key={i}>
-          {/* Well circle */}
-          <circle cx={xWell} cy={cy} r={wellR} fill="#fff" stroke="#0b2a6f" strokeWidth={1.4} />
-          <text x={xWell} y={cy-2} fontSize={9} fontWeight={800} fill="#30437a" textAnchor="middle">{b.wellLabel}</text>
-          <text x={xWell} y={cy+9} fontSize={8} fontWeight={700} fill="#6337b9" textAnchor="middle">{wellLabel}</text>
+          {/* Well base fill (light) */}
+          <circle cx={xWell} cy={cy} r={wellR} fill="#f7fbff" stroke="#0b2a6f" strokeWidth={1.5} />
+          {/* Diluent fill: SVG arc path that perfectly follows the circle — no rectangular corners */}
+          {fillFrac > 0.05 && (function(){
+            var dfc = cy + wellR - fillY; // distance from circle centre to top of fill
+            // clamp so arcHW never exceeds radius
+            var arcHW = Math.sqrt(Math.max(0, (wellR-0.5)*(wellR-0.5) - (wellR - dfc)*(wellR - dfc)));
+            // arc path: move to left edge of chord, arc clockwise to right edge, then down along inside of circle back to bottom
+            var lx = xWell - arcHW, rx = xWell + arcHW;
+            // We use two arcs: top arc (the chord surface, flat-ish) drawn as a straight line + bottom arc
+            var path = "M "+lx+" "+fillY
+              +" A "+(wellR-0.5)+" "+(wellR-0.5)+" 0 "+(fillH > wellR ? "1" : "0")+" 1 "+rx+" "+fillY
+              +" A "+(wellR-0.5)+" "+(wellR-0.5)+" 0 1 1 "+lx+" "+fillY+" Z";
+            return <g>
+              <path d={path} fill="#0b2a6f" fillOpacity={0.13} />
+              {/* Surface sheen — ellipse at the top of the liquid */}
+              <ellipse cx={xWell} cy={fillY} rx={arcHW*0.80} ry={3} fill="#0b2a6f" fillOpacity={0.20} />
+            </g>;
+          })()}
+          {/* Well border on top of fill */}
+          <circle cx={xWell} cy={cy} r={wellR} fill="none" stroke="#0b2a6f" strokeWidth={1.5} />
 
-          {/* Diluent IN arrow (from left) — for wells 2..N (B1..H1) */}
-          {!b.isFirst && <g>
-            <line x1={xDiluent} y1={cy} x2={xWell-wellR-4} y2={cy} stroke="#0b2a6f" strokeWidth={1.4} markerEnd="url(#arrIn)" />
-            <text x={xDiluent-4} y={cy-3} fontSize={8} fontWeight={700} fill="#0b2a6f" textAnchor="end">{fmtVol(b.preload)} diluent</text>
-          </g>}
+          {/* Well letter above */}
+          <text x={xWell} y={cy - wellR - 7} fontSize={10} fontWeight={800} fill="#30437a" textAnchor="middle">{b.wellLabel}</text>
 
-          {/* For first well (A1): show source arrow from left */}
-          {b.isFirst && <g>
-            <line x1={xSrc} y1={cy-9} x2={xWell-wellR-4} y2={cy-9} stroke="#bf7a1a" strokeWidth={1.4} markerEnd="url(#arrSamp)" />
-            {/* Source label is rendered as two compact lines if a pre-dilution is in use, single line otherwise */}
-            {(function(){
-              var srcText = b.sampleSource;
-              // For "pre-diluted sample (1:N)" use "{vol} pre-dil" / "(1:N)" to fit in tight space
-              var preDilMatch = srcText.match(/^pre-diluted sample\s*\(([^)]+)\)/);
-              if(preDilMatch){
-                // Reformat the parenthetical "1:N" using the user's chosen format and sci threshold
-                var origRatio = preDilMatch[1].match(/1:(\d+)/);
-                var preLabel = origRatio ? "("+fmtDilution(1/parseInt(origRatio[1]), dilFormat, BADGE_SCI)+")" : "("+preDilMatch[1]+")";
-                return <g>
-                  <text x={xSrc-4} y={cy-16} fontSize={8} fontWeight={700} fill="#bf7a1a" textAnchor="end">{fmtVol(b.sampleVol)} pre-dil</text>
-                  <text x={xSrc-4} y={cy-7} fontSize={8} fontWeight={700} fill="#bf7a1a" textAnchor="end">{preLabel}</text>
-                </g>;
-              }
-              return <text x={xSrc-4} y={cy-12} fontSize={8} fontWeight={700} fill="#bf7a1a" textAnchor="end">{fmtVol(b.sampleVol)} {srcText}</text>;
-            })()}
-            {b.diluentVol > 0 && <g>
-              <line x1={xSrc} y1={cy+9} x2={xWell-wellR-4} y2={cy+9} stroke="#0b2a6f" strokeWidth={1.4} markerEnd="url(#arrIn)" />
-              <text x={xSrc-4} y={cy+15} fontSize={8} fontWeight={700} fill="#0b2a6f" textAnchor="end">{fmtVol(b.diluentVol)} diluent</text>
-            </g>}
-          </g>}
+          {/* Diluent volume INSIDE the well, bold, near bottom */}
+          {dv > 0 && <text x={xWell} y={cy + 5} fontSize={8} fontWeight={800} fill="#0b2a6f" textAnchor="middle">{sig3(dv)} µL</text>}
 
-          {/* Transfer arrow DOWN to next well — labeled with step number to clarify sequence */}
+          {/* Transfer arrow straight down — label left of arrow to avoid overlap with diluent label on right */}
           {nextY != null && <g>
-            <line x1={xWell} y1={cy+wellR+1} x2={xWell} y2={nextY-wellR-4} stroke="#6337b9" strokeWidth={1.6} markerEnd="url(#arrXfer)" />
-            {/* Small numbered badge on the arrow midpoint to show transfer order */}
-            <circle cx={xWell-12} cy={(cy+wellR+1+nextY-wellR-4)/2} r={7} fill="#6337b9" />
-            <text x={xWell-12} y={(cy+wellR+1+nextY-wellR-4)/2+3} fontSize={9} fontWeight={800} fill="#fff" textAnchor="middle">{i+1}</text>
-            <text x={xWell+wellR+8} y={(cy+nextY)/2 + 3} fontSize={9} fontWeight={700} fill="#6337b9">{fmtVol(b.transferOut)} (mix → next)</text>
+            <line x1={xWell} y1={cy+wellR+2} x2={xWell} y2={nextY-wellR-5} stroke="#6337b9" strokeWidth={1.7} markerEnd="url(#bwd-arr-xfer)" />
+            <text x={xWell - wellR - 8} y={(cy+nextY)/2+4} fontSize={9} fontWeight={700} fill="#6337b9" textAnchor="end">transfer {fmtVol(Vt)}</text>
           </g>}
-          {/* Last well: short discard arrow OFF to right */}
+
+          {/* Last well: discard stub to right */}
           {nextY == null && <g>
-            <line x1={xWell+wellR+1} y1={cy} x2={xDiscard-3} y2={cy} stroke="#8e9bb5" strokeWidth={1.4} strokeDasharray="3,2" markerEnd="url(#arrDiscard)" />
-            <text x={xDiscard} y={cy-4} fontSize={8} fontWeight={600} fill="#8e9bb5" textAnchor="end" fontStyle="italic">discard {fmtVol(Vt)}</text>
-            <text x={xDiscard} y={cy+10} fontSize={8} fontWeight={600} fill="#1a6b32" textAnchor="end">all wells now {Vf} µL — done</text>
+            <line x1={xWell+wellR+2} y1={cy} x2={xWell+wellR+40} y2={cy} stroke="#a0a8bb" strokeWidth={1.2} strokeDasharray="3,2" markerEnd="url(#bwd-arr-disc)" />
+            <text x={xWell+wellR+46} y={cy-4} fontSize={8} fill="#a0a8bb">discard {fmtVol(Vt)}</text>
+            <text x={xWell+wellR+46} y={cy+8} fontSize={8} fontWeight={700} fill="#1a6b32">✓ all wells {Vf} µL</text>
           </g>}
         </g>;
       })}
     </svg>
 
-    {/* Footer summary */}
+    {/* Dilution reference table — below the SVG, clean grid */}
+    <div style={{marginTop:10}}>
+      <div style={{fontSize:10, fontWeight:700, color:"#0b2a6f", marginBottom:6, textTransform:"uppercase", letterSpacing:0.4}}>Dilution at each well</div>
+      <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(66px,1fr))", gap:5}}>
+        {bench.map(function(b){
+          return <div key={b.wellLabel} style={{border:"1px solid #e5eaf3", borderRadius:8, background:"#fff", padding:"5px 6px", textAlign:"center"}}>
+            <div style={{fontSize:10, fontWeight:800, color:"#30437a"}}>{b.wellLabel}</div>
+            <div style={{fontSize:11, fontWeight:800, color:"#6337b9", fontFamily:"monospace", marginTop:2}}>{fmtDilution(1/b.dilution, dilFormat, 100000)}</div>
+          </div>;
+        })}
+      </div>
+    </div>
+
+    {/* Footer */}
     <div style={{fontSize:10, color:"#6e6e73", marginTop:8, fontStyle:"italic", lineHeight:1.5, padding:"6px 10px", background:"#f4f4f6", borderRadius:6}}>
-      All wells end up with <strong>{Vf} µL</strong> after the final transfer is discarded. Well-to-well transfer = <strong>{sig3(Vt)} µL</strong>. Run replicate columns the same way (or use a multichannel for diluent loading).
+      Each well ends at <strong>{Vf} µL</strong>. Transfer between wells = <strong>{sig3(Vt)} µL</strong>. Run replicate columns independently, or pre-load all diluent with a multichannel first.
     </div>
     {r.benchWarn && <div style={{marginTop:8, padding:"8px 10px", background:"#fde2dd", color:"#a02c1c", fontSize:11, borderRadius:6, lineHeight:1.5}}>⚠ {r.benchWarn}</div>}
   </div>;
@@ -2421,9 +3102,3647 @@ function BlanksGuide(){
 }
 
 
+// ─────────────────────────────────────────────────────────────────────────────
+// System Suitability card — shared component, mounted on BOTH Results and
+// Recommendations tabs (Option α architecture: one source, two view sites).
+//
+// Computes, per plate:
+//   • Standard-curve goodness:  R² (informational only — ICH M10 doesn't pin a numeric threshold)
+//   • Back-fit accuracy:         For each standard, run its corrected absorbance through the
+//                                inverse fit (iFn) to get back-calculated concentration, then
+//                                accuracy = backFit / nominal × 100. ICH M10 wants ≥75% of
+//                                standards within 80–120% (within 75–125% at LLOQ).
+//   • Standard precision:        CV across replicates per standard (already in dbS[i].cv).
+//                                ICH M10: ≤15%, ≤20% at LLOQ.
+//   • LLOQ identification:       The lowest-concentration standard is treated as LLOQ for
+//                                wider-window evaluation.
+//
+// In instructor mode, also surfaces:
+//   • Cross-plate precision:     CV of corrected absorbance for each standard level, computed
+//                                ACROSS plates (not within). This is plate-to-plate
+//                                reproducibility — distinct from the within-plate replicate CV
+//                                which is intra-plate (instrument + pipetting noise).
+//
+// Pass/fail logic for the overall pill:
+//   • PASS:    every plate's back-fit ≥75% in window AND every plate's precision OK (LLOQ exempted properly).
+//   • FAIL:    any plate fails outright (≥2 standards out of acceptance, or LLOQ out + CV exceeded).
+//   • REVIEW:  borderline (some standards out of band but ≥75% still in spec) — analyst decides.
+//
+// We deliberately do NOT block reporting on SST failure (the analyst tab persona may still need
+// to see the data); the panel is informational and prominent.
+// ─────────────────────────────────────────────────────────────────────────────
+// Compute the de-facto LLOQ per plate. The de-facto LLOQ is the lowest standard concentration
+// that PASSES back-fit accuracy (within ±20%). Standards below it are unreliable, so any sample
+// whose reported concentration falls below this threshold should be flagged BLOQ.
+// Returns {plateIdx: lloqValue_in_base_unit | null}. null means: no failures, or no passing standards
+// (in which case there's no meaningful de-facto LLOQ to enforce).
+function computeDeFactoLLOQ(res) {
+  var out = {};
+  if (!res || !res.length) return out;
+  res.forEach(function(p, pi){
+    if (!p.iFn || !p.dbS) { out[pi] = null; return; }
+    // Build per-standard accuracy
+    var stds = p.dbS.map(function(d){
+      if (d.conc === 0 || d.avg == null || d.conc == null) return null;
+      var bf = p.iFn(d.avg);
+      if (bf == null || !isFinite(bf) || bf <= 0) return {conc: d.conc, pass: null};
+      var acc = (bf / d.conc) * 100;
+      return { conc: d.conc, accuracy: acc, pass: (acc >= 80 && acc <= 120) };
+    }).filter(function(s){return s != null;});
+    if (stds.length === 0) { out[pi] = null; return; }
+    var anyFail = stds.some(function(s){return s.pass === false;});
+    if (!anyFail) { out[pi] = null; return; }   // all passing — no de-facto LLOQ shift
+    // Among passing standards, the lowest concentration is the de-facto LLOQ.
+    var passing = stds.filter(function(s){return s.pass === true;}).sort(function(a,b){return a.conc - b.conc;});
+    out[pi] = passing.length > 0 ? passing[0].conc : null;
+  });
+  return out;
+}
+
+// Detect samples whose name suggests they are SST (System Suitability) samples,
+// PLUS any samples explicitly flagged by the user via the SST picker (props.sstFlags).
+// Pattern matching covers many variants: "SST", "SST-mid", "Sys Suit", "system_suit",
+// "System Suitability", "suitability_low", "syssuit", "sst sample", "QC/SST", etc.
+// Returns {plateIdx, sampleIdx, name, key, source} where source is "auto" (name match) or "manual" (flag).
+function detectSSTSamples(res, sstFlags) {
+  var matches = [];
+  if (!res || !res.length) return matches;
+  var flags = sstFlags || {};
+  var patterns = [
+    /(^|[^a-z])sst([^a-z]|$)/i,                  // "sst" as a token boundary
+    /sys[\s_-]*suit/i,                            // "syssuit", "sys suit", "sys_suit", "sys-suit"
+    /system[\s_-]*suit/i,                         // "system suit", "systemsuit", etc.
+    /suitab/i                                     // "suitability", "suitable", "suitab" prefix
+  ];
+  res.forEach(function(p, pi){
+    (p.samps || []).forEach(function(s, si){
+      var nm = s.name || "";
+      var key = pi+"-"+si;
+      var nameHit = patterns.some(function(pat){return pat.test(nm);});
+      var flagHit = flags[key] === true || flags[key] === "true";
+      if (nameHit || flagHit) {
+        matches.push({
+          plateIdx: pi, sampleIdx: si, name: nm, key: key,
+          source: nameHit ? "auto" : "manual"
+        });
+      }
+    });
+  });
+  return matches;
+}
+
+function SystemSuitabilityCard(props) {
+  // sstAcknowledgement: null = user hasn't responded yet, "has-ssts" = user said "yes I have SSTs",
+  // "no-ssts" = user said "no, this run has none". Lets us hide the prompt once dismissed.
+  var _ack = useState(null), sstAck = _ack[0], setSstAck = _ack[1];
+  var res = props.res;
+  if (!res || !res.length) return null;
+  var unit = props.unit;
+  var displayUnit = props.displayUnit || unit;
+  var instructor = !!props.instructor;
+  var stdDisplayName = props.stdDisplayName || function(pi){return "Standard (P"+(pi+1)+")";};
+  // SST sample inputs: parent (App) passes the parsed sstExpected dict + a setter callback.
+  // sstExpected is a {key: value-string-in-unit} map. value is stored as a STRING (raw text input)
+  // so the user can type freely; we parseFloat at compute time.
+  var sstExpected = props.sstExpected || {};
+  var setSSTExpected = props.setSSTExpected || function(){};
+  // sstFlags: manual SST designations. Lets the user mark any sample as SST via dropdown picker.
+  var sstFlags = props.sstFlags || {};
+  var toggleSSTFlag = props.toggleSSTFlag || function(){};
+  // Per-sample analyst pick lookup — comes from buildSummaryRows so the card sees what the analyst is reporting.
+  // analystPickFor: function(plateIdx, sampleIdx) => {conc, dil, cv} or null
+  var analystPickFor = props.analystPickFor || function(){return null;};
+
+  // ── PART A: SST SAMPLES ─────────────────────────────────────────────────
+  // Detect samples by name OR manual flag; for each, read the analyst's reported concentration; compare to expected.
+  var sstSamples = detectSSTSamples(res, sstFlags);
+  var sstRows = sstSamples.map(function(m){
+    var pick = analystPickFor(m.plateIdx, m.sampleIdx);
+    var observed = pick && pick.conc != null ? pick.conc : null;  // in base `unit`
+    // Storage convention (v5bg+): sstExpected[key] holds the RAW USER-TYPED STRING in the
+    // displayUnit at the moment they typed it. We do NOT auto-convert on unit toggles, so the
+    // input value round-trips exactly with what the user sees (and backspace works normally).
+    // For accuracy compute: parse the stored string as a number (assumed to be in displayUnit),
+    // convert to base unit, then divide observed/expected.
+    var expectedRaw = sstExpected[m.key];
+    var expectedDispVal = (expectedRaw!=null && expectedRaw !== "") ? parseFloat(expectedRaw) : null;
+    if (expectedDispVal != null && (!isFinite(expectedDispVal) || expectedDispVal <= 0)) expectedDispVal = null;
+    // Convert from displayUnit to base unit for accuracy compute
+    var expectedBase = expectedDispVal != null ? convertConc(expectedDispVal, displayUnit, unit) : null;
+    var accuracy = (observed != null && expectedBase != null) ? (observed / expectedBase) * 100 : null;
+    // ICH M10 QC sample acceptance: 80–120% (no special LLOQ window for QCs at this level).
+    var pass = accuracy != null ? (accuracy >= 80 && accuracy <= 120) : null;
+    return {
+      key: m.key,
+      plateIdx: m.plateIdx,
+      sampleIdx: m.sampleIdx,
+      name: m.name,
+      source: m.source,    // "auto" (name-matched) or "manual" (flagged via picker)
+      observed: observed,
+      expectedBase: expectedBase,        // numeric, base unit, used for compute (may be null)
+      expectedRaw: expectedRaw || "",    // raw string the user typed, in displayUnit
+      accuracy: accuracy,
+      pass: pass,
+      hasExpected: expectedBase != null,
+      dil: pick && pick.dil != null ? pick.dil : null
+    };
+  });
+  // SST overall status for the panel banner
+  var sstEvaluable = sstRows.filter(function(r){return r.accuracy!=null;});
+  var sstPassing = sstEvaluable.filter(function(r){return r.pass;}).length;
+  var sstStatus;
+  if (sstSamples.length === 0) sstStatus = "no-data";
+  else if (sstEvaluable.length === 0) sstStatus = "missing-expected";
+  else if (sstPassing === sstEvaluable.length) sstStatus = "pass";
+  else if (sstPassing === 0) sstStatus = "fail";
+  else sstStatus = "review";
+
+  // ── PART B: CALIBRATOR QUALITY (standard back-fit) ─────────────────────
+  var plateSST = res.map(function(p, pi) {
+    var standards = (p.dbS || []).map(function(d, idx) {
+      var nominal = d.conc;
+      var measured = d.avg;       // already blank-corrected
+      var cv = d.cv;               // intra-plate replicate CV (fraction)
+      var backFit = null, accuracy = null;
+      if (p.iFn && measured != null && nominal != null && nominal > 0) {
+        backFit = p.iFn(measured);
+        if (backFit != null && isFinite(backFit) && backFit > 0) {
+          accuracy = (backFit / nominal) * 100;
+        }
+      }
+      return { idx: idx, nominal: nominal, measured: measured, backFit: backFit, accuracy: accuracy, cv: cv };
+    });
+    var nonZero = standards.filter(function(s){return s.nominal>0;});
+    var lloqIdx = -1;
+    if (nonZero.length) {
+      var minConc = Math.min.apply(null, nonZero.map(function(s){return s.nominal;}));
+      lloqIdx = standards.findIndex(function(s){return s.nominal===minConc;});
+    }
+    standards.forEach(function(s, idx){
+      var isLLOQ = (idx === lloqIdx);
+      var accLo = isLLOQ ? 75 : 80;
+      var accHi = isLLOQ ? 125 : 120;
+      var cvLim = isLLOQ ? 0.20 : 0.15;
+      s.isLLOQ = isLLOQ;
+      s.accPass = (s.accuracy != null) && (s.accuracy >= accLo && s.accuracy <= accHi);
+      s.cvPass = (s.cv != null) && (s.cv <= cvLim);
+      s.evaluable = (s.accuracy != null);
+      s.overallPass = s.evaluable ? (s.accPass && s.cvPass) : null;
+    });
+    var evaluable = standards.filter(function(s){return s.evaluable;});
+    var passing = evaluable.filter(function(s){return s.overallPass;}).length;
+    var total = evaluable.length;
+    var passRate = total>0 ? passing/total : null;
+    var plateStatus = passRate==null ? "no-data"
+      : (passRate >= 0.75 ? "pass"
+         : (passRate >= 0.5 ? "review" : "fail"));
+    return {
+      pi: pi, label: stdDisplayName(pi),
+      r2: p.sc.r2, model: p.sc.model,
+      standards: standards, lloqIdx: lloqIdx,
+      passing: passing, total: total, passRate: passRate, status: plateStatus
+    };
+  });
+  var anyFail = plateSST.some(function(p){return p.status==="fail";});
+  var anyReview = plateSST.some(function(p){return p.status==="review";});
+  var allPass = plateSST.every(function(p){return p.status==="pass";});
+  var calStatus = anyFail ? "fail" : (anyReview ? "review" : (allPass ? "pass" : "no-data"));
+
+  // Cross-plate precision (instructor + multi-plate): for each standard level, CV of corrected absorbance ACROSS plates.
+  var crossPlate = null;
+  if (instructor && res.length >= 2) {
+    var n = (res[0].dbS || []).length;
+    crossPlate = [];
+    for (var i = 0; i < n; i++) {
+      var nominal = (res[0].dbS && res[0].dbS[i]) ? res[0].dbS[i].conc : null;
+      var avgs = res.map(function(p){
+        var d = p.dbS && p.dbS[i];
+        return d ? d.avg : null;
+      }).filter(function(v){return v!=null && isFinite(v);});
+      if (avgs.length < 2) continue;
+      var mean = avgs.reduce(function(a,b){return a+b;},0) / avgs.length;
+      var variance = avgs.reduce(function(a,b){return a+(b-mean)*(b-mean);},0) / (avgs.length - 1);
+      var sd = Math.sqrt(variance);
+      var cv = mean > 0 ? sd/mean : null;
+      crossPlate.push({ idx: i, nominal: nominal, n: avgs.length, mean: mean, sd: sd, cv: cv });
+    }
+  }
+
+  // ── OVERALL STATUS for the top banner ───────────────────────────────────
+  // If SST samples exist, they take precedence (they're the primary suitability check).
+  // If no SST samples, fall back to calibrator-quality status.
+  var overallStatus;
+  if (sstStatus === "pass" || sstStatus === "fail" || sstStatus === "review") {
+    overallStatus = sstStatus;
+  } else if (sstStatus === "missing-expected") {
+    overallStatus = "review";
+  } else {
+    overallStatus = calStatus;
+  }
+
+  // Disagreement nuance: SST passes but calibrator fails (or vice versa). Worth surfacing because the
+  // SST is the regulatory acceptance criterion (it's the "QC sample" in ICH M10 terms), but calibrator
+  // failures still indicate the curve has problem spots — even if your SST happens to land at a clean point.
+  var sstVsCalDisagreement = null;
+  if (sstStatus === "pass" && (calStatus === "fail" || calStatus === "review")) {
+    sstVsCalDisagreement = "sst-pass-cal-fail";
+  } else if (sstStatus === "fail" && calStatus === "pass") {
+    sstVsCalDisagreement = "sst-fail-cal-pass";
+  }
+  // Detect whether calibrator failures are clustered at the low end of the curve.
+  // If they are, the de facto LLOQ has effectively risen and low-conc sample reports should be flagged.
+  // Heuristic: among non-blank standards, sort by nominal concentration ascending; if all failing standards
+  // are in the lowest third (and at least one fails), call out the low-end clustering.
+  var lowEndCluster = (function(){
+    var hits = [];
+    plateSST.forEach(function(plate){
+      var nonBlank = plate.standards.filter(function(s){return s.nominal>0 && s.evaluable;});
+      if (nonBlank.length < 3) return;  // not enough points to assess clustering
+      var sorted = nonBlank.slice().sort(function(a,b){return a.nominal - b.nominal;});
+      var bottomThirdN = Math.max(1, Math.ceil(sorted.length / 3));
+      var bottomThird = sorted.slice(0, bottomThirdN);
+      var bottomThirdIds = bottomThird.map(function(s){return s.idx;});
+      var failing = nonBlank.filter(function(s){return s.overallPass===false;});
+      if (failing.length === 0) return;
+      var allFailingInBottom = failing.every(function(s){return bottomThirdIds.indexOf(s.idx) !== -1;});
+      if (allFailingInBottom) {
+        var lowestPassing = sorted.find(function(s){return s.overallPass===true;});
+        hits.push({
+          plateLabel: plate.label,
+          deFactoLLOQ: lowestPassing ? lowestPassing.nominal : null,
+          failingNominals: failing.map(function(s){return s.nominal;}).sort(function(a,b){return a-b;})
+        });
+      }
+    });
+    return hits.length > 0 ? hits : null;
+  })();
+
+  var statusColor = {
+    pass:   { bg: "linear-gradient(180deg,#e8f5ea,#d6eedf)", border: "#8fc4a1", text: "#1b5a4d", iconColor: "#1b7f6a", icon: "✓", label: "PASS" },
+    fail:   { bg: "linear-gradient(180deg,#ffeaed,#fcdce0)", border: "#d98a8f", text: "#7a2620", iconColor: "#b4332e", icon: "✗", label: "FAIL" },
+    review: { bg: "linear-gradient(180deg,#fff6e8,#fbe9cd)", border: "#d4a76a", text: "#5a3e00", iconColor: "#9a6a00", icon: "⚠", label: "REVIEW" },
+    "no-data": { bg: "linear-gradient(180deg,#f4f7fb,#eaeef5)", border: "#c9d3e3", text: "#5a6984", iconColor: "#6e6e73", icon: "○", label: "NO DATA" }
+  };
+  var sc2 = statusColor[overallStatus];
+
+  // LLOQ tooltip text — explains the term and the wider acceptance windows
+  var lloqTooltip = "LLOQ = Lower Limit of Quantitation: the lowest concentration at which the assay can quantitate with acceptable accuracy and precision. ICH M10 allows wider acceptance at LLOQ (accuracy 75–125%, CV ≤20%) because measurement noise is intrinsically larger near the bottom of the curve.";
+
+  // The whole card is wrapped in a <details> so the user can collapse/expand it.
+  // Collapsed by default per user preference — opens on click to show full details.
+  return <details style={{marginBottom:"1.25rem",padding:0,borderRadius:14,background:sc2.bg,border:"1px solid "+sc2.border,overflow:"hidden"}}>
+    <summary style={{cursor:"pointer",userSelect:"none",padding:"16px 18px",listStyle:"none"}}>
+      <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+        <span style={{fontSize:22,fontWeight:800,color:sc2.iconColor}}>{sc2.icon}</span>
+        <div style={{flex:1,minWidth:200}}>
+          <div style={{fontSize:14,fontWeight:800,color:sc2.text}}>System Suitability & Standard Curve Quality</div>
+          {sstSamples.length>0 && <div style={{fontSize:12,color:"#5a6984",marginTop:2}}>
+            {sstSamples.length} SST sample{sstSamples.length===1?"":"s"} · {sstStatus==="pass"?"PASS":sstStatus==="fail"?"FAIL":sstStatus==="review"?(sstPassing+"/"+sstEvaluable.length+" pass"):"—"}
+          </div>}
+        </div>
+        <span style={{fontSize:11,color:sc2.text,fontWeight:600,opacity:0.7,marginLeft:"auto"}}>▾ click to expand</span>
+      </div>
+    </summary>
+
+    <div style={{padding:"0 18px 16px"}}>
+
+    {/* Nuance callouts: SST/calibrator disagreement + low-end calibrator clustering. Instructor-mode only. */}
+    {instructor && sstVsCalDisagreement === "sst-pass-cal-fail" && <div style={{marginTop:0,padding:"10px 12px",background:"rgba(99,55,185,0.08)",border:"1px solid #d8c8f5",borderRadius:8,marginBottom:12,fontSize:11,color:"#3a2470",lineHeight:1.55}}>
+      <strong>SST passed, but standard curve quality failed.</strong> The SST sample is the regulatory acceptance criterion (ICH M10 treats it as the "QC sample" — an independent known traveling through the workflow), so the run is reportable. <strong>However</strong>, standard back-fit failures mean the curve has problem spots. If your SST happens to sit at a concentration where the curve fits well, you got lucky — sample concentrations near the failing standards' levels should still be reviewed carefully. Position matters: an SST at 1 mg/mL doesn't prove the curve is trustworthy at 0.01 mg/mL.
+    </div>}
+    {instructor && sstVsCalDisagreement === "sst-fail-cal-pass" && <div style={{marginTop:0,padding:"10px 12px",background:"rgba(180,51,46,0.07)",border:"1px solid rgba(180,51,46,0.25)",borderRadius:8,marginBottom:12,fontSize:11,color:"#7a2620",lineHeight:1.55}}>
+      <strong>Standard curve quality passed, but SST failed.</strong> This is the more serious case: the curve <em>looks</em> well-fit, but an independent known concentration didn't recover correctly. That points to a workflow problem — matrix interference, dilution error, stock concentration error, or a parallelism issue between the SST and the standards. Investigate before reporting; the curve being well-fit does not validate the workflow if the SST disagrees.
+    </div>}
+    {instructor && lowEndCluster && <div style={{marginTop:0,padding:"10px 12px",background:"rgba(154,106,0,0.07)",border:"1px solid #d4a76a",borderRadius:8,marginBottom:12,fontSize:11,color:"#5a3e00",lineHeight:1.55}}>
+      <strong>Low-end calibrator failures clustered.</strong> {lowEndCluster.length===1?"On "+lowEndCluster[0].plateLabel+", calibrator":"Calibrator"} failures are concentrated at the lowest standards. The de facto LLOQ has effectively risen{lowEndCluster.length===1 && lowEndCluster[0].deFactoLLOQ!=null?" to roughly "+sig3(convertConc(lowEndCluster[0].deFactoLLOQ, unit, displayUnit))+" "+displayUnit:""}. Sample concentrations reported below the lowest passing standard should be flagged BLOQ (below limit of quantitation) or noted as semi-quantitative. The high end of the curve is still trustworthy.
+    </div>}
+
+    {/* ── SST samples panel (PRIMARY) ─────────────────────────────────── */}
+    <div style={{marginTop:0,padding:"12px 14px",background:"rgba(255,255,255,0.7)",border:"1px solid "+sc2.border,borderRadius:10,marginBottom:14}}>
+      <div style={{display:"flex",alignItems:"baseline",gap:10,marginBottom:6,flexWrap:"wrap"}}>
+        <span style={{fontSize:13,fontWeight:800,color:"#0b2a6f"}}>SST samples</span>
+        <span style={{fontSize:11,color:"#5a6984",fontStyle:"italic"}}>Auto-detected by name (SST / Sys Suit / Suitability)</span>
+      </div>
+      {/* No-SST flow: ask the user first whether this run has SSTs.
+          - sstSamples.length > 0 → skip the prompt entirely, go straight to the table.
+          - sstSamples.length === 0 AND sstAck === null → show prompt with Yes / No buttons.
+          - sstAck === "no-ssts" → show a tiny dismissed state with a "show options" link.
+          - sstAck === "has-ssts" → show the picker dropdown so user can flag a sample manually. */}
+      {sstSamples.length === 0 && sstAck === null && (function(){
+        // Build pickable list to show in count
+        var pickable = [];
+        res.forEach(function(p, pi){(p.samps||[]).forEach(function(s, si){pickable.push({pi:pi, si:si});});});
+        return <div style={{padding:"12px 14px",background:"#f9fafc",border:"1px solid #d8dfeb",borderRadius:8,marginBottom:8}}>
+          <div style={{fontSize:12,color:"#30437a",fontWeight:700,marginBottom:6}}>No SST samples detected.</div>
+          <div style={{fontSize:11,color:"#5a6984",lineHeight:1.5,marginBottom:10}}>Did this run include a system-suitability sample (a known concentration used to verify the assay)?</div>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+            <button onClick={function(){setSstAck("has-ssts");}} style={{padding:"6px 14px",background:"#0b2a6f",color:"#fff",border:"none",borderRadius:6,fontSize:11,fontWeight:700,cursor:"pointer"}}>Yes — let me mark one</button>
+            <button onClick={function(){setSstAck("no-ssts");}} style={{padding:"6px 14px",background:"#fff",color:"#5a6984",border:"1px solid #d8dfeb",borderRadius:6,fontSize:11,fontWeight:600,cursor:"pointer"}}>No — skip SST review</button>
+          </div>
+        </div>;
+      })()}
+      {sstSamples.length === 0 && sstAck === "no-ssts" && <div style={{padding:"6px 10px",background:"#fafafa",border:"1px dashed #d0d8ea",borderRadius:6,fontSize:11,color:"#5a6984",marginBottom:8,display:"flex",alignItems:"center",justifyContent:"space-between",gap:10}}>
+        <span>SST review skipped for this run.</span>
+        <button onClick={function(){setSstAck("has-ssts");}} style={{background:"transparent",border:"none",color:"#0b2a6f",fontSize:11,cursor:"pointer",fontWeight:600,textDecoration:"underline"}}>Mark a sample anyway</button>
+      </div>}
+      {/* SST picker — shown when (a) user said "has-ssts", or (b) some SSTs are already flagged. */}
+      {(sstSamples.length > 0 || sstAck === "has-ssts") && (function(){
+        // Build list of all (plateIdx, sampleIdx) pairs that are NOT already in sstSamples.
+        var alreadySSTKeys = sstSamples.reduce(function(acc, s){acc[s.key]=true;return acc;}, {});
+        var pickable = [];
+        res.forEach(function(p, pi){
+          (p.samps || []).forEach(function(s, si){
+            var key = pi+"-"+si;
+            if (!alreadySSTKeys[key]) pickable.push({key:key, pi:pi, si:si, name:s.name});
+          });
+        });
+        if (pickable.length === 0 && sstSamples.length > 0) return null;
+        return <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:10,padding:"6px 10px",background:"#f6fbff",border:"1px solid #d7e7fb",borderRadius:8,flexWrap:"wrap"}}>
+          <span style={{fontSize:11,fontWeight:700,color:"#30437a"}}>{sstSamples.length>0 ? "Mark another:" : "Mark as SST:"}</span>
+          <select onChange={function(e){
+            var v = e.target.value;
+            if (!v) return;
+            toggleSSTFlag(v, true);
+            e.target.value = "";  // reset for next pick
+          }} value="" style={{padding:"5px 9px",borderRadius:6,border:"1px solid #d8dfeb",fontSize:11,background:"#fff",fontWeight:600,color:"#30437a",cursor:"pointer",minWidth:200}}>
+            <option value="">— choose a sample to add —</option>
+            {res.length>1
+              ? res.map(function(p, pi){
+                  var avail = pickable.filter(function(x){return x.pi===pi;});
+                  if (avail.length===0) return null;
+                  return <optgroup key={pi} label={"Plate "+(pi+1)}>
+                    {avail.map(function(x){return <option key={x.key} value={x.key}>{x.name}</option>;})}
+                  </optgroup>;
+                })
+              : pickable.map(function(x){return <option key={x.key} value={x.key}>{x.name}</option>;})
+            }
+          </select>
+          <span style={{flex:1}}></span>
+          <span style={{fontSize:10,color:"#8e9bb5",fontStyle:"italic"}}>{pickable.length} sample{pickable.length===1?"":"s"} available</span>
+        </div>;
+      })()}
+      {sstSamples.length > 0 && <div style={{overflowX:"auto"}}>
+        <table style={{borderCollapse:"collapse",width:"100%",fontSize:11}}>
+          <thead><tr>
+            {res.length>1 && <th style={{...thS,textAlign:"center",fontSize:10}}>Plate</th>}
+            <th style={{...thS,textAlign:"center",fontSize:10}}>Sample</th>
+            <th style={{...thS,textAlign:"center",fontSize:10,lineHeight:1.3}}><div>Expected</div><div style={{fontWeight:500,fontSize:9,color:"#8e9bb5"}}>(in {displayUnit})</div></th>
+            <th style={{...thS,textAlign:"center",fontSize:10,lineHeight:1.3}}><div>Observed</div><div style={{fontWeight:500,fontSize:9,color:"#8e9bb5"}}>(in {displayUnit})</div></th>
+            <th style={{...thS,textAlign:"center",fontSize:10,lineHeight:1.3}}><div>Accuracy</div><div style={{fontWeight:500,fontSize:9,color:"#8e9bb5"}}>(target 80–120%)</div></th>
+            <th style={{...thS,textAlign:"center",fontSize:10}}>Pass?</th>
+          </tr></thead>
+          <tbody>
+            {sstRows.map(function(r){
+              // Display behavior (v5bg+): show the raw stored string EXACTLY.
+              // Storage convention: the stored string is what the user typed, in the displayUnit
+              // active when they typed it. We do NOT auto-convert when displayUnit toggles, because:
+              //   (a) doing so silently changes a number the user intentionally entered
+               //   (b) the previous attempt at auto-conversion broke backspace and round-trip-formatting
+               // If the user toggles displayUnit, the input still shows their original number —
+               // they can re-type if they want to express it in the new unit.
+              var expectedDisp = r.expectedRaw;
+              var observedDisp = r.observed != null ? convertConc(r.observed, unit, displayUnit) : null;
+              var accColor = r.accuracy==null ? "#aeaeb2" : (r.pass ? "#1b7f6a" : "#b4332e");
+              var rowBg = r.pass===false ? "rgba(180,51,46,0.06)" : (r.pass===true ? "rgba(27,127,106,0.05)" : "transparent");
+              return <tr key={r.key} style={{background:rowBg}}>
+                {res.length>1 && <td style={{...tdS,fontSize:11}}>{r.plateIdx+1}</td>}
+                <td style={{...tdS,fontSize:11,fontWeight:700}}>
+                  {r.name}
+                  {r.source==="manual" && <span title="Manually flagged via the dropdown above. Click × to unflag." style={{fontSize:9,fontWeight:700,color:"#3478F6",marginLeft:6,padding:"1px 5px",background:"#e8f1ff",borderRadius:4,cursor:"help"}}>manual</span>}
+                  {r.source==="auto" && <span title="Auto-detected from sample name (matches SST / Sys Suit / Suitability)" style={{fontSize:9,fontWeight:600,color:"#8e9bb5",marginLeft:6,padding:"1px 5px",background:"#f4f7fb",borderRadius:4,cursor:"help"}}>auto</span>}
+                  {r.dil!=null && <span style={{fontSize:9,color:"#aeaeb2",fontStyle:"italic",marginLeft:6,fontWeight:500}}>at {r.dil}</span>}
+                  {r.source==="manual" && <button onClick={function(){toggleSSTFlag(r.key, false);}} title="Remove this sample from SST list" style={{marginLeft:6,padding:"0 5px",fontSize:11,fontWeight:700,color:"#b4332e",background:"transparent",border:"none",cursor:"pointer",lineHeight:1}}>×</button>}
+                </td>
+                <td style={{...tdS,textAlign:"center",fontSize:11}}>
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    placeholder="—"
+                    value={expectedDisp}
+                    onChange={function(e){
+                      // Store EXACTLY what the user typed, in the current displayUnit. No conversion,
+                      // no parse-and-restringify. Backspace, partial input, "0.", "0.5" all work because
+                      // the input value round-trips identically with what's in storage.
+                      // Compute layer parses + converts at accuracy-compute time, treating the stored
+                      // string as a value in displayUnit.
+                      setSSTExpected(r.key, e.target.value);
+                    }}
+                    style={{width:90,padding:"4px 8px",borderRadius:6,border:"1px solid #d8dfeb",fontSize:11,textAlign:"right",fontFamily:"inherit",background:"#fff"}}
+                  />
+                </td>
+                <td style={{...tdS,textAlign:"center",fontSize:11,fontWeight:700}}>{observedDisp!=null?sig3(observedDisp):"—"}</td>
+                <td style={{...tdS,textAlign:"center",fontSize:11,fontWeight:700,color:accColor}}>{r.accuracy!=null?r.accuracy.toFixed(1)+"%":(r.observed==null?"no result":"need expected")}</td>
+                <td style={{...tdS,textAlign:"center",fontSize:13,fontWeight:800,color:r.pass==null?"#aeaeb2":(r.pass?"#1b7f6a":"#b4332e")}}>{r.pass==null?"—":(r.pass?"✓":"✗")}</td>
+              </tr>;
+            })}
+          </tbody>
+        </table>
+      </div>}
+      {sstSamples.length>0 && instructor && <div style={{marginTop:8,padding:"6px 10px",background:"#f6fbff",border:"1px solid #d7e7fb",borderRadius:6,fontSize:10,color:"#5a6984",lineHeight:1.5}}>
+        <strong>Interpretation.</strong> SST = an independent known. Accuracy = observed/expected × 100. ICH M10 target: 80–120%. Outside that window, the workflow isn't quantitating accurately even if the curve fits well.
+      </div>}
+    </div>
+
+    {/* ── Calibrator quality (back-fit) — SECONDARY ────────────────────── */}
+    <details style={{padding:"10px 14px",background:"rgba(255,255,255,0.5)",border:"1px solid "+sc2.border,borderRadius:10,marginBottom:10}}>
+      <summary style={{cursor:"pointer",userSelect:"none",fontSize:13,fontWeight:800,color:"#0b2a6f"}}>
+        Standard Curve Quality (back-fit)
+        <span style={{fontSize:11,fontWeight:600,color:"#5a6984",marginLeft:10,fontStyle:"italic"}}>— {plateSST.filter(function(p){return p.status==="pass";}).length}/{plateSST.length} plate{plateSST.length===1?"":"s"} pass</span>
+      </summary>
+      <div style={{marginTop:8}}>
+        {instructor && <div style={{fontSize:11,color:"#5a6984",marginBottom:8,lineHeight:1.55,padding:"6px 10px",background:"#f7fbff",border:"1px solid #d7e7fb",borderRadius:6}}>
+          <strong>What this checks.</strong> Each standard's blank-corrected response is run back through the inverse fit to recover its concentration. If the curve is well-formed, that back-calculated value should match the standard's nominal (declared) concentration within ±20% (±25% at LLOQ). When standards fail this, it usually means the curve fit is poor at that level — those <em>standards</em> are suspect, not your samples directly. ICH M10 still allows reporting if ≥75% of standards pass. <strong>Tip:</strong> if failures cluster at the lowest standards (e.g. STD 5 and 6 in a 6-point curve), the curve fits poorly at the low end — sample concentrations reported in that range should be flagged BLOQ (below limit of quantitation) or reported with caveats. The de facto LLOQ rises to whatever the next-passing standard is.
+        </div>}
+        {plateSST.map(function(plate, idx){
+          var psc = statusColor[plate.status];
+          return <div key={idx} style={{marginTop:idx===0?0:14,padding:"10px 12px",background:"#fff",border:"1px solid "+psc.border,borderRadius:10}}>
+            <div style={{display:"flex",alignItems:"baseline",gap:10,marginBottom:6,flexWrap:"wrap"}}>
+              <span style={{fontSize:13,fontWeight:800,color:"#0b2a6f"}}>{plate.label}</span>
+              <span style={{fontSize:11,fontWeight:700,padding:"2px 8px",borderRadius:12,background:psc.iconColor,color:"#fff"}}>{psc.label}</span>
+              <span style={{fontSize:11,color:"#5a6984"}}>R²={sig3(plate.r2)} ({plate.model==="linear"?"Linear":plate.model==="loglog"?"Log-log":plate.model==="4pl"?"4PL":"5PL"})</span>
+              <span style={{fontSize:11,color:"#5a6984"}}>{plate.passing}/{plate.total} standards in spec</span>
+            </div>
+            <div style={{overflowX:"auto"}}>
+              <table style={{borderCollapse:"collapse",width:"100%",fontSize:11}}>
+                <thead><tr>
+                  <th style={{...thS,textAlign:"center",fontSize:10}}>Standard</th>
+                  <th style={{...thS,textAlign:"center",fontSize:10,lineHeight:1.3}}><div>Nominal</div><div style={{fontWeight:500,fontSize:9,color:"#8e9bb5"}}>({displayUnit})</div></th>
+                  <th style={{...thS,textAlign:"center",fontSize:10,lineHeight:1.3}}><div>Back-fit</div><div style={{fontWeight:500,fontSize:9,color:"#8e9bb5"}}>({displayUnit})</div></th>
+                  <th style={{...thS,textAlign:"center",fontSize:10,lineHeight:1.3}}><div>Accuracy</div><div style={{fontWeight:500,fontSize:9,color:"#8e9bb5"}}>(target ±20%)</div></th>
+                  <th style={{...thS,textAlign:"center",fontSize:10,lineHeight:1.3}}><div>Replicate CV</div><div style={{fontWeight:500,fontSize:9,color:"#8e9bb5"}}>(target ≤15%)</div></th>
+                  <th style={{...thS,textAlign:"center",fontSize:10}}>Pass?</th>
+                </tr></thead>
+                <tbody>
+                  {plate.standards.map(function(s){
+                    if (s.nominal===0) {
+                      return <tr key={s.idx} style={{opacity:0.55}}>
+                        <td style={{...tdS,fontSize:11}}>Blank<span style={{fontSize:9,color:"#8e9bb5",marginLeft:6,fontStyle:"italic"}}>(not evaluated)</span></td>
+                        <td style={{...tdS,textAlign:"center",fontSize:11}}>{sig3(s.nominal)}</td>
+                        <td style={{...tdS,textAlign:"center",fontSize:11}}>—</td>
+                        <td style={{...tdS,textAlign:"center",fontSize:11}}>—</td>
+                        <td style={{...tdS,textAlign:"center",fontSize:11}}>{s.cv!=null?(s.cv*100).toFixed(1)+"%":"—"}</td>
+                        <td style={{...tdS,textAlign:"center",fontSize:11,color:"#aeaeb2"}}>—</td>
+                      </tr>;
+                    }
+                    var nominalDisp = convertConc(s.nominal, unit, displayUnit);
+                    var backFitDisp = s.backFit!=null ? convertConc(s.backFit, unit, displayUnit) : null;
+                    var accColor = s.accuracy==null ? "#aeaeb2" : (s.accPass ? "#1b7f6a" : "#b4332e");
+                    var cvColor = s.cv==null ? "#aeaeb2" : (s.cvPass ? "#1b7f6a" : "#b4332e");
+                    var rowBg = s.overallPass===false ? "rgba(180,51,46,0.06)" : "transparent";
+                    return <tr key={s.idx} style={{background:rowBg}}>
+                      <td style={{...tdS,fontSize:11}}>STD {s.idx+1}{s.isLLOQ&&<span title={lloqTooltip} style={{fontSize:9,fontWeight:800,color:"#6337b9",marginLeft:6,padding:"1px 6px",background:"#f3edfd",borderRadius:8,cursor:"help",borderBottom:"1px dotted #6337b9"}}>LLOQ</span>}</td>
+                      <td style={{...tdS,textAlign:"center",fontSize:11,fontWeight:600}}>{sig3(nominalDisp)}</td>
+                      <td style={{...tdS,textAlign:"center",fontSize:11}}>{backFitDisp!=null?sig3(backFitDisp):"—"}</td>
+                      <td style={{...tdS,textAlign:"center",fontSize:11,fontWeight:700,color:accColor}}>{s.accuracy!=null?s.accuracy.toFixed(1)+"%":"—"}</td>
+                      <td style={{...tdS,textAlign:"center",fontSize:11,fontWeight:600,color:cvColor}}>{s.cv!=null?(s.cv*100).toFixed(1)+"%":"—"}</td>
+                      <td style={{...tdS,textAlign:"center",fontSize:13,fontWeight:800,color:s.overallPass==null?"#aeaeb2":(s.overallPass?"#1b7f6a":"#b4332e")}}>{s.overallPass==null?"—":(s.overallPass?"✓":"✗")}</td>
+                    </tr>;
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>;
+        })}
+        {/* Cross-plate precision (instructor + multi-plate) */}
+        {crossPlate && crossPlate.length>0 && <div style={{marginTop:14,padding:"10px 12px",background:"rgba(99,55,185,0.06)",border:"1px solid #d8c8f5",borderRadius:10}}>
+          <div style={{display:"flex",alignItems:"baseline",gap:10,marginBottom:6,flexWrap:"wrap"}}>
+            <span style={{fontSize:13,fontWeight:800,color:"#6337b9"}}>Cross-plate precision</span>
+            <span style={{fontSize:10,fontWeight:700,padding:"2px 8px",borderRadius:12,background:"#6337b9",color:"#fff"}}>INSTRUCTOR</span>
+            <span style={{fontSize:11,color:"#5a6984",fontStyle:"italic"}}>How reproducible is each standard's signal across the {res.length} plates?</span>
+          </div>
+          <div style={{fontSize:11,color:"#5a6984",marginBottom:8,lineHeight:1.5}}>
+            <strong>This is plate-to-plate reproducibility</strong> — distinct from the within-plate replicate CV shown above. Within-plate CV reflects pipetting + read noise on a single plate; cross-plate CV reflects day-to-day, operator, and inter-plate effects. Both should be small for a well-controlled assay.
+          </div>
+          <div style={{overflowX:"auto"}}>
+            <table style={{borderCollapse:"collapse",width:"100%",fontSize:11}}>
+              <thead><tr>
+                <th style={{...thS,textAlign:"center",fontSize:10}}>Standard</th>
+                <th style={{...thS,textAlign:"center",fontSize:10}}>Nominal ({displayUnit})</th>
+                <th style={{...thS,textAlign:"center",fontSize:10}}>Plates</th>
+                <th style={{...thS,textAlign:"center",fontSize:10}}>Mean response</th>
+                <th style={{...thS,textAlign:"center",fontSize:10}}>SD</th>
+                <th style={{...thS,textAlign:"center",fontSize:10}}>Cross-plate CV</th>
+              </tr></thead>
+              <tbody>
+                {crossPlate.map(function(cp){
+                  var nominalDisp = cp.nominal!=null ? convertConc(cp.nominal, unit, displayUnit) : null;
+                  var cvColor = cp.cv==null ? "#aeaeb2" : (cp.cv<=0.15 ? "#1b7f6a" : (cp.cv<=0.25 ? "#9a6a00" : "#b4332e"));
+                  return <tr key={cp.idx}>
+                    <td style={{...tdS,fontSize:11}}>STD {cp.idx+1}</td>
+                    <td style={{...tdS,textAlign:"center",fontSize:11}}>{nominalDisp!=null?sig3(nominalDisp):"—"}</td>
+                    <td style={{...tdS,textAlign:"center",fontSize:11}}>{cp.n}</td>
+                    <td style={{...tdS,textAlign:"center",fontSize:11}}>{fm4(cp.mean)}</td>
+                    <td style={{...tdS,textAlign:"center",fontSize:11}}>{fm4(cp.sd)}</td>
+                    <td style={{...tdS,textAlign:"center",fontSize:11,fontWeight:700,color:cvColor}}>{cp.cv!=null?(cp.cv*100).toFixed(1)+"%":"—"}</td>
+                  </tr>;
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>}
+      </div>
+    </details>
+
+    {instructor && <div style={{padding:"8px 12px",background:"rgba(255,255,255,0.5)",borderRadius:8,fontSize:10,color:"#5a6984",lineHeight:1.55}}>
+      <strong>ICH M10 acceptance criteria.</strong> SST/QC samples must back-calculate within 80–120% of nominal. Calibrator standards must be within 80–120% of nominal (75–125% at LLOQ — <span title={lloqTooltip} style={{cursor:"help",borderBottom:"1px dotted #5a6984"}}>what's LLOQ?</span>) for ≥75% of standards. Replicate CV ≤15% (≤20% at LLOQ). R² is informational and not a defined pass/fail threshold.
+    </div>}
+    </div>
+  </details>;
+}
+
+
+// Robot QC: Replicate Reproducibility card.
+// Treats EACH selected sample as its own dilution series. For each sample independently:
+//   - Builds (response, 1/DF) points — same form as the standard curve.
+//   - Fits a linear regression → R², slope, intercept.
+//   - Reports the within-replicate CV at each dilution level (across the 3 reps at that level).
+//   - Reports a single mean-within-rep CV summarizing dispense reproducibility.
+// Then compares ACROSS samples:
+//   - If all samples are aliquots from the same stock, their slopes should match.
+//   - CV of slopes across samples = robot prep-step reproducibility.
+// This is the analogue of asking "is each sample its own well-behaved standard curve?" and
+// "do all the should-be-identical samples actually produce identical curves?"
+//
+// Per-sample pass thresholds (any one failing = caution; two = fail):
+//   R² ≥ 0.99
+//   mean within-rep CV ≤ 5%
+//   worst within-rep CV ≤ 15%
+// Cross-sample slope CV ≤ 5% indicates uniform prep across aliquots.
+function RobotQCCard(props) {
+  var res = props.res;
+  if (!res || !res.length) return null;
+  var instructor = !!props.instructor;
+
+  // Flatten across plates
+  var multiPlate = res.length > 1;
+  var allSamples = [];
+  res.forEach(function(pp, pi){
+    pp.samps.forEach(function(s, si){
+      var displayName = multiPlate ? ("P"+(pi+1)+"·"+s.name) : s.name;
+      allSamples.push({key:pi+":"+si, plateIdx:pi, sampleIdx:si, name:displayName, dbD:s.dbD||[]});
+    });
+  });
+
+  // Selection state — default: all samples selected
+  var initialSel = {};
+  allSamples.forEach(function(s){initialSel[s.key]=true;});
+  var _sel = useState(initialSel), sel = _sel[0], setSel = _sel[1];
+
+  var toggle = function(key){
+    setSel(function(prev){
+      var n = {};
+      for (var k in prev) n[k] = prev[k];
+      n[key] = !n[key];
+      return n;
+    });
+  };
+  var setAll = function(v){
+    var n = {};
+    allSamples.forEach(function(s){n[s.key]=v;});
+    setSel(n);
+  };
+
+  var selectedSamples = allSamples.filter(function(s){return sel[s.key];});
+
+  // ── Per-sample curve fits ────────────────────────────────────────
+  // For each sample: build (1/df, avgA) pairs, fit linear, compute R²+slope+intercept.
+  // Also collect per-level CV (within-rep CV at each dilution) from dbD entries.
+  var sampleAnalyses = selectedSamples.map(function(s){
+    // Filter to dilutions with valid avgA AND df > 0 (DF=0 wouldn't be a dilution).
+    // The "blank" position is typically encoded with df=null/0 OR it's the last level — we exclude
+    // it by requiring avgA > 0 implicitly via the fit's data validity.
+    var validPts = s.dbD.filter(function(d){
+      return d.df != null && isFinite(d.df) && d.df > 0
+          && d.avgA != null && isFinite(d.avgA);
+    });
+    if (validPts.length < 2) {
+      return {key:s.key, name:s.name, n:validPts.length, fit:null, levelCVs:[], meanCV:null, worstCV:null, points:validPts};
+    }
+    // Fit response (y) vs df (x). In this codebase, df is stored as relative well concentration
+    // (e.g., 0.1 for a 1:10 dilution from stock = 1) — same convention as the standard curve uses.
+    // So response vs df IS response vs concentration. Slope and R² are directly comparable to the
+    // main standard curve. The user's chosen dilution scheme (xdf, xds in General Info) determines
+    // the df values automatically, so this honors whatever scheme they entered.
+    var xs = validPts.map(function(d){return d.df;});
+    var ys = validPts.map(function(d){return d.avgA;});
+    var fit = linReg(xs, ys);
+    // Within-rep CV per level = the cv field already computed during analysis (from cor[] reps)
+    var levelCVs = validPts.map(function(d){return {di:d.di, df:d.df, cv:d.cv, n:(d.cor||[]).length};}).filter(function(L){return L.cv != null && isFinite(L.cv);});
+    var cvVals = levelCVs.map(function(L){return L.cv;});
+    var meanCV = cvVals.length ? avg(cvVals) : null;
+    var worstCV = cvVals.length ? Math.max.apply(null, cvVals) : null;
+    return {key:s.key, name:s.name, n:validPts.length, fit:fit, levelCVs:levelCVs, meanCV:meanCV, worstCV:worstCV, points:validPts, xs:xs, ys:ys};
+  });
+
+  // ── Per-sample flag ──────────────────────────────────────────────
+  // pass: R² ≥ 0.99 AND meanCV ≤ 5% AND worstCV ≤ 15%
+  // fail: any of {R² < 0.95, meanCV > 15%, worstCV > 25%}
+  // caution: in between
+  sampleAnalyses.forEach(function(sa){
+    if (!sa.fit) { sa.flag = "n/a"; return; }
+    var r2 = sa.fit.r2;
+    var mC = sa.meanCV;
+    var wC = sa.worstCV;
+    var failR2 = r2 < 0.95;
+    var failMean = mC != null && mC > 15;
+    var failWorst = wC != null && wC > 25;
+    if (failR2 || failMean || failWorst) { sa.flag = "fail"; return; }
+    var passR2 = r2 >= 0.99;
+    var passMean = mC == null || mC <= 5;
+    var passWorst = wC == null || wC <= 15;
+    if (passR2 && passMean && passWorst) { sa.flag = "pass"; return; }
+    sa.flag = "caution";
+  });
+
+  // ── Cross-sample slope comparison ────────────────────────────────
+  var validFits = sampleAnalyses.filter(function(sa){return sa.fit != null;});
+  var slopes = validFits.map(function(sa){return sa.fit.slope;});
+  var slopeMean = slopes.length ? avg(slopes) : null;
+  var slopeSD = slopes.length >= 2 ? sdc(slopes) : null;
+  var slopeCV = (slopeSD != null && slopeMean != null && slopeMean > 0) ? (slopeSD/slopeMean)*100 : null;
+  var r2s = validFits.map(function(sa){return sa.fit.r2;});
+  var r2Min = r2s.length ? Math.min.apply(null, r2s) : null;
+  var r2Max = r2s.length ? Math.max.apply(null, r2s) : null;
+
+  // ── Color helpers ────────────────────────────────────────────────
+  var cvColor = function(cv){
+    if (cv == null) return "#aeaeb2";
+    if (cv <= 5) return "#1b7f6a";
+    if (cv <= 15) return "#bf7a1a";
+    return "#b4332e";
+  };
+  var r2Color = function(r2){
+    if (r2 == null) return "#aeaeb2";
+    if (r2 >= 0.99) return "#1b7f6a";
+    if (r2 >= 0.95) return "#bf7a1a";
+    return "#b4332e";
+  };
+  var flagColor = function(f){
+    if (f === "pass") return "#1b7f6a";
+    if (f === "caution") return "#bf7a1a";
+    if (f === "fail") return "#b4332e";
+    return "#aeaeb2";
+  };
+  var flagLabel = function(f){
+    if (f === "pass") return "✓ pass";
+    if (f === "caution") return "⚠ caution";
+    if (f === "fail") return "✗ fail";
+    return "—";
+  };
+  var sampleColors = ["#3478F6","#1b7f6a","#bf7a1a","#6337b9","#a05a00","#0f8aa2","#b4332e","#5fa0d0","#d88060","#80b0c0","#a880d0","#5fb0a0"];
+
+  // ── Overlaid line plot ───────────────────────────────────────────
+  // X = df on linear scale. In this codebase, df is the relative well concentration (e.g., 0.1
+  // for 1:10), so plotting response vs df IS response vs concentration. The dilution scheme entered
+  // in General Information of the Data Entry tab drives the df values automatically — the plot
+  // honors whatever scheme the user defined.
+  // Y = blank-corrected response. Each sample = one polyline through its dilution points, with a
+  // dashed fit line drawn through the points using its slope+intercept. A high R² in the table
+  // visually maps to points sitting on the fit line.
+  var allDfs = [];
+  var allAs = [];
+  selectedSamples.forEach(function(s){
+    s.dbD.forEach(function(d){
+      if (d.df != null && isFinite(d.df) && d.df > 0 && d.avgA != null && isFinite(d.avgA)) {
+        allDfs.push(d.df);
+        allAs.push(d.avgA);
+      }
+    });
+  });
+  var hasPlotData = allDfs.length >= 2;
+
+  var plotW = 540, plotH = 280;
+  var padL = 60, padR = 16, padT = 14, padB = 50;
+  var innerW = plotW - padL - padR;
+  var innerH = plotH - padT - padB;
+  var renderPlot = null;
+  if (hasPlotData) {
+    var dfMax = Math.max.apply(null, allDfs);
+    // X always starts at 0 so the y-intercept is visible (this is where conc=0 → blank-corrected
+    // response should be ~0 for a proper fit). Adds a bit of right padding so points don't sit
+    // on the plot edge.
+    var xMin = 0;
+    var xMax = dfMax * 1.05;
+    var aMin = Math.min.apply(null, allAs);
+    var aMax = Math.max.apply(null, allAs);
+    var aPad = (aMax - aMin) * 0.08 || 0.01;
+    aMin = Math.min(0, aMin - aPad); // include 0 if all values are positive — shows the intercept context
+    aMax = aMax + aPad;
+    var xScale = function(df){ return padL + ((df - xMin) / (xMax - xMin || 1)) * innerW; };
+    var yScale = function(a){ return padT + (1 - (a - aMin) / (aMax - aMin || 1)) * innerH; };
+
+    // X ticks: pick ~5 evenly-spaced "nice" values from 0 to xMax. Compute step from xMax/5 then
+    // round to a 1-2-5 multiple of the appropriate power of 10.
+    var rawStep = xMax / 5;
+    var pow10 = Math.pow(10, Math.floor(Math.log10(rawStep)));
+    var normalized = rawStep / pow10;
+    var niceStep;
+    if (normalized < 1.5) niceStep = pow10;
+    else if (normalized < 3) niceStep = 2 * pow10;
+    else if (normalized < 7) niceStep = 5 * pow10;
+    else niceStep = 10 * pow10;
+    var xTicks = [];
+    for (var t=0; t <= xMax + niceStep*0.0001; t += niceStep) xTicks.push(t);
+    // Format X tick labels: avoid floating-point junk like "0.10000000004"
+    var fmtX = function(v){
+      if (v === 0) return "0";
+      if (niceStep >= 1) return v.toFixed(0);
+      var decimals = Math.max(0, -Math.floor(Math.log10(niceStep)));
+      return v.toFixed(decimals);
+    };
+
+    var yTicks = [aMin, aMin + (aMax-aMin)/3, aMin + 2*(aMax-aMin)/3, aMax];
+
+    var lines = selectedSamples.map(function(s, sIdx){
+      var pts = s.dbD
+        .filter(function(d){return d.df!=null && isFinite(d.df) && d.df>0 && d.avgA!=null && isFinite(d.avgA);})
+        .sort(function(a,b){return a.df - b.df;})  // ascending df = lowest concentration → highest
+        .map(function(d){return {x:xScale(d.df), y:yScale(d.avgA), df:d.df, avgA:d.avgA};});
+      if (pts.length === 0) return null;
+      var pathD = pts.map(function(p,i){return (i===0?"M":"L")+p.x.toFixed(1)+" "+p.y.toFixed(1);}).join(" ");
+      var col = sampleColors[sIdx % sampleColors.length];
+      // Fit line: y = slope*x + intercept, drawn from x=0 to x=xMax
+      var sa = sampleAnalyses[sIdx];
+      var fitLine = null;
+      if (sa && sa.fit) {
+        var y0 = sa.fit.slope * 0 + sa.fit.intercept;
+        var y1 = sa.fit.slope * xMax + sa.fit.intercept;
+        fitLine = {x0:xScale(0), y0:yScale(y0), x1:xScale(xMax), y1:yScale(y1)};
+      }
+      return {pts:pts, path:pathD, color:col, name:s.name, key:s.key, fitLine:fitLine};
+    }).filter(function(L){return L!=null;});
+
+    renderPlot = <svg viewBox={"0 0 "+plotW+" "+plotH} style={{width:"100%",height:"auto",maxWidth:plotW,display:"block",background:"#fafbfd",border:"1px solid #e5e9f0",borderRadius:8}}>
+      {/* Y gridlines + labels */}
+      {yTicks.map(function(t,i){
+        var y = yScale(t);
+        return <g key={"y"+i}>
+          <line x1={padL} y1={y} x2={plotW-padR} y2={y} stroke="#e5e9f0" strokeWidth="1" strokeDasharray={i===0||i===yTicks.length-1?"":"2,3"} />
+          <text x={padL-6} y={y+3} fontSize="9" fill="#6e6e73" textAnchor="end" fontFamily="system-ui">{t.toFixed(Math.abs(t)<1?3:2)}</text>
+        </g>;
+      })}
+      {/* X gridlines + labels */}
+      {xTicks.map(function(t,i){
+        var x = xScale(t);
+        return <g key={"x"+i}>
+          <line x1={x} y1={padT} x2={x} y2={plotH-padB} stroke="#e5e9f0" strokeWidth="1" strokeDasharray="2,3" />
+          <text x={x} y={plotH-padB+12} fontSize="9" fill="#6e6e73" textAnchor="middle" fontFamily="system-ui">{fmtX(t)}</text>
+        </g>;
+      })}
+      {/* Axis labels */}
+      <text x={plotW/2} y={plotH-22} fontSize="10" fill="#30437a" textAnchor="middle" fontFamily="system-ui" fontWeight="600">Relative well concentration (stock = 1)</text>
+      <text x={plotW/2} y={plotH-7} fontSize="9" fill="#8e9bb5" textAnchor="middle" fontFamily="system-ui" fontStyle="italic">From your dilution scheme · multiply x by stock conc for absolute concentration</text>
+      <text x={14} y={plotH/2} fontSize="10" fill="#30437a" textAnchor="middle" fontFamily="system-ui" fontWeight="600" transform={"rotate(-90, 14, "+(plotH/2)+")"}>Response (blank-corrected)</text>
+      {/* Per-sample: fit line first (under the data line), then connecting polyline, then dots */}
+      {lines.map(function(L){
+        return <g key={L.key}>
+          {L.fitLine && <line x1={L.fitLine.x0} y1={L.fitLine.y0} x2={L.fitLine.x1} y2={L.fitLine.y1} stroke={L.color} strokeWidth="1" strokeDasharray="4,3" opacity="0.45" />}
+          <path d={L.path} stroke={L.color} strokeWidth="1.5" fill="none" opacity="0.85" />
+          {L.pts.map(function(p,pi){return <circle key={pi} cx={p.x} cy={p.y} r="3" fill={L.color} stroke="#fff" strokeWidth="1" />;})}
+        </g>;
+      })}
+    </svg>;
+  }
+
+  // ── Plain-English interpretation ─────────────────────────────────
+  var interpretation = (function(){
+    if (selectedSamples.length === 0) return "Select at least one sample to view its dilution curve and fit metrics.";
+    if (validFits.length === 0) return "No sample has enough valid dilution points (≥2) for a fit.";
+    var nPass = sampleAnalyses.filter(function(sa){return sa.flag==="pass";}).length;
+    var nFail = sampleAnalyses.filter(function(sa){return sa.flag==="fail";}).length;
+    var nCaution = sampleAnalyses.filter(function(sa){return sa.flag==="caution";}).length;
+    var pieces = [];
+    pieces.push(nPass + " of " + sampleAnalyses.length + " sample" + (sampleAnalyses.length===1?"":"s") + " pass all criteria");
+    if (nCaution > 0) pieces.push(nCaution + " in caution zone");
+    if (nFail > 0) pieces.push(nFail + " fail");
+    var line1 = pieces.join(", ") + ".";
+    var line2 = "";
+    if (validFits.length >= 2 && slopeCV != null) {
+      if (slopeCV <= 5) {
+        line2 = " Slope CV across samples = " + slopeCV.toFixed(1) + "% — uniform across aliquots, suggesting consistent robot prep.";
+      } else if (slopeCV <= 15) {
+        line2 = " Slope CV across samples = " + slopeCV.toFixed(1) + "% — moderate spread; some prep variability between aliquots (assuming samples are theoretical replicates).";
+      } else if (slopeCV <= 50) {
+        line2 = " Slope CV across samples = " + slopeCV.toFixed(1) + "% — high variability between sample slopes. If samples are theoretical replicates from one stock, this suggests inconsistent prep at the aliquoting step.";
+      } else {
+        line2 = " Slope CV across samples = " + slopeCV.toFixed(1) + "% — slopes differ widely. Likely the selected samples are NOT theoretical replicates (different concentrations or different analytes). Slope-CV metric only meaningful when samples are aliquots of one stock.";
+      }
+    } else if (validFits.length === 1) {
+      line2 = " (Slope comparison requires 2+ samples.)";
+    }
+    return line1 + line2;
+  })();
+
+  // ── Styling primitives ───────────────────────────────────────────
+  var thS = {padding:"6px 10px",fontSize:10,fontWeight:700,color:"#30437a",textTransform:"uppercase",letterSpacing:0.4,textAlign:"left",borderBottom:"2px solid #d8dfeb",background:"#fafafa",whiteSpace:"nowrap"};
+  var tdS = {padding:"6px 10px",fontSize:11,color:"#1d1d1f",borderBottom:"1px solid #f0f0f3"};
+
+  return <div style={{background:"#fff",borderRadius:14,border:"1px solid #e5e5ea",padding:"1.25rem",marginBottom:"1.25rem"}}>
+    <div style={{marginBottom:"0.75rem"}}>
+      <h4 style={{fontSize:14,fontWeight:700,margin:"0 0 4px 0",color:"#30437a"}}>🤖 Robot QC: Per-Sample Curve Quality</h4>
+      <p style={{fontSize:11,color:"#6e6e73",margin:0,lineHeight:1.55}}>Each sample is treated as its own mini standard curve: response vs 1/DF is fit linearly, R²/slope/intercept reported. Per-sample within-replicate CV checks dispense reproducibility; cross-sample slope CV checks aliquoting reproducibility. <strong>Most useful when selected samples are theoretical replicates (e.g., aliquots of one stock), but also works for any single sample.</strong></p>
+    </div>
+
+    {/* Sample picker */}
+    <div style={{marginBottom:"0.85rem",padding:"8px 10px",background:"#f7faff",border:"1px solid #e5e9f0",borderRadius:8}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6,flexWrap:"wrap",gap:8}}>
+        <div style={{fontSize:11,fontWeight:700,color:"#30437a"}}>Samples ({selectedSamples.length} of {allSamples.length} selected)</div>
+        <div style={{display:"flex",gap:6}}>
+          <button onClick={function(){setAll(true);}} style={{fontSize:10,padding:"3px 8px",border:"1px solid #c6d3e8",borderRadius:6,background:"#fff",color:"#30437a",cursor:"pointer",fontWeight:600}}>Select all</button>
+          <button onClick={function(){setAll(false);}} style={{fontSize:10,padding:"3px 8px",border:"1px solid #c6d3e8",borderRadius:6,background:"#fff",color:"#30437a",cursor:"pointer",fontWeight:600}}>Clear</button>
+        </div>
+      </div>
+      <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+        {allSamples.map(function(s, idx){
+          var isSel = !!sel[s.key];
+          var idxInSel = selectedSamples.findIndex(function(ss){return ss.key===s.key;});
+          var col = isSel && idxInSel>=0 ? sampleColors[idxInSel % sampleColors.length] : "#aeaeb2";
+          return <label key={s.key} style={{display:"flex",alignItems:"center",gap:5,padding:"3px 8px",background:isSel?"#fff":"#f4f4f6",border:"1px solid "+(isSel?col:"#d8dfeb"),borderRadius:6,fontSize:11,cursor:"pointer",userSelect:"none"}}>
+            <input type="checkbox" checked={isSel} onChange={function(){toggle(s.key);}} style={{margin:0,cursor:"pointer"}} />
+            <span style={{fontWeight:isSel?700:500,color:isSel?col:"#6e6e73"}}>{s.name}</span>
+          </label>;
+        })}
+      </div>
+    </div>
+
+    {/* Plot — works with even 1 sample selected */}
+    {selectedSamples.length >= 1 && hasPlotData && <div style={{marginBottom:10}}>
+      <div style={{fontSize:11,fontWeight:700,color:"#30437a",marginBottom:4}}>Per-sample dilution curves (overlaid)</div>
+      {renderPlot}
+    </div>}
+
+    {/* Per-sample fit table */}
+    {selectedSamples.length >= 1 && <div style={{overflowX:"auto",marginBottom:10}}>
+      <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+        <thead><tr>
+          <th style={thS}>Sample</th>
+          <th style={thS}>n levels</th>
+          <th style={thS}>R²</th>
+          <th style={thS}>Slope</th>
+          <th style={thS}>Intercept</th>
+          <th style={thS}>Mean rep CV</th>
+          <th style={thS}>Worst rep CV</th>
+          <th style={thS}>Verdict</th>
+        </tr></thead>
+        <tbody>
+          {sampleAnalyses.map(function(sa, idx){
+            var col = sampleColors[idx % sampleColors.length];
+            var bgFlag = sa.flag === "fail" ? "#fdecec" : (sa.flag === "caution" ? "#fff7e8" : "transparent");
+            return <tr key={sa.key} style={{background:bgFlag}}>
+              <td style={Object.assign({},tdS,{fontWeight:700})}>
+                <span style={{display:"inline-block",width:10,height:10,background:col,borderRadius:2,marginRight:6,verticalAlign:"middle"}}></span>
+                {sa.name}
+              </td>
+              <td style={tdS}>{sa.n}</td>
+              <td style={Object.assign({},tdS,{color:r2Color(sa.fit?sa.fit.r2:null),fontWeight:700})}>{sa.fit ? sa.fit.r2.toFixed(4) : "—"}</td>
+              <td style={tdS}>{sa.fit ? sig3(sa.fit.slope) : "—"}</td>
+              <td style={tdS}>{sa.fit ? sig3(sa.fit.intercept) : "—"}</td>
+              <td style={Object.assign({},tdS,{color:cvColor(sa.meanCV),fontWeight:600})}>{sa.meanCV != null ? sa.meanCV.toFixed(1)+"%" : "—"}</td>
+              <td style={Object.assign({},tdS,{color:cvColor(sa.worstCV),fontWeight:600})}>{sa.worstCV != null ? sa.worstCV.toFixed(1)+"%" : "—"}</td>
+              <td style={Object.assign({},tdS,{color:flagColor(sa.flag),fontWeight:700,fontSize:10})}>{flagLabel(sa.flag)}</td>
+            </tr>;
+          })}
+        </tbody>
+      </table>
+    </div>}
+
+    {/* Cross-sample summary — only shown with 2+ samples */}
+    {validFits.length >= 2 && <div style={{display:"grid",gridTemplateColumns:"repeat(3, 1fr)",gap:8,marginBottom:10}}>
+      <div style={{padding:"8px 10px",background:"#f4f7fb",border:"1px solid #d8dfeb",borderRadius:6}}>
+        <div style={{fontSize:9,fontWeight:700,color:"#6e6e73",textTransform:"uppercase",letterSpacing:0.4,marginBottom:2}}>Slope CV across samples</div>
+        <div style={{fontSize:18,fontWeight:800,color:cvColor(slopeCV)}}>{slopeCV != null ? slopeCV.toFixed(1)+"%" : "—"}</div>
+        <div style={{fontSize:9,color:"#8e9bb5",marginTop:1}}>uniform prep if ≤5%</div>
+      </div>
+      <div style={{padding:"8px 10px",background:"#f4f7fb",border:"1px solid #d8dfeb",borderRadius:6}}>
+        <div style={{fontSize:9,fontWeight:700,color:"#6e6e73",textTransform:"uppercase",letterSpacing:0.4,marginBottom:2}}>R² range</div>
+        <div style={{fontSize:14,fontWeight:800,color:r2Color(r2Min)}}>{r2Min != null ? r2Min.toFixed(4) : "—"} – {r2Max != null ? r2Max.toFixed(4) : "—"}</div>
+        <div style={{fontSize:9,color:"#8e9bb5",marginTop:1}}>linearity per sample</div>
+      </div>
+      <div style={{padding:"8px 10px",background:"#f4f7fb",border:"1px solid #d8dfeb",borderRadius:6}}>
+        <div style={{fontSize:9,fontWeight:700,color:"#6e6e73",textTransform:"uppercase",letterSpacing:0.4,marginBottom:2}}>Mean slope</div>
+        <div style={{fontSize:14,fontWeight:800,color:"#30437a"}}>{slopeMean != null ? sig3(slopeMean) : "—"}</div>
+        <div style={{fontSize:9,color:"#8e9bb5",marginTop:1}}>signal per (1/DF) unit</div>
+      </div>
+    </div>}
+
+    {/* Plain-English interpretation */}
+    <div style={{padding:"8px 12px",background:"#f7f1ff",border:"1px solid #e2d7fb",borderRadius:8,fontSize:11,color:"#30437a",lineHeight:1.55,marginBottom:instructor?10:0}}>
+      <strong style={{color:"#6337b9"}}>Interpretation:</strong> {interpretation}
+    </div>
+
+    {/* Instructor-mode ICH/ISO context */}
+    {instructor && <div style={{padding:"8px 12px",background:"#fffaf0",border:"1px solid #f0d6a0",borderRadius:8,fontSize:10,color:"#8a6420",lineHeight:1.55}}>
+      <strong>For reference:</strong> Per-sample R² ≥ 0.99 is the conventional acceptance for a calibration curve (ICH Q2(R2)). Within-replicate CV ≤ 5% is tighter than ICH M10's bioanalytical limit (15%, or 20% at LLOQ) — the rationale is to flag robot dispense issues before they consume your validation budget. ISO 8655 specifies pipettor imprecision (CV) ≤ 1–3% for fixed-volume pipettes. Cross-sample slope CV ≤ 5% indicates that aliquots from a shared stock produce similar calibration curves — the canonical robot-prep reproducibility check.
+    </div>}
+  </div>;
+}
+
+// ICH Q2(R2) Method Validation Parameters card.
+// Computes what's available from a single run: linearity, range, accuracy (from SST), precision
+// (within-run CV), and approximate LOD/LOQ from blank + low standard signal noise.
+// Specificity is explicitly marked as out-of-scope (requires designed interferent experiments).
+// Reference: ICH Q2(R2) "Validation of Analytical Procedures" (2023 revision).
+function MethodValidationCard(props) {
+  var res = props.res;
+  if (!res || !res.length) return null;
+  var unit = props.unit;
+  var displayUnit = props.displayUnit || unit;
+  var instructor = !!props.instructor;
+  var sstSamples = props.sstSamples || [];
+  var sstExpected = props.sstExpected || {};
+
+  // Linearity: report R² across plates (the value is the same as what's shown on the curve).
+  var r2Values = res.map(function(p){return p.sc && p.sc.r2 != null ? p.sc.r2 : null;}).filter(function(v){return v!=null;});
+  var avgR2 = r2Values.length ? r2Values.reduce(function(s,v){return s+v;},0) / r2Values.length : null;
+  var minR2 = r2Values.length ? Math.min.apply(null, r2Values) : null;
+
+  // Range: per ICH Q2(R2), the interval where linearity, accuracy, AND precision are all
+  // demonstrated simultaneously at every concentration. We compute per-plate the LONGEST
+  // CONTIGUOUS run of standards where all three criteria pass:
+  //   - Linearity: back-calculated residual reasonable (we use the same accuracy check as proxy)
+  //   - Accuracy: back-fit within 80-120% of nominal (75-125% at the lowest passing level / LLOQ)
+  //   - Precision: replicate CV ≤15% (≤20% at LLOQ)
+  // Then take the most conservative range across plates (highest LLOQ, lowest ULOQ).
+  var rangePerPlate = res.map(function(p){
+    if (!p.sc || !p.sc.pts || !p.sc.pts.length) return null;
+    if (!p.iFn) return null;
+    // Sort standards low → high
+    var sorted = p.sc.pts.slice().sort(function(a,b){return a.conc - b.conc;});
+    // Per-level evaluation: does this standard pass linearity + accuracy + precision?
+    var perLevel = sorted.map(function(pt, idx){
+      var measured = p.iFn(pt.avg);
+      if (measured == null || !isFinite(measured) || pt.conc <= 0) return {pt:pt, pass:false};
+      var pctNom = (measured / pt.conc) * 100;
+      var cvPct = pt.cv != null ? pt.cv * 100 : null;
+      // First (lowest) passing level gets LLOQ thresholds (75-125% acc, 20% CV).
+      // Other levels use 80-120% acc, 15% CV.
+      var isLLOQish = idx === 0;
+      var accThresh = isLLOQish ? [75, 125] : [80, 120];
+      var cvThresh = isLLOQish ? 20 : 15;
+      var accPass = pctNom >= accThresh[0] && pctNom <= accThresh[1];
+      var cvPass = cvPct == null || cvPct <= cvThresh;
+      return {pt:pt, pass:accPass && cvPass, accPct:pctNom, cv:cvPct};
+    });
+    // Find the longest contiguous block where pass=true
+    var bestStart = -1, bestLen = 0, curStart = -1, curLen = 0;
+    for (var i = 0; i < perLevel.length; i++) {
+      if (perLevel[i].pass) {
+        if (curStart < 0) curStart = i;
+        curLen++;
+        if (curLen > bestLen) { bestLen = curLen; bestStart = curStart; }
+      } else {
+        curStart = -1; curLen = 0;
+      }
+    }
+    if (bestLen < 2) return null;  // need at least 2 levels for a range
+    return {
+      lloq: perLevel[bestStart].pt.conc,
+      uloq: perLevel[bestStart + bestLen - 1].pt.conc,
+      nLevels: bestLen
+    };
+  });
+  var validRanges = rangePerPlate.filter(function(r){return r!=null;});
+  var rangeLLOQ = validRanges.length ? Math.max.apply(null, validRanges.map(function(r){return r.lloq;})) : null;
+  var rangeULOQ = validRanges.length ? Math.min.apply(null, validRanges.map(function(r){return r.uloq;})) : null;
+  var rangeNLevels = validRanges.length ? Math.min.apply(null, validRanges.map(function(r){return r.nLevels;})) : null;
+
+  // Spike recovery (additional accuracy source per ICH Q2). Pulls from the parent's runQC()
+  // results passed through props.spikeRecovery. Format: {meanR, minR, maxR, nWithRec, status}.
+  var spikeRec = props.spikeRecovery || null;
+  var spikeRecValues = spikeRec && spikeRec.nWithRec > 0 ? spikeRec : null;
+
+  // Accuracy: from SST samples — observed/expected × 100. Average across samples that have
+  // expected concentrations declared.
+  var accuracyValues = sstSamples.map(function(m){
+    var pick = props.analystPickFor ? props.analystPickFor(m.plateIdx, m.sampleIdx) : null;
+    var observed = pick && pick.conc != null ? pick.conc : null;
+    var expectedRaw = sstExpected[m.key];
+    if (expectedRaw == null || expectedRaw === "") return null;
+    var expectedDisplay = parseFloat(expectedRaw);
+    if (!isFinite(expectedDisplay) || expectedDisplay <= 0) return null;
+    // Convert expected (typed in displayUnit) to base unit
+    var convF = convertConc(1, displayUnit, unit);
+    if (convF == null || !isFinite(convF) || convF <= 0) return null;
+    var expected = expectedDisplay * convF;
+    if (observed == null) return null;
+    return (observed / expected) * 100;
+  }).filter(function(v){return v != null && isFinite(v);});
+  var avgAccuracy = accuracyValues.length ? accuracyValues.reduce(function(s,v){return s+v;},0) / accuracyValues.length : null;
+  // ICH M10 / Q2 accuracy (validation): ±15% (85-115%); ±20% at LLOQ (80-120%).
+  // This is STRICTER than the calibration-standard back-fit tolerance (±20% / ±25% at LLOQ),
+  // because validation accuracy uses QC samples to assess method performance, not calibration
+  // standards used to build the curve.
+  var accuracyPass = accuracyValues.length ? accuracyValues.every(function(v){return v >= 85 && v <= 115;}) : null;
+
+  // Precision (within-run, repeatability): aggregate replicate CV across all standards. Take the
+  // mean. ICH Q2 guidance: ≤15% CV (≤20% at LLOQ).
+  var allCVs = [];
+  res.forEach(function(p){
+    (p.sc && p.sc.pts || []).forEach(function(pt){
+      if (pt.cv != null && isFinite(pt.cv)) allCVs.push(pt.cv);
+    });
+    (p.samps || []).forEach(function(s){
+      (s.dils || []).forEach(function(d){
+        if (d.cv != null && isFinite(d.cv)) allCVs.push(d.cv);
+      });
+    });
+  });
+  var avgCV = allCVs.length ? allCVs.reduce(function(s,v){return s+v;},0) / allCVs.length : null;
+  var maxCV = allCVs.length ? Math.max.apply(null, allCVs) : null;
+  var precisionPass = avgCV != null ? avgCV <= 0.15 : null;
+
+  // LOD/LOQ (Q2 method 4): use SD of blank or lowest standards, divided by slope.
+  // LOD = 3.3 × σ / slope; LOQ = 10 × σ / slope.
+  // For linear fits, slope is direct. For log-log/4PL/5PL, this approximation is rough — we'll
+  // skip the panel's LOD/LOQ for non-linear fits and label as "linear-only".
+  var lodLoqPerPlate = res.map(function(p){
+    if (!p.sc || p.sc.model !== "linear") return null;
+    if (p.sc.slope == null || p.sc.slope === 0) return null;
+    // SD of the lowest concentration's replicates (best proxy for noise floor)
+    var lowestPt = (p.sc.pts || []).slice().sort(function(a,b){return a.conc - b.conc;})[0];
+    if (!lowestPt || lowestPt.sd == null) return null;
+    var sigma = lowestPt.sd;
+    return {
+      lod: 3.3 * sigma / p.sc.slope,
+      loq: 10 * sigma / p.sc.slope
+    };
+  });
+  var validLodLoq = lodLoqPerPlate.filter(function(v){return v != null;});
+  var lod = validLodLoq.length ? Math.max.apply(null, validLodLoq.map(function(v){return v.lod;})) : null;
+  var loq = validLodLoq.length ? Math.max.apply(null, validLodLoq.map(function(v){return v.loq;})) : null;
+
+  var fmtConc = function(c){
+    if (c == null || !isFinite(c)) return "—";
+    var dispV = convertConc(c, unit, displayUnit);
+    return sig3(dispV) + " " + displayUnit;
+  };
+
+  var rowS = {borderBottom:"1px solid #f0f0f3"};
+  var labelS = {padding:"10px 12px",fontSize:12,fontWeight:600,color:"#30437a",textAlign:"left",verticalAlign:"top",width:"30%"};
+  var valueS = {padding:"10px 12px",fontSize:12,color:"#1d1d1f",textAlign:"left",verticalAlign:"top"};
+  var noteS = {padding:"10px 12px",fontSize:11,color:"#6e6e73",textAlign:"left",verticalAlign:"top",fontStyle:"italic"};
+  // Pass/fail badge — visible in both analyst and instructor mode
+  var badge = function(pass, threshText){
+    if (pass === null || pass === undefined) return null;
+    return <span style={{marginLeft:8,fontSize:10,fontWeight:700,color:pass?"#1b7f6a":"#b4332e",padding:"2px 6px",border:"1px solid "+(pass?"#a8d4b8":"#e0a8a8"),borderRadius:4,background:pass?"#eaf5ec":"#fdedec",whiteSpace:"nowrap"}}>{pass?"✓ Pass":"✗ Fail"}{threshText?" ("+threshText+")":""}</span>;
+  };
+  var outOfScope = function(){
+    return <span style={{fontSize:10,fontWeight:700,color:"#8e9bb5",padding:"2px 6px",border:"1px solid #d8dfeb",borderRadius:4,background:"#f9fafc",whiteSpace:"nowrap"}}>Out of scope</span>;
+  };
+  // R² doesn't have a hard ICH threshold but R² > 0.99 is convention for bioanalytical methods
+  var linearityPass = avgR2 != null ? avgR2 >= 0.99 : null;
+  // Accuracy (validation): ICH M10 / Q2 require ±15% (85-115%); ±20% at LLOQ (80-120%).
+  var sstAccPass = accuracyValues.length ? accuracyValues.every(function(v){return v >= 85 && v <= 115;}) : null;
+  var spikeAccPass = spikeRecValues ? (spikeRecValues.minR >= 85 && spikeRecValues.maxR <= 115) : null;
+  // Combined accuracy: must pass on whichever sources are available
+  var anyAccChecked = sstAccPass !== null || spikeAccPass !== null;
+  var combinedAccPass = anyAccChecked ? (sstAccPass !== false && spikeAccPass !== false) : null;
+  var maxCVPct = maxCV != null ? maxCV * 100 : null;
+  // Precision pass: max CV ≤ 15% (a tighter check than mean — flags any single bad replicate)
+  var precisionPass = maxCVPct != null ? maxCVPct <= 15 : null;
+  // LOD/LOQ — these are reported, not pass/fail; LOQ should be ≤ lowest standard
+  var lowestStandard = null;
+  res.forEach(function(p){
+    (p.sc && p.sc.pts || []).forEach(function(pt){
+      if (pt.conc > 0 && (lowestStandard == null || pt.conc < lowestStandard)) lowestStandard = pt.conc;
+    });
+  });
+  var loqPass = (loq != null && lowestStandard != null) ? loq <= lowestStandard : null;
+
+  return <details style={{marginBottom:"1.25rem",padding:0,borderRadius:14,background:"#fff",border:"1px solid #e0e8f0",overflow:"hidden"}}>
+    <summary style={{cursor:"pointer",userSelect:"none",padding:"14px 18px",listStyle:"none",background:"linear-gradient(180deg,#f8fafd,#f0f5fb)",borderBottom:"1px solid #e0e8f0"}}>
+      <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+        <div style={{flex:1,minWidth:200}}>
+          <div style={{fontSize:14,fontWeight:800,color:"#0b2a6f"}}>Method Validation Parameters (ICH Q2(R2))</div>
+          <div style={{fontSize:11,color:"#6e6e73",marginTop:2}}>Computed from this run's data. Some parameters require additional experiments — marked accordingly.</div>
+        </div>
+        <span style={{fontSize:11,color:"#6e6e73",fontWeight:600,opacity:0.7}}>▾ click to expand</span>
+      </div>
+    </summary>
+    <div style={{padding:"14px 18px"}}>
+      <table style={{borderCollapse:"collapse",width:"100%"}}>
+        <tbody>
+          {/* Linearity */}
+          <tr style={rowS}>
+            <td style={labelS}>Linearity</td>
+            <td style={valueS}>
+              {avgR2 != null ? <span>R² = <strong>{avgR2.toFixed(4)}</strong>{r2Values.length>1?" (avg across "+r2Values.length+" plates, min "+minR2.toFixed(4)+")":""}{badge(linearityPass, "≥0.99")}</span> : <span style={{color:"#aeaeb2"}}>not computed</span>}
+            </td>
+            {instructor && <td style={noteS}>R² of the standard curve fit. ICH Q2 expects appropriate linearity demonstrated; R² &gt; 0.99 typical for bioanalytical methods.</td>}
+          </tr>
+          {/* Range */}
+          <tr style={rowS}>
+            <td style={labelS}>Range (LLOQ → ULOQ)</td>
+            <td style={valueS}>
+              {rangeLLOQ != null && rangeULOQ != null ? <span><strong>{fmtConc(rangeLLOQ)}</strong> to <strong>{fmtConc(rangeULOQ)}</strong> ({rangeNLevels} levels)</span> : <span style={{color:"#aeaeb2"}}>insufficient passing standards</span>}
+            </td>
+            {instructor && <td style={noteS}>Per ICH Q2/M10: longest contiguous block where linearity, accuracy (±15% / ±20% at LLOQ), AND precision (≤15% CV / ≤20% at LLOQ) all pass simultaneously. Most conservative across plates.</td>}
+          </tr>
+          {/* Accuracy from SST */}
+          <tr style={rowS}>
+            <td style={labelS}>Accuracy (from SST)</td>
+            <td style={valueS}>
+              {avgAccuracy != null ? <span><strong>{avgAccuracy.toFixed(1)}%</strong> (mean of {accuracyValues.length} SST sample{accuracyValues.length===1?"":"s"}){badge(sstAccPass, "85-115%")}</span> : <span style={{color:"#aeaeb2"}}>requires SST samples with expected concentrations</span>}
+            </td>
+            {instructor && <td style={noteS}>SST observed/expected × 100. ICH M10 acceptance for accuracy validation: each value within ±15% of nominal (i.e. 85–115%); ±20% at LLOQ (80–120%). Stricter than the calibration-standard back-fit tolerance, because validation accuracy uses QC-style samples.</td>}
+          </tr>
+          {/* Accuracy from spike recovery */}
+          <tr style={rowS}>
+            <td style={labelS}>Accuracy (from spike recovery)</td>
+            <td style={valueS}>
+              {spikeRecValues ? <span>Mean <strong>{spikeRecValues.meanR.toFixed(1)}%</strong>, range {spikeRecValues.minR.toFixed(1)}–{spikeRecValues.maxR.toFixed(1)}% ({spikeRecValues.nWithRec} spike set{spikeRecValues.nWithRec===1?"":"s"}){badge(spikeAccPass, "85-115%")}</span> : <span style={{color:"#aeaeb2"}}>requires spike-recovery experiment with measured spiked + unspiked samples</span>}
+            </td>
+            {instructor && <td style={noteS}>Recovery = (spiked − unspiked) / nominal × 100. ICH M10 acceptance: each spike set within ±15% of nominal (85–115%).</td>}
+          </tr>
+          {/* Precision: Repeatability (computed) */}
+          <tr style={rowS}>
+            <td style={labelS}>Precision: Repeatability</td>
+            <td style={valueS}>
+              {avgCV != null ? <span>Mean CV <strong>{(avgCV*100).toFixed(1)}%</strong>{maxCV!=null?", max "+(maxCV*100).toFixed(1)+"%":""}{badge(precisionPass, "max ≤15%")}</span> : <span style={{color:"#aeaeb2"}}>not computed</span>}
+            </td>
+            {instructor && <td style={noteS}>Within-run, within-day, same analyst/instrument. CV across replicates of standards + samples. Q2 acceptance: ≤15% (≤20% at LLOQ).</td>}
+          </tr>
+          {/* Precision: Intermediate (out of scope for single run) */}
+          <tr style={rowS}>
+            <td style={labelS}>Precision: Intermediate</td>
+            <td style={valueS}>
+              <span style={{color:"#8e9bb5",fontStyle:"italic"}}>Requires multiple runs (different days, analysts, or instruments)</span>
+              {outOfScope()}
+            </td>
+            {instructor && <td style={noteS}>Q2 intermediate precision: variability within the same lab across operating conditions. Cannot be computed from a single run.</td>}
+          </tr>
+          {/* Precision: Reproducibility (out of scope for single run) */}
+          <tr style={rowS}>
+            <td style={labelS}>Precision: Reproducibility</td>
+            <td style={valueS}>
+              <span style={{color:"#8e9bb5",fontStyle:"italic"}}>Requires inter-laboratory study</span>
+              {outOfScope()}
+            </td>
+            {instructor && <td style={noteS}>Q2 reproducibility: variability across laboratories. Demonstrated via collaborative or transfer studies.</td>}
+          </tr>
+          {/* LOD */}
+          <tr style={rowS}>
+            <td style={labelS}>LOD (3.3σ/slope)</td>
+            <td style={valueS}>
+              {lod != null ? <strong>{fmtConc(lod)}</strong> : <span style={{color:"#aeaeb2"}}>linear fit only{res.some(function(p){return p.sc && p.sc.model !== "linear";})?" (current fit is "+(res[0].sc?res[0].sc.model:"non-linear")+")":""}</span>}
+            </td>
+            {instructor && <td style={noteS}>Q2 method 4: σ from lowest standard's replicate SD divided by slope. Approximate; rigorous LOD requires designed blank/spike experiments.</td>}
+          </tr>
+          {/* LOQ */}
+          <tr style={rowS}>
+            <td style={labelS}>LOQ (10σ/slope)</td>
+            <td style={valueS}>
+              {loq != null ? <span><strong>{fmtConc(loq)}</strong>{lowestStandard != null && badge(loqPass, "≤ lowest standard")}</span> : <span style={{color:"#aeaeb2"}}>linear fit only</span>}
+            </td>
+            {instructor && <td style={noteS}>Q2 method 4: same σ as LOD, ×10. Should be ≤ lowest standard concentration. If LOQ exceeds your lowest standard, that standard is below your method's quantitation limit.</td>}
+          </tr>
+          {/* Specificity */}
+          <tr style={rowS}>
+            <td style={labelS}>Specificity</td>
+            <td style={valueS}>
+              <span style={{color:"#8e9bb5",fontStyle:"italic"}}>Requires interferent / matrix experiments</span>
+              {outOfScope()}
+            </td>
+            {instructor && <td style={noteS}>Q2 specificity must be assessed by running blanks, related substances, degradation products, and matrix samples. This is a designed validation experiment, not computable from a single quantitation run.</td>}
+          </tr>
+          {/* Robustness */}
+          <tr>
+            <td style={labelS}>Robustness</td>
+            <td style={valueS}>
+              <span style={{color:"#8e9bb5",fontStyle:"italic"}}>Requires deliberate variation experiments</span>
+              {outOfScope()}
+            </td>
+            {instructor && <td style={noteS}>Q2 robustness: capacity to remain unaffected by small but deliberate variations in method parameters (incubation time, buffer pH, plate lot, temperature, reagent stability). A separate designed study, not computable from a single run.</td>}
+          </tr>
+        </tbody>
+      </table>
+      {!instructor && <div style={{marginTop:10,fontSize:10,color:"#8e9bb5",fontStyle:"italic"}}>Toggle Instructor mode for parameter explanations.</div>}
+    </div>
+  </details>;
+}
+
+
+// ────────────────────────────────────────────────────────────────────────────
+// VALIDATION DESIGNER — wizard for technician-friendly validation experiment design
+// ────────────────────────────────────────────────────────────────────────────
+//
+// The validationTemplates object below is intentionally LAID OUT FOR EDITING.
+// Each entry defines one validation test type. To tweak wording or add fields,
+// edit the object directly — no other changes needed.
+//
+// Schema:
+//   id              — slug used for save/load
+//   label           — display name on Step 1 picker
+//   blurb           — one-line description shown on the picker tile
+//   fields          — array of input definitions for Step 2
+//     {key, label, type ("number"|"select"|"text"|"yesno"), default, helper, options?}
+//   wording(values) — fn returning the Step 3 sentence (technician-readable)
+//   outputRows(values) — fn returning [{label, value}] rows for Step 4 output table
+//   rationale       — instructor-mode "why is the design this way?" explanation
+//
+// To extend: add a new entry; everything else (wizard flow, Excel export,
+// download/upload) automatically picks it up.
+// ────────────────────────────────────────────────────────────────────────────
+var validationTemplates = {
+  rangeFinding: {
+    id: "rangeFinding",
+    label: "Range-finding / Scouting",
+    blurb: "Use first when LLOQ and ULOQ are not known yet",
+    fields: [
+      {key:"topConc", label:"Highest planned concentration", type:"text", default:"", helper:"Use the highest safe/plausible standard or sample level you can prepare."},
+      {key:"nLevels", label:"Number of scouting levels", type:"number", default:10, helper:"8–10 levels gives enough spread to see blank separation and saturation."},
+      {key:"dilutionFactor", label:"Serial dilution factor", type:"number", default:3, helper:"3-fold is a good first scout; 2-fold is tighter, 10-fold is broader."},
+      {key:"reps", label:"Replicates per level", type:"number", default:2, helper:"Duplicate is enough for scouting; formal validation uses more replicates."}
+    ],
+    wording: function(v){
+      var n = v.nLevels || 10;
+      var df = v.dilutionFactor || 3;
+      var r = v.reps || 2;
+      var top = v.topConc ? " starting at "+v.topConc : "";
+      var repWord = r===2?"duplicate":r===3?"triplicate":(r+" replicates");
+      return "Prepare a broad "+n+"-point "+df+"-fold serial dilution"+top+" and run each level in "+repWord+". Use the results to estimate provisional LLOQ, ULOQ, and the working calibration range.";
+    },
+    outputRows: function(v){
+      return [
+        {label:"What to run", value:(v.nLevels||10)+"-point "+(v.dilutionFactor||3)+"-fold serial dilution series"},
+        {label:"Replicates", value:(v.reps||2)+" per level"},
+        {label:"What it's for", value:"Find the usable signal window before formal validation"},
+        {label:"Statistics needed", value:"Blank separation, saturation check, provisional LLOQ/ULOQ, candidate range"}
+      ];
+    },
+    rationale: "Range-finding is not the formal ICH validation claim. It is the scouting experiment you run first when LLOQ and ULOQ are unknown. The goal is to locate the usable assay window: where signal is separated from blank/noise at the low end and not saturated or nonlinear at the high end. After this, the analyst can set provisional LLOQ/ULOQ and design the formal ICH validation."
+  },
+
+  linearity: {
+    id: "linearity",
+    label: "Linearity",
+    blurb: "Confirms response changes predictably with concentration",
+    fields: [
+      {key:"nLevels", label:"Number of concentration levels", type:"number", default:6, helper:"5–8 is typical. Spread evenly across the assay range."},
+      {key:"reps", label:"Replicates per level", type:"number", default:2, helper:"Duplicate is the standard minimum."},
+      {key:"rangeLow", label:"Lowest concentration", type:"text", default:"", helper:"In your working units (e.g. 0.1 mg/mL)"},
+      {key:"rangeHigh", label:"Highest concentration", type:"text", default:"", helper:"In your working units (e.g. 10 mg/mL)"}
+    ],
+    wording: function(v){
+      var n = v.nLevels || 6;
+      var r = v.reps || 2;
+      var range = (v.rangeLow && v.rangeHigh) ? " from "+v.rangeLow+" to "+v.rangeHigh : " across the assay range";
+      var repWord = r===2?"duplicate":r===3?"triplicate":(r+" replicates");
+      return "Prepare a "+n+"-point dilution series"+range+" and run each level in "+repWord+" to assess linearity.";
+    },
+    outputRows: function(v){
+      return [
+        {label:"What to run", value:(v.nLevels||6)+" concentration levels covering the assay range"},
+        {label:"Replicates", value:(v.reps||2)+" per level"},
+        {label:"What it's for", value:"Confirms response changes predictably with concentration"},
+        {label:"Statistics needed", value:"Slope, intercept, R², residuals (lack-of-fit if available)"}
+      ];
+    },
+    rationale: "Linearity demonstrates that signal scales proportionally with concentration over the validated range. ICH Q2 recommends a minimum of 5 levels; 6–8 is more robust. Spread levels evenly (or log-spaced for wide-range methods like LC-MS) to avoid leveraging from clumped points."
+  },
+
+  accuracy: {
+    id: "accuracy",
+    label: "Accuracy",
+    blurb: "Shows how close results are to the true value",
+    fields: [
+      {key:"qcLevels", label:"Number of QC levels", type:"select", default:"3", options:["1","2","3","4","5"], helper:"3 (low, mid, high) is the ICH Q2 recommendation."},
+      {key:"reps", label:"Replicates per QC", type:"number", default:3, helper:"Triplicate is typical."},
+      {key:"matrix", label:"Matrix", type:"text", default:"", helper:"Buffer, plasma, etc. Use the same matrix as your real samples."}
+    ],
+    wording: function(v){
+      var qc = v.qcLevels || "3";
+      var r = v.reps || 3;
+      var qcDesc = qc==="3"?"low, mid, and high":qc+" levels spanning the assay range";
+      var repWord = r===2?"duplicate":r===3?"triplicate":(r+" replicates");
+      var matrixPart = v.matrix ? " in "+v.matrix+" matrix" : "";
+      return "Prepare QC samples at "+qcDesc+matrixPart+" and run each in "+repWord+". Compare measured vs. nominal concentrations.";
+    },
+    outputRows: function(v){
+      return [
+        {label:"What to run", value:(v.qcLevels||"3")+" QC levels at known concentrations"},
+        {label:"Replicates", value:(v.reps||3)+" per QC"},
+        {label:"What it's for", value:"Shows how close measured results are to true (nominal) values"},
+        {label:"Statistics needed", value:"% recovery (measured/nominal × 100) and % bias per QC level"}
+      ];
+    },
+    rationale: "Accuracy is demonstrated by recovering known concentrations within ICH Q2/M10 acceptance: ±15% of nominal (85–115%), or ±20% at LLOQ (80–120%) for bioanalytical methods. Three QC levels (low, mid, high) is the minimum to show accuracy across the range; more levels strengthen the case but add work."
+  },
+
+  repeatability: {
+    id: "repeatability",
+    label: "Repeatability",
+    blurb: "Measures same-day, same-analyst precision",
+    fields: [
+      {key:"qcLevel", label:"QC level concentration", type:"text", default:"", helper:"E.g. mid-level QC. Run a single concentration."},
+      {key:"reps", label:"Number of replicates", type:"number", default:5, helper:"5–6 replicates is the ICH Q2 minimum."},
+      {key:"independentPreps", label:"Use independent preparations?", type:"yesno", default:"yes", helper:"Yes = each replicate is prepared from scratch (preferred). No = aliquots from one tube."}
+    ],
+    wording: function(v){
+      var conc = v.qcLevel || "the chosen QC level";
+      var r = v.reps || 5;
+      var prepNote = v.independentPreps==="yes" ? " from independent preparations" : " from the same prepared sample";
+      return "Run "+r+" replicates of "+conc+" "+prepNote+" on the same day, same analyst, same instrument.";
+    },
+    outputRows: function(v){
+      return [
+        {label:"What to run", value:"Same QC level, "+(v.reps||5)+" replicates"+(v.independentPreps==="yes"?" (independent preps)":" (single prep)")},
+        {label:"Replicates", value:(v.reps||5)},
+        {label:"What it's for", value:"Measures within-run, within-day precision"},
+        {label:"Statistics needed", value:"Mean, standard deviation (SD), %CV"}
+      ];
+    },
+    rationale: "Repeatability is the tightest precision estimate — one analyst, one day, one instrument. Independent preparations capture all sources of within-run variation (pipetting, dilution, signal noise). ICH Q2 acceptance for repeatability CV is typically ≤15% (≤20% at LLOQ)."
+  },
+
+  intermediatePrecision: {
+    id: "intermediatePrecision",
+    label: "Intermediate Precision",
+    blurb: "Measures day-to-day or analyst-to-analyst precision",
+    fields: [
+      {key:"qcLevel", label:"QC level concentration", type:"text", default:"", helper:"E.g. mid-level QC."},
+      {key:"reps", label:"Replicates per session", type:"number", default:3, helper:"Triplicate per session is typical."},
+      {key:"nDays", label:"Number of days", type:"number", default:3, helper:"Minimum 2; 3–5 is standard."},
+      {key:"nAnalysts", label:"Number of analysts", type:"number", default:2, helper:"Minimum 2 to demonstrate inter-analyst variation."}
+    ],
+    wording: function(v){
+      var conc = v.qcLevel || "the QC level";
+      var r = v.reps || 3;
+      var d = v.nDays || 3;
+      var a = v.nAnalysts || 2;
+      var repWord = r===2?"duplicate":r===3?"triplicate":(r+" replicates");
+      return "Run "+conc+" in "+repWord+" on "+d+" different days using "+a+" different analysts. Combine to assess intermediate precision.";
+    },
+    outputRows: function(v){
+      var totalRuns = (v.reps||3) * (v.nDays||3) * (v.nAnalysts||2);
+      return [
+        {label:"What to run", value:(v.nDays||3)+" days × "+(v.nAnalysts||2)+" analysts × "+(v.reps||3)+" replicates = "+totalRuns+" total"},
+        {label:"Replicates", value:(v.reps||3)+" per session"},
+        {label:"What it's for", value:"Measures variability within the same lab across days, analysts, and instruments"},
+        {label:"Statistics needed", value:"Within-run CV, between-run CV, total CV (variance components or pooled SD)"}
+      ];
+    },
+    rationale: "Intermediate precision is broader than repeatability — it captures the variation a single lab sees over time. ICH Q2 wants this demonstrated across at least one source of variation (day, analyst, or instrument); covering two or more is stronger. ANOVA-based variance partitioning gives the cleanest read."
+  },
+
+  dilutionIntegrity: {
+    id: "dilutionIntegrity",
+    label: "Dilution Integrity",
+    blurb: "Confirms dilution does not bias the result",
+    fields: [
+      {key:"highConc", label:"High sample concentration", type:"text", default:"", helper:"Above the upper limit of quantitation."},
+      {key:"dilutions", label:"Dilution factors to test", type:"text", default:"1:2, 1:5, 1:10", helper:"Comma-separated. Each dilution should land in-range."},
+      {key:"reps", label:"Replicates per dilution", type:"number", default:3, helper:"Triplicate."}
+    ],
+    wording: function(v){
+      var conc = v.highConc || "an above-range sample";
+      var dils = v.dilutions || "1:2, 1:5, 1:10";
+      var r = v.reps || 3;
+      var repWord = r===2?"duplicate":r===3?"triplicate":(r+" replicates");
+      return "Take "+conc+" and dilute at "+dils+" into the assay range. Run each dilution in "+repWord+" and back-calculate the original concentration.";
+    },
+    outputRows: function(v){
+      return [
+        {label:"What to run", value:"High sample diluted at "+(v.dilutions||"1:2, 1:5, 1:10")},
+        {label:"Replicates", value:(v.reps||3)+" per dilution"},
+        {label:"What it's for", value:"Confirms dilution into range does not introduce bias (parallelism)"},
+        {label:"Statistics needed", value:"% recovery after dilution (back-calculated original / known original × 100)"}
+      ];
+    },
+    rationale: "Dilution integrity (also called parallelism) confirms that diluting an above-range sample into range gives the right answer when corrected for dilution. Hook effects, matrix interference, or non-parallelism between sample and standard curve all show up here. ICH M10 acceptance: ±15% recovery (85–115%) at each tested dilution."
+  },
+
+  lloq: {
+    id: "lloq",
+    label: "LLOQ (Lower Limit of Quantitation)",
+    blurb: "Confirms the lowest concentration can be measured reliably",
+    fields: [
+      {key:"lloqConc", label:"Proposed LLOQ concentration", type:"text", default:"", helper:"The lowest concentration you want to validate as quantifiable."},
+      {key:"reps", label:"Replicates", type:"number", default:5, helper:"5+ for robust precision/accuracy at LLOQ."},
+      {key:"nRuns", label:"Number of runs / days", type:"number", default:3, helper:"Multiple runs strengthen the LLOQ claim."}
+    ],
+    wording: function(v){
+      var conc = v.lloqConc || "the proposed LLOQ";
+      var r = v.reps || 5;
+      var d = v.nRuns || 3;
+      return "Run "+r+" replicates of "+conc+" across "+d+" runs. Verify CV ≤ 20% and accuracy 80–120% to qualify as LLOQ.";
+    },
+    outputRows: function(v){
+      return [
+        {label:"What to run", value:"Proposed LLOQ "+(v.lloqConc?"("+v.lloqConc+")":"")+" — "+(v.reps||5)+" reps × "+(v.nRuns||3)+" runs"},
+        {label:"Replicates", value:(v.reps||5)+" per run"},
+        {label:"What it's for", value:"Confirms the lowest concentration can be measured with acceptable precision and accuracy"},
+        {label:"Statistics needed", value:"%CV (≤ 20% pass), %recovery (80–120% pass at LLOQ), pass/fail summary"}
+      ];
+    },
+    rationale: "LLOQ is the lowest concentration where you can quantify reliably (not just detect). ICH Q2 / M10 acceptance is relaxed at LLOQ vs. higher concentrations: ±20% accuracy (80–120%) and ≤20% CV at LLOQ, vs. ±15% accuracy (85–115%) and ≤15% CV elsewhere. Multiple runs on different days strengthen the claim because LLOQ is sensitive to noise."
+  },
+
+  spikeRecovery: {
+    id: "spikeRecovery",
+    label: "Spike Recovery",
+    blurb: "Checks matrix effects and recovery in real samples",
+    fields: [
+      {key:"matrix", label:"Sample matrix", type:"text", default:"", helper:"E.g. plasma, cell lysate, formulation buffer."},
+      {key:"spikeLevels", label:"Spike levels", type:"text", default:"low, mid, high", helper:"Concentrations of spike (in your working units)."},
+      {key:"reps", label:"Replicates per spike level", type:"number", default:3, helper:"Triplicate."},
+      {key:"includeUnspiked", label:"Include unspiked control?", type:"yesno", default:"yes", helper:"Yes = subtract endogenous from spiked. No = assume zero endogenous (only valid for analyte-free matrix)."}
+    ],
+    wording: function(v){
+      var matrix = v.matrix || "the sample matrix";
+      var levels = v.spikeLevels || "low, mid, high";
+      var r = v.reps || 3;
+      var repWord = r===2?"duplicate":r===3?"triplicate":(r+" replicates");
+      var unspiked = v.includeUnspiked==="yes" ? ", plus an unspiked control" : "";
+      return "Spike known analyte into "+matrix+" at "+levels+" levels in "+repWord+unspiked+". Calculate (spiked − unspiked) / nominal × 100 to assess recovery.";
+    },
+    outputRows: function(v){
+      return [
+        {label:"What to run", value:"Spiked "+(v.matrix||"matrix")+" samples at "+(v.spikeLevels||"low, mid, high")+(v.includeUnspiked==="yes"?" + unspiked control":"")},
+        {label:"Replicates", value:(v.reps||3)+" per spike level"},
+        {label:"What it's for", value:"Checks whether matrix effects bias recovery; validates accuracy in a realistic sample"},
+        {label:"Statistics needed", value:"% recovery per spike level (ICH M10 acceptance: ±15% of nominal, i.e. 85–115%)"}
+      ];
+    },
+    rationale: "Spike recovery in real matrix is the gold-standard accuracy check for bioanalytical methods. Including an unspiked control is essential when the matrix may contain endogenous analyte; otherwise recovery is inflated. ICH M10 acceptance: each spike level must individually fall within ±15% of nominal (85–115%) — a single bad spike fails the test."
+  }
+};
+
+function ValidationDesignerCard(props) {
+  var instructor = !!props.instructor;
+  // Wizard state
+  var _step = useState(1), step = _step[0], setStep = _step[1];
+  var _testId = useState(null), testId = _testId[0], setTestId = _testId[1];
+  var _values = useState({}), values = _values[0], setValues = _values[1];
+  var _planName = useState(""), planName = _planName[0], setPlanName = _planName[1];
+  var _runFormat = useState("plate"), runFormat = _runFormat[0], setRunFormat = _runFormat[1];
+  var _plateFill = useState("classical"), plateFill = _plateFill[0], setPlateFill = _plateFill[1];
+
+  var template = testId ? validationTemplates[testId] : null;
+
+  // When test type is picked, initialize values from defaults
+  var pickTest = function(id){
+    setTestId(id);
+    var defaults = {};
+    validationTemplates[id].fields.forEach(function(f){defaults[f.key] = f.default;});
+    setValues(defaults);
+    setStep(2);
+  };
+
+  var resetWizard = function(){
+    setStep(1); setTestId(null); setValues({}); setPlanName("");
+  };
+
+  // CSV export — opens natively in Excel/Numbers/Sheets. No library dependency.
+  // CSV is more portable than .xlsx and lets the user paste into any spreadsheet tool.
+  var downloadCSV = function(){
+    if (!template) return;
+    var rows = template.outputRows(values);
+    var sentence = template.wording(values);
+    // CSV escape: wrap in quotes if contains comma/quote/newline; double up internal quotes
+    var esc = function(v){
+      var s = String(v == null ? "" : v);
+      if (s.indexOf(",")>=0 || s.indexOf('"')>=0 || s.indexOf("\n")>=0) {
+        return '"' + s.replace(/"/g, '""') + '"';
+      }
+      return s;
+    };
+    var lines = [];
+    lines.push(esc("Validation Plan: " + template.label));
+    lines.push(esc("Generated") + "," + esc(new Date().toISOString().slice(0,10)));
+    lines.push("");
+    lines.push(esc("Instructions"));
+    lines.push(esc(sentence));
+    lines.push("");
+    lines.push(esc("Plan Details"));
+    rows.forEach(function(r){
+      lines.push(esc(r.label) + "," + esc(r.value));
+    });
+    lines.push("");
+    lines.push(esc("Inputs"));
+    template.fields.forEach(function(f){
+      lines.push(esc(f.label) + "," + esc(values[f.key] != null ? values[f.key] : ""));
+    });
+    if (instructor) {
+      lines.push("");
+      lines.push(esc("Why this design?"));
+      lines.push(esc(template.rationale));
+    }
+    var csv = lines.join("\n");
+    var blob = new Blob([csv], {type:"text/csv;charset=utf-8"});
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url;
+    a.download = (planName || template.label.replace(/\s/g,"_")) + ".csv";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  // JSON download — portable plan file the user can re-upload later
+  var downloadPlanJSON = function(){
+    if (!template) return;
+    var plan = {
+      version: "1.0",
+      app: "eSSF Curve Validation Designer",
+      planName: planName || template.label,
+      createdAt: new Date().toISOString(),
+      testId: testId,
+      testLabel: template.label,
+      values: values,
+      sentence: template.wording(values),
+      outputRows: template.outputRows(values)
+    };
+    var blob = new Blob([JSON.stringify(plan, null, 2)], {type:"application/json"});
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url;
+    a.download = (planName || template.label.replace(/\s/g,"_")) + ".json";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  // Plan file upload — user picks a previously-downloaded .json
+  var uploadPlanJSON = function(e){
+    var file = e.target.files && e.target.files[0];
+    if (!file) return;
+    var reader = new FileReader();
+    reader.onload = function(ev){
+      try {
+        var plan = JSON.parse(ev.target.result);
+        if (!plan.testId || !validationTemplates[plan.testId]) {
+          alert("Plan file format not recognized — testId missing or unknown.");
+          return;
+        }
+        setTestId(plan.testId);
+        setValues(plan.values || {});
+        setPlanName(plan.planName || "");
+        setStep(4);  // jump to output view
+      } catch(err) {
+        alert("Could not read plan file: " + err.message);
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = "";  // reset so re-uploading the same file works
+  };
+
+  // Copy sentence to clipboard
+  var copyText = function(text){
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(text).then(function(){
+        alert("Copied to clipboard.");
+      }, function(){
+        alert("Could not copy — try selecting and copying manually.");
+      });
+    } else {
+      alert("Clipboard not available — try selecting and copying manually.");
+    }
+  };
+
+  // ── UI styles (match app conventions) ─────────────────────────────
+  var stepLabel = {fontSize:11,fontWeight:700,color:"#6e6e73",textTransform:"uppercase",letterSpacing:0.5,marginBottom:8};
+  var heading = {fontSize:16,fontWeight:800,color:"#0b2a6f",marginBottom:6};
+  var hint = {fontSize:12,color:"#6e6e73",marginBottom:14,lineHeight:1.5};
+
+  // ── Step 1: pick a validation test ─────────────────────────────────
+  var renderStep1 = function(){
+    var testOrder = ["linearity","accuracy","repeatability","intermediatePrecision","dilutionIntegrity","lloq","spikeRecovery"];
+    return <div>
+      <div style={stepLabel}>Step 1 of 4</div>
+      <div style={heading}>Which validation test do you want to design?</div>
+      <p style={hint}>Pick one. You can come back and design others — each plan is saved separately.</p>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(240px, 1fr))",gap:10,marginBottom:18}}>
+        {testOrder.map(function(id){
+          var t = validationTemplates[id];
+          return <button key={id} onClick={function(){pickTest(id);}} style={{textAlign:"left",cursor:"pointer",border:"1px solid #d8dfeb",background:"#fff",borderRadius:12,padding:"14px 16px",fontFamily:"inherit",transition:"all 0.15s"}} onMouseEnter={function(e){e.currentTarget.style.borderColor="#6337b9";e.currentTarget.style.transform="translateY(-1px)";}} onMouseLeave={function(e){e.currentTarget.style.borderColor="#d8dfeb";e.currentTarget.style.transform="translateY(0)";}}>
+            <div style={{fontSize:13,fontWeight:800,color:"#0b2a6f",marginBottom:4}}>{t.label}</div>
+            <div style={{fontSize:11,color:"#6e6e73",lineHeight:1.4}}>{t.blurb}</div>
+          </button>;
+        })}
+      </div>
+      <div style={{padding:"12px 14px",background:"#fafafa",border:"1px dashed #d0d8ea",borderRadius:8}}>
+        <div style={{fontSize:11,fontWeight:700,color:"#5a6984",marginBottom:6}}>Or load a saved plan:</div>
+        <label style={{display:"inline-flex",alignItems:"center",gap:6,cursor:"pointer",fontSize:11,padding:"6px 12px",background:"#fff",border:"1px solid #d8dfeb",borderRadius:6,fontWeight:600,color:"#30437a"}}>
+          📂 Choose plan file (.json)
+          <input type="file" accept="application/json,.json" onChange={uploadPlanJSON} style={{display:"none"}} />
+        </label>
+      </div>
+    </div>;
+  };
+
+  // ── Step 2: fill in test-specific fields ───────────────────────────
+  var renderStep2 = function(){
+    if (!template) return null;
+    return <div>
+      <div style={stepLabel}>Step 2 of 4 — {template.label}</div>
+      <div style={heading}>Tell us about your experiment</div>
+      <p style={hint}>{template.blurb}. Fill in the fields below — defaults are reasonable starting points.</p>
+      <div style={{display:"flex",flexDirection:"column",gap:12,marginBottom:18}}>
+        {template.fields.map(function(f){
+          var val = values[f.key] != null ? values[f.key] : f.default;
+          var setVal = function(v){
+            var nv = {};
+            for (var k in values) nv[k] = values[k];
+            nv[f.key] = v;
+            setValues(nv);
+          };
+          var inputEl = null;
+          if (f.type === "number") {
+            inputEl = <input type="number" value={val} onChange={function(e){setVal(parseInt(e.target.value)||0);}} style={{padding:"8px 12px",border:"1px solid #d8dfeb",borderRadius:6,fontSize:13,width:120,fontFamily:"inherit"}} />;
+          } else if (f.type === "text") {
+            inputEl = <input type="text" value={val} placeholder={f.helper} onChange={function(e){setVal(e.target.value);}} style={{padding:"8px 12px",border:"1px solid #d8dfeb",borderRadius:6,fontSize:13,minWidth:240,fontFamily:"inherit"}} />;
+          } else if (f.type === "select") {
+            inputEl = <select value={val} onChange={function(e){setVal(e.target.value);}} style={{padding:"8px 12px",border:"1px solid #d8dfeb",borderRadius:6,fontSize:13,fontFamily:"inherit",background:"#fff"}}>
+              {f.options.map(function(o){return <option key={o} value={o}>{o}</option>;})}
+            </select>;
+          } else if (f.type === "yesno") {
+            inputEl = <select value={val} onChange={function(e){setVal(e.target.value);}} style={{padding:"8px 12px",border:"1px solid #d8dfeb",borderRadius:6,fontSize:13,fontFamily:"inherit",background:"#fff"}}>
+              <option value="yes">Yes</option>
+              <option value="no">No</option>
+            </select>;
+          }
+          return <div key={f.key} style={{padding:"12px 14px",background:"#fafcff",border:"1px solid #e5e9f0",borderRadius:10}}>
+            <label style={{display:"block",fontSize:13,fontWeight:700,color:"#30437a",marginBottom:6}}>{f.label}</label>
+            <div style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
+              {inputEl}
+              {f.helper && f.type !== "text" && <span style={{fontSize:11,color:"#8e9bb5",fontStyle:"italic"}}>{f.helper}</span>}
+            </div>
+          </div>;
+        })}
+      </div>
+      <div style={{display:"flex",gap:8,justifyContent:"space-between"}}>
+        <button onClick={function(){setStep(1);}} style={{background:"#fff",border:"1px solid #d8dfeb",color:"#5a6984",padding:"8px 16px",borderRadius:8,fontSize:12,fontWeight:600,cursor:"pointer"}}>← Back</button>
+        <button onClick={function(){setStep(3);}} style={{background:"#6337b9",color:"#fff",border:"none",padding:"8px 20px",borderRadius:8,fontSize:12,fontWeight:700,cursor:"pointer"}}>Next →</button>
+      </div>
+    </div>;
+  };
+
+  // ── Step 3: wording preview ────────────────────────────────────────
+  var renderStep3 = function(){
+    if (!template) return null;
+    var sentence = template.wording(values);
+    return <div>
+      <div style={stepLabel}>Step 3 of 4 — {template.label}</div>
+      <div style={heading}>Your experiment instruction</div>
+      <p style={hint}>This is the one-line instruction your tech can follow. Review it; if it doesn't read right, go back and adjust.</p>
+      <div style={{padding:"18px 20px",background:"linear-gradient(180deg,#f5f0ff,#ede5ff)",border:"1px solid #c7b2e8",borderRadius:12,marginBottom:18}}>
+        <div style={{fontSize:11,fontWeight:700,color:"#6337b9",textTransform:"uppercase",letterSpacing:0.5,marginBottom:8}}>Instruction</div>
+        <p style={{margin:0,fontSize:14,color:"#0b2a6f",lineHeight:1.6,fontWeight:500}}>{sentence}</p>
+      </div>
+      {instructor && <div style={{padding:"12px 16px",background:"#f6fbff",border:"1px solid #d7e7fb",borderRadius:8,marginBottom:18,fontSize:12,color:"#30437a",lineHeight:1.6}}>
+        <div style={{fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:0.5,marginBottom:4,color:"#5a6984"}}>Why this design?</div>
+        {template.rationale}
+      </div>}
+      <div style={{display:"flex",gap:8,justifyContent:"space-between"}}>
+        <button onClick={function(){setStep(2);}} style={{background:"#fff",border:"1px solid #d8dfeb",color:"#5a6984",padding:"8px 16px",borderRadius:8,fontSize:12,fontWeight:600,cursor:"pointer"}}>← Back</button>
+        <button onClick={function(){setStep(4);}} style={{background:"#6337b9",color:"#fff",border:"none",padding:"8px 20px",borderRadius:8,fontSize:12,fontWeight:700,cursor:"pointer"}}>See full plan →</button>
+      </div>
+    </div>;
+  };
+
+  // ── Step 4: full output table + actions ────────────────────────────
+  var renderStep4 = function(){
+    if (!template) return null;
+    var sentence = template.wording(values);
+    var rows = template.outputRows(values);
+    return <div>
+      <div style={stepLabel}>Step 4 of 4 — {template.label}</div>
+      <div style={heading}>Your validation plan</div>
+      <p style={hint}>Review, name, and download. The plan file (.json) can be re-uploaded later to revisit or edit.</p>
+      {/* Plan name input */}
+      <div style={{padding:"12px 14px",background:"#fafcff",border:"1px solid #e5e9f0",borderRadius:10,marginBottom:14}}>
+        <label style={{display:"block",fontSize:11,fontWeight:700,color:"#5a6984",textTransform:"uppercase",letterSpacing:0.5,marginBottom:6}}>Plan name (optional)</label>
+        <input type="text" value={planName} placeholder={template.label+" — "+new Date().toISOString().slice(0,10)} onChange={function(e){setPlanName(e.target.value);}} style={{padding:"8px 12px",border:"1px solid #d8dfeb",borderRadius:6,fontSize:13,width:"100%",maxWidth:480,fontFamily:"inherit",boxSizing:"border-box"}} />
+      </div>
+      {/* Instruction */}
+      <div style={{padding:"14px 18px",background:"linear-gradient(180deg,#f5f0ff,#ede5ff)",border:"1px solid #c7b2e8",borderRadius:12,marginBottom:14}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,marginBottom:6,flexWrap:"wrap"}}>
+          <div style={{fontSize:10,fontWeight:700,color:"#6337b9",textTransform:"uppercase",letterSpacing:0.5}}>Instruction</div>
+          <button onClick={function(){copyText(sentence);}} style={{background:"#fff",border:"1px solid #c7b2e8",color:"#6337b9",padding:"4px 10px",borderRadius:6,fontSize:10,fontWeight:600,cursor:"pointer"}}>📋 Copy</button>
+        </div>
+        <p style={{margin:0,fontSize:14,color:"#0b2a6f",lineHeight:1.6,fontWeight:500}}>{sentence}</p>
+      </div>
+      {/* Plan details table */}
+      <div style={{background:"#fff",border:"1px solid #e5e5ea",borderRadius:12,overflow:"hidden",marginBottom:14}}>
+        <div style={{padding:"10px 16px",background:"#fafafa",borderBottom:"1px solid #e5e5ea",fontSize:11,fontWeight:700,color:"#6e6e73",textTransform:"uppercase",letterSpacing:0.5}}>Plan details</div>
+        <table style={{borderCollapse:"collapse",width:"100%"}}>
+          <tbody>
+            {rows.map(function(r,i){
+              return <tr key={i} style={{borderBottom:i<rows.length-1?"1px solid #f0f0f3":"none"}}>
+                <td style={{padding:"10px 16px",fontSize:12,fontWeight:600,color:"#30437a",width:"30%",verticalAlign:"top"}}>{r.label}</td>
+                <td style={{padding:"10px 16px",fontSize:12,color:"#1d1d1f",lineHeight:1.5}}>{r.value}</td>
+              </tr>;
+            })}
+          </tbody>
+        </table>
+      </div>
+      {instructor && <div style={{padding:"12px 16px",background:"#f6fbff",border:"1px solid #d7e7fb",borderRadius:8,marginBottom:14,fontSize:12,color:"#30437a",lineHeight:1.6}}>
+        <div style={{fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:0.5,marginBottom:4,color:"#5a6984"}}>Why this design?</div>
+        {template.rationale}
+      </div>}
+      {/* Actions */}
+      <div style={{display:"flex",flexWrap:"wrap",gap:8,marginBottom:8}}>
+        <button onClick={downloadCSV} style={{background:"#1b7f6a",color:"#fff",border:"none",padding:"10px 16px",borderRadius:8,fontSize:12,fontWeight:700,cursor:"pointer"}}>📊 Download as CSV (opens in Excel)</button>
+        <button onClick={downloadPlanJSON} style={{background:"#0b2a6f",color:"#fff",border:"none",padding:"10px 16px",borderRadius:8,fontSize:12,fontWeight:700,cursor:"pointer"}}>💾 Download plan file (.json)</button>
+        <button onClick={resetWizard} style={{background:"#fff",border:"1px solid #d8dfeb",color:"#5a6984",padding:"10px 16px",borderRadius:8,fontSize:12,fontWeight:600,cursor:"pointer",marginLeft:"auto"}}>+ New plan</button>
+      </div>
+      <div style={{padding:"8px 12px",background:"#fafafa",borderRadius:6,fontSize:10,color:"#8e9bb5",lineHeight:1.5}}>
+        💡 The plan file (.json) keeps everything — settings, sentence, table — and can be re-uploaded later from Step 1 to revisit or edit. The CSV is a printable summary.
+      </div>
+    </div>;
+  };
+
+  return <div style={{background:"#fff",border:"1px solid "+BORDER,borderRadius:14,padding:"1.5rem",boxShadow:"0 4px 12px rgba(11,42,111,0.04)"}}>
+    {/* Header */}
+    <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:16,paddingBottom:14,borderBottom:"1px solid #f0f0f3"}}>
+      <div style={{width:40,height:40,borderRadius:10,background:"#6337b9",color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>✓</div>
+      <div>
+        <div style={{fontSize:15,fontWeight:800,color:"#0b2a6f"}}>Validation Designer</div>
+        <div style={{fontSize:11,color:"#6e6e73"}}>Design simple, ICH Q2-aligned validation experiments. One decision per screen.</div>
+      </div>
+    </div>
+    {/* Progress dots */}
+    <div style={{display:"flex",gap:6,marginBottom:18}}>
+      {[1,2,3,4].map(function(s){
+        var active = s===step;
+        var done = s<step;
+        return <div key={s} style={{flex:1,height:4,borderRadius:2,background:done?"#6337b9":active?"#a989d8":"#e5e9f0",transition:"all 0.15s"}}></div>;
+      })}
+    </div>
+    {/* Step content */}
+    {step===1 && renderStep1()}
+    {step===2 && renderStep2()}
+    {step===3 && renderStep3()}
+    {step===4 && renderStep4()}
+  </div>;
+}
+
+
+// ────────────────────────────────────────────────────────────────────────────
+// FULL VALIDATION PLAN — multi-test wizard with SEL naming + Treatment Groups
+// ────────────────────────────────────────────────────────────────────────────
+//
+// SEL (Standardized Experiment Label) format: [TestPrefix][LevelToken]_[Rep]
+//   L  = Linearity         L1_1, L1_2, ..., L6_3
+//   AL/AM/AH = Accuracy    AL_1, AM_1, AH_1, ...
+//   P  = Repeatability     P_1, P_2, ..., P_5  (single QC level, no level token)
+//   IP = Intermediate Prec IP1_1, IP1_2, ..., IPn_r  (n = session = day×analyst index)
+//   D  = Dilution Integ    D2_1, D5_1, D10_1  (level token = dilution factor as int)
+//   Q  = LLOQ              Q1_1, Q1_5, Q3_5   (level token = run index)
+//   SL/SM/SH = Spike Rec   SL_1, SM_1, SH_1, S0_1 (S0 = unspiked control)
+//
+// Each test's row generator is pure: takes params, returns array of treatment-row
+// objects with deterministic SEL values. Future stats engine can match by SEL prefix.
+// ────────────────────────────────────────────────────────────────────────────
+
+// Helper: parse a comma-separated list of dilution factors like "1:2, 1:5, 1:10"
+// into integer factors [2, 5, 10]. Skips invalid/non-integer entries.
+function parseDilutionFactors(s) {
+  if (!s) return [];
+  var out = [];
+  String(s).split(",").forEach(function(part){
+    var t = part.trim();
+    var m = t.match(/^1\s*[:\/]\s*(\d+)$/);
+    if (m) {
+      var df = parseInt(m[1]);
+      if (df >= 2) out.push(df);
+    } else {
+      var n = parseInt(t);
+      if (!isNaN(n) && n >= 2) out.push(n);
+    }
+  });
+  return out;
+}
+
+// Format a number as a concentration string with units (uses sig figs, not exponent).
+// Used in Treatment Groups "Nominal concentration" column.
+function fmtConcWithUnit(val, unit) {
+  if (val == null || !isFinite(val)) return "—";
+  var u = unit || "";
+  return sig3(val) + (u ? " " + u : "");
+}
+
+// Parse a comma- or space-separated rep mix like "3,3,2" or "3 3 2" into [3,3,2].
+// Returns {parts: number[], sum: number, valid: boolean, error: string|null}.
+// `valid` means: at least one positive integer was parsed and all parsed values are positive integers.
+function parseRepMix(s) {
+  if (s == null) return {parts:[], sum:0, valid:false, error:"Empty rep mix"};
+  var raw = String(s).trim();
+  if (raw === "") return {parts:[], sum:0, valid:false, error:"Empty rep mix"};
+  var tokens = raw.split(/[,\s]+/).filter(function(t){return t.length>0;});
+  if (tokens.length === 0) return {parts:[], sum:0, valid:false, error:"No values"};
+  var parts = [];
+  for (var i=0; i<tokens.length; i++) {
+    var n = parseInt(tokens[i], 10);
+    if (!isFinite(n) || n <= 0 || String(n) !== tokens[i]) {
+      return {parts:[], sum:0, valid:false, error:"\"" + tokens[i] + "\" is not a positive integer"};
+    }
+    parts.push(n);
+  }
+  var sum = parts.reduce(function(a,b){return a+b;}, 0);
+  return {parts:parts, sum:sum, valid:true, error:null};
+}
+
+function testColor(test) {
+  var m = {
+    "Range-finding":"#8E6BE8",
+    "Linearity":"#139CB6",
+    "Accuracy":"#2E7D32",
+    "Repeatability":"#0B63CE",
+    "Intermediate Precision":"#6337B9",
+    "Dilution Integrity":"#BF7A20",
+    "LLOQ":"#C44569",
+    "Spike Recovery":"#0F8AA2"
+  };
+  return m[test] || "#6f7fa0";
+}
+
+// Per-test row generators. Each returns an array of treatment rows:
+//   {sel, humanLabel, test, level, nominal, replicate, prepType, purpose}
+// Each row = one prepared sample (one tube/well in the bench setup).
+var validationTreatmentGenerators = {
+  rangeFinding: function(params, unit) {
+    var rows = [];
+    var n = parseInt(params.nLevels) || 10;
+    var reps = parseInt(params.reps) || 2;
+    var df = parseFloat(params.dilutionFactor) || 3;
+    var top = parseFloat(params.topConc);
+    if (!isFinite(df) || df <= 1) df = 3;
+    for (var i = 0; i < n; i++) {
+      var levelNum = i + 1;
+      var c = isFinite(top) && top > 0 ? top / Math.pow(df, i) : null;
+      var concStr = c != null ? fmtConcWithUnit(c, unit) : (levelNum===1 ? "(highest planned)" : "Level "+levelNum+" from "+df+"-fold series");
+      for (var r = 1; r <= reps; r++) {
+        rows.push({
+          sel: "F" + levelNum + "_" + r,
+          humanLabel: "Range-finding Level " + levelNum + " replicate " + r,
+          test: "Range-finding",
+          level: "Scout level " + levelNum,
+          nominal: concStr,
+          replicate: r,
+          prepType: levelNum===1 ? "Prepare highest level" : df + "-fold serial dilution",
+          purpose: "Find usable range"
+        });
+      }
+    }
+    return rows;
+  },
+
+  linearity: function(params, unit) {
+    var rows = [];
+    var n = parseInt(params.nLevels) || 6;
+    var reps = parseInt(params.reps) || 2;
+    var lo = parseFloat(params.rangeLow);
+    var hi = parseFloat(params.rangeHigh);
+    if (!isFinite(lo) || !isFinite(hi) || lo<=0 || hi<=lo) return rows;
+    // Log-spaced if range spans >1 decade, otherwise linear-spaced
+    var spanLog = Math.log10(hi/lo) > 1;
+    var concs = [];
+    for (var i = 0; i < n; i++) {
+      var frac = n>1 ? i/(n-1) : 0;
+      var c = spanLog
+        ? lo * Math.pow(hi/lo, frac)
+        : lo + (hi-lo) * frac;
+      concs.push(c);
+    }
+    var prepStyle = params.prepStyle || "discrete";
+    var prepLabel = prepStyle==="discrete" ? "Independent discrete prep from stock" : (prepStyle==="oneStep" ? "One-step dilution from stock" : "Serial dilution from prior level");
+    concs.forEach(function(c, idx){
+      var levelNum = idx + 1;
+      for (var r = 1; r <= reps; r++) {
+        rows.push({
+          sel: "L" + levelNum + "_" + r,
+          humanLabel: "Linearity Level " + levelNum + " (" + fmtConcWithUnit(c, unit) + ") replicate " + r,
+          test: "Linearity",
+          level: "Level " + levelNum,
+          nominal: fmtConcWithUnit(c, unit),
+          replicate: r,
+          prepType: prepStyle==="serial" && idx===0 ? "Prepare from stock" : prepLabel,
+          purpose: "Curve level"
+        });
+      }
+    });
+    return rows;
+  },
+
+  accuracy: function(params, unit) {
+    var rows = [];
+    var levels = (params.qcLevels || "L,M,H").split(",").map(function(s){return s.trim();}).filter(Boolean);
+    var reps = parseInt(params.reps) || 3;
+    // Try to parse user-typed concentrations for L/M/H if provided
+    var concMap = {
+      L: parseFloat(params.qcLow),
+      M: parseFloat(params.qcMid),
+      H: parseFloat(params.qcHigh)
+    };
+    levels.forEach(function(lv){
+      var conc = concMap[lv];
+      var concStr = isFinite(conc) ? fmtConcWithUnit(conc, unit) : "(set by user)";
+      for (var r = 1; r <= reps; r++) {
+        rows.push({
+          sel: "A" + lv + "_" + r,
+          humanLabel: "Accuracy QC " + (lv==="L"?"Low":lv==="M"?"Mid":"High") + " replicate " + r,
+          test: "Accuracy",
+          level: lv==="L"?"Low":lv==="M"?"Mid":"High",
+          nominal: concStr,
+          replicate: r,
+          prepType: "Independent preparation from stock",
+          purpose: "Bias / recovery"
+        });
+      }
+    });
+    return rows;
+  },
+
+  repeatability: function(params, unit) {
+    var rows = [];
+    var reps = parseInt(params.reps) || 5;
+    var conc = parseFloat(params.qcLevel);
+    var concStr = isFinite(conc) ? fmtConcWithUnit(conc, unit) : (params.qcLevel || "(set by user)");
+    var indep = params.independentPreps !== "no";
+    for (var r = 1; r <= reps; r++) {
+      rows.push({
+        sel: "P_" + r,
+        humanLabel: "Repeatability replicate " + r,
+        test: "Repeatability",
+        level: "Single QC",
+        nominal: concStr,
+        replicate: r,
+        prepType: indep ? "Independent preparation" : "Aliquot from one prep",
+        purpose: "Within-run CV"
+      });
+    }
+    return rows;
+  },
+
+  intermediatePrecision: function(params, unit) {
+    var rows = [];
+    var reps = parseInt(params.reps) || 3;
+    var nDays = parseInt(params.nDays) || 3;
+    var nAnalysts = parseInt(params.nAnalysts) || 2;
+    var conc = parseFloat(params.qcLevel);
+    var concStr = isFinite(conc) ? fmtConcWithUnit(conc, unit) : (params.qcLevel || "(set by user)");
+    // Sessions = day × analyst combinations, indexed 1..N
+    var sessionIdx = 0;
+    for (var d = 1; d <= nDays; d++) {
+      for (var a = 1; a <= nAnalysts; a++) {
+        sessionIdx++;
+        for (var r = 1; r <= reps; r++) {
+          rows.push({
+            sel: "IP" + sessionIdx + "_" + r,
+            humanLabel: "Intermediate Precision Day "+d+" Analyst "+a+" replicate " + r,
+            test: "Intermediate Precision",
+            level: "Session "+sessionIdx+" (D"+d+" A"+a+")",
+            nominal: concStr,
+            replicate: r,
+            prepType: "Independent preparation per session",
+            purpose: "Between-run CV"
+          });
+        }
+      }
+    }
+    return rows;
+  },
+
+  dilutionIntegrity: function(params, unit) {
+    var rows = [];
+    var dfs = parseDilutionFactors(params.dilutions);
+    if (dfs.length === 0) dfs = [2, 5, 10];
+    var reps = parseInt(params.reps) || 3;
+    var hi = parseFloat(params.highConc);
+    var hiStr = isFinite(hi) ? fmtConcWithUnit(hi, unit) : (params.highConc || "(above-range sample)");
+    dfs.forEach(function(df){
+      var diluted = isFinite(hi) ? fmtConcWithUnit(hi/df, unit) : "—";
+      for (var r = 1; r <= reps; r++) {
+        rows.push({
+          sel: "D" + df + "_" + r,
+          humanLabel: "Dilution 1:" + df + " replicate " + r,
+          test: "Dilution Integrity",
+          level: "1:" + df + " of " + hiStr,
+          nominal: diluted,
+          replicate: r,
+          prepType: "Dilute from high sample",
+          purpose: "Dilution bias"
+        });
+      }
+    });
+    return rows;
+  },
+
+  lloq: function(params, unit) {
+    var rows = [];
+    var reps = parseInt(params.reps) || 5;
+    var nRuns = parseInt(params.nRuns) || 3;
+    var conc = parseFloat(params.lloqConc);
+    var concStr = isFinite(conc) ? fmtConcWithUnit(conc, unit) : (params.lloqConc || "(set by user)");
+    for (var run = 1; run <= nRuns; run++) {
+      for (var r = 1; r <= reps; r++) {
+        rows.push({
+          sel: "Q" + run + "_" + r,
+          humanLabel: "LLOQ Run " + run + " replicate " + r,
+          test: "LLOQ",
+          level: "Run " + run,
+          nominal: concStr,
+          replicate: r,
+          prepType: "Independent preparation per run",
+          purpose: "LLOQ confirmation"
+        });
+      }
+    }
+    return rows;
+  },
+
+  spikeRecovery: function(params, unit) {
+    var rows = [];
+    var levels = (params.spikeLevels || "L,M,H").split(",").map(function(s){return s.trim();}).filter(Boolean);
+    var reps = parseInt(params.reps) || 3;
+    var includeUnspiked = params.includeUnspiked !== "no";
+    var matrix = params.matrix || "matrix";
+    var concMap = {
+      L: parseFloat(params.spikeLow),
+      M: parseFloat(params.spikeMid),
+      H: parseFloat(params.spikeHigh)
+    };
+    if (includeUnspiked) {
+      for (var r0 = 1; r0 <= reps; r0++) {
+        rows.push({
+          sel: "S0_" + r0,
+          humanLabel: "Unspiked " + matrix + " control replicate " + r0,
+          test: "Spike Recovery",
+          level: "Unspiked",
+          nominal: "0",
+          replicate: r0,
+          prepType: matrix + " (no spike)",
+          purpose: "Unspiked baseline"
+        });
+      }
+    }
+    levels.forEach(function(lv){
+      var conc = concMap[lv];
+      var concStr = isFinite(conc) ? fmtConcWithUnit(conc, unit) : "(set by user)";
+      for (var r = 1; r <= reps; r++) {
+        rows.push({
+          sel: "S" + lv + "_" + r,
+          humanLabel: "Spiked " + matrix + " " + (lv==="L"?"Low":lv==="M"?"Mid":"High") + " replicate " + r,
+          test: "Spike Recovery",
+          level: "Spike " + (lv==="L"?"Low":lv==="M"?"Mid":"High"),
+          nominal: concStr,
+          replicate: r,
+          prepType: matrix + " + analyte spike",
+          purpose: "Spike recovery"
+        });
+      }
+    });
+    return rows;
+  }
+};
+
+// Stats Map — what the future analyzer will compute from each test's data, keyed by SEL prefix.
+// This is forward-looking: declares the analytical contract for the import-and-auto-analyze
+// pipeline that doesn't exist yet. Edit this object to extend the contract.
+var validationStatsMap = {
+  rangeFinding:          { prefix: "F",  stats: "blank separation, saturation/nonlinearity check, provisional LLOQ, provisional ULOQ, candidate calibration range" },
+  linearity:             { prefix: "L",  stats: "slope, intercept, R², residuals, back-calculated concentration, % bias per level" },
+  accuracy:              { prefix: "AL/AM/AH", stats: "% recovery and % bias per QC level (mean across replicates)" },
+  repeatability:         { prefix: "P",  stats: "mean, SD, %CV across replicates" },
+  intermediatePrecision: { prefix: "IP", stats: "within-session CV, between-session CV, total CV (variance components)" },
+  dilutionIntegrity:     { prefix: "D",  stats: "% recovery after dilution per dilution factor; %CV across replicates" },
+  lloq:                  { prefix: "Q",  stats: "mean, SD, %CV per run; pooled accuracy and precision; pass/fail vs LLOQ acceptance (80–120%, ≤20% CV)" },
+  spikeRecovery:         { prefix: "SL/SM/SH (S0 = unspiked)", stats: "% recovery per spike level after subtracting unspiked baseline; pass/fail vs ±15% (85–115%) per ICH M10" }
+};
+
+// ICH-aligned recommended prep style per test. Per ICH M10:
+//   - Calibration standards (linearity) MAY use serial dilution
+//   - QC samples (accuracy, repeatability, IP, LLOQ) SHOULD use independent preparations
+//   - Dilution integrity REQUIRES independent dilution series
+//   - Spike recovery: spike from independent stock into matrix
+var ICH_PREP_GUIDANCE = {
+  rangeFinding:          {recommended:"serial",     note:"Serial dilution is fine for scouting (this is not formal validation)."},
+  linearity:             {recommended:"discrete",   note:"Independent preparations are stronger evidence for validation; serial dilution is acceptable for routine calibration. ICH Q2(R2) does not mandate either."},
+  accuracy:              {recommended:"discrete",   note:"ICH M10 requires QC samples to be prepared INDEPENDENTLY from calibration standards — confirms calibration prep errors don't propagate to QCs."},
+  repeatability:         {recommended:"discrete",   note:"Independent preparations of the same QC level — multiple preps are required to capture between-prep variability, not just instrument noise."},
+  intermediatePrecision: {recommended:"discrete",   note:"Independent preparations across days/analysts; reusing one stock across sessions defeats the purpose."},
+  dilutionIntegrity:     {recommended:"discrete",   note:"ICH M10 §4.3 requires INDEPENDENT dilution series — diluting from a serial chain would couple all dilution factors."},
+  lloq:                  {recommended:"discrete",   note:"LLOQ samples are QC-style — prepare independently from calibration standards. Multiple runs strengthen the claim."},
+  spikeRecovery:         {recommended:"discrete",   note:"Spike from a separate stock into independent matrix aliquots. Include unspiked controls to subtract endogenous analyte."}
+};
+
+// Pure helper: compute dilution recipe for a set of treatment-group rows.
+//   rows: [{level, nominal, sel}] from a generator
+//   prepStyle: "serial" | "discrete" | "oneStep"
+//   stockNum: stock concentration (number, in same unit as nominals)
+//   Vf_uL: final volume per replicate, in µL
+// Returns null if inputs invalid; otherwise {mode, steps, levels, suggestedStock, hasPrecisionWarn}.
+// Always includes 10% pipetting waste (floor 50 µL). Both DilutionRecipeCard's UI
+// render and the CSV exporter call this so the two stay synchronized.
+function computeDilutionRecipe(rows, prepStyle, stockNum, Vf_uL) {
+  // Collect distinct (level, nominal) pairs
+  var levels = [];
+  var seen = {};
+  rows.forEach(function(r){
+    var num = parseFloat(r.nominal);
+    if (!isFinite(num) || num <= 0) return;
+    if (seen[r.level]) return;
+    seen[r.level] = true;
+    levels.push({level:r.level, nominal:num});
+  });
+  if (levels.length === 0) return null;
+  // Reps per level
+  var repsPerLevel = {};
+  rows.forEach(function(r){
+    var num = parseFloat(r.nominal);
+    if (!isFinite(num) || num <= 0) return;
+    repsPerLevel[r.level] = (repsPerLevel[r.level] || 0) + 1;
+  });
+  var sortedDesc = levels.slice().sort(function(a,b){return b.nominal - a.nominal;});
+  var maxConc = sortedDesc[0].nominal;
+  var suggestedStock = (2 * maxConc).toPrecision(3);
+
+  if (!isFinite(stockNum) || stockNum <= 0 || !isFinite(Vf_uL) || Vf_uL <= 0) {
+    return {mode:null, steps:[], levels:sortedDesc, suggestedStock:suggestedStock, hasPrecisionWarn:false};
+  }
+
+  var hasPrecisionWarn = false;
+  var classify = function(aliquot, total){
+    var pct = (aliquot / total) * 100;
+    if (pct < 5) { hasPrecisionWarn = true; return "low (aliquot <5%)"; }
+    if (pct > 50) { hasPrecisionWarn = true; return "low (aliquot >50%)"; }
+    return "ok";
+  };
+
+  if (prepStyle === "serial") {
+    var carrySteps = [];
+    var nLvl = sortedDesc.length;
+    for (var i = 0; i < nLvl; i++) {
+      var thisLvl = sortedDesc[i];
+      var nReps = repsPerLevel[thisLvl.level] || 1;
+      var Vneed = Vf_uL * nReps;
+      var carryToNext = 0;
+      // Carry forward enough for ALL downstream steps (overestimate but safe)
+      for (var j = i; j < nLvl - 1; j++) {
+        var lvlJ = sortedDesc[j];
+        var lvlJp1 = sortedDesc[j+1];
+        var carryAtJ = lvlJp1.nominal * Vf_uL * (repsPerLevel[lvlJp1.level] || 1) / lvlJ.nominal;
+        carryToNext += carryAtJ;
+      }
+      var Vtotal = Vneed + carryToNext + Math.max(50, 0.1 * Vneed);
+      var sourceConc = i === 0 ? stockNum : sortedDesc[i-1].nominal;
+      var sourceLabel = i === 0 ? "Stock (" + stockNum + ")" : "Level " + i + " (" + sortedDesc[i-1].level + ")";
+      var aliquot = thisLvl.nominal * Vtotal / sourceConc;
+      var diluent = Vtotal - aliquot;
+      var precision = classify(aliquot, Vtotal);
+      carrySteps.push({
+        step: i+1, level: thisLvl.level, targetC: thisLvl.nominal,
+        source: sourceLabel,
+        aliquot_uL: aliquot, diluent_uL: diluent, total_uL: Vtotal,
+        aliquotPct: (aliquot / Vtotal) * 100, precision: precision
+      });
+    }
+    return {mode:"serial", steps:carrySteps, levels:sortedDesc, suggestedStock:suggestedStock, hasPrecisionWarn:hasPrecisionWarn};
+  } else {
+    // Independent / one-step
+    var indSteps = sortedDesc.map(function(lvl){
+      var nReps = repsPerLevel[lvl.level] || 1;
+      var Vtot = Vf_uL * nReps + Math.max(50, 0.1 * Vf_uL * nReps);
+      var aliquot = lvl.nominal * Vtot / stockNum;
+      var diluent = Vtot - aliquot;
+      var precision = classify(aliquot, Vtot);
+      return {
+        level: lvl.level, targetC: lvl.nominal,
+        source: "Stock",
+        aliquot_uL: aliquot, diluent_uL: diluent, total_uL: Vtot,
+        aliquotPct: (aliquot / Vtot) * 100, precision: precision
+      };
+    });
+    return {mode:"independent", steps:indSteps, levels:sortedDesc, suggestedStock:suggestedStock, hasPrecisionWarn:hasPrecisionWarn};
+  }
+}
+
+// Format a volume in µL into a readable string with appropriate units.
+function fmtVolUL(uL) {
+  if (uL == null || !isFinite(uL)) return "—";
+  if (uL >= 1000) return (uL/1000).toFixed(2) + " mL";
+  if (uL >= 100) return uL.toFixed(0) + " µL";
+  if (uL >= 10) return uL.toFixed(1) + " µL";
+  return uL.toFixed(2) + " µL";
+}
+
+// Component: per-test inline collapsible recipe card.
+// Renders ICH guidance + recipe table (aliquot + diluent per level) given user-provided stock conc and final volume.
+function DilutionRecipeCard(props) {
+  var testId = props.testId;
+  var rows = props.rows || [];
+  var unit = props.unit || "";
+  var prepStyle = props.prepStyle || "discrete";
+  var instructor = !!props.instructor;
+
+  var _open = useState(false), open = _open[0], setOpen = _open[1];
+
+  // Find max conc for the suggested-stock pre-fill
+  var maxConcForSuggestion = 0;
+  rows.forEach(function(r){
+    var num = parseFloat(r.nominal);
+    if (isFinite(num) && num > maxConcForSuggestion) maxConcForSuggestion = num;
+  });
+  var suggestedStock = maxConcForSuggestion > 0 ? (2 * maxConcForSuggestion).toPrecision(3) : "";
+
+  // Pre-fill stock with the suggested value so the recipe just works on first open.
+  // User can override if they have a different stock on hand. Stock unit is always the
+  // assay unit (no unit conversion in this card — keep it dead simple).
+  var _stock = useState(suggestedStock), stock = _stock[0], setStock = _stock[1];
+  var _finalVol = useState("1.0"), finalVol = _finalVol[0], setFinalVol = _finalVol[1];
+  var _finalVolUnit = useState("mL"), finalVolUnit = _finalVolUnit[0], setFinalVolUnit = _finalVolUnit[1];
+
+  // Convert final volume to µL for arithmetic
+  var Vf_uL = (function(){
+    var vf = parseFloat(finalVol);
+    if (!isFinite(vf) || vf <= 0) return null;
+    return finalVolUnit === "mL" ? vf * 1000 : vf;
+  })();
+
+  var stockNum = parseFloat(stock);
+
+  // Compute the recipe using the shared helper (kept in sync with CSV export).
+  var computed = computeDilutionRecipe(rows, prepStyle, stockNum, Vf_uL);
+  // computed is null if rows have no valid concentrations; otherwise has {mode, steps, levels, ...}.
+  // mode is null if stock or Vf_uL invalid (in that case steps is empty).
+  var levels = (computed && computed.levels) || [];
+  var recipe = (computed && computed.mode) ? computed : null;
+
+  var fmtVol = fmtVolUL;
+
+  var guidance = ICH_PREP_GUIDANCE[testId] || {};
+  var inputS = {padding:"6px 9px",borderRadius:6,border:"1px solid #d8dfeb",fontSize:12,fontFamily:"inherit"};
+  var thS = {padding:"6px 8px",fontSize:10,fontWeight:700,color:"#30437a",textTransform:"uppercase",letterSpacing:0.4,textAlign:"left",borderBottom:"2px solid #d8dfeb",background:"#fafafa",whiteSpace:"nowrap"};
+  var tdS = {padding:"6px 8px",fontSize:11,color:"#1d1d1f",borderBottom:"1px solid #f0f0f3",verticalAlign:"top"};
+
+  return <div style={{background:"#fff",border:"1px solid #e5e5ea",borderRadius:10,overflow:"hidden",marginBottom:10}}>
+    <button type="button" onClick={function(){setOpen(!open);}} style={{width:"100%",padding:"9px 14px",background:open?"#f5f9fd":"#fff",border:"none",borderBottom:open?"1px solid #e5e9f0":"none",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,textAlign:"left",fontFamily:"inherit"}}>
+      <span style={{display:"flex",alignItems:"center",gap:8}}>
+        <span style={{fontSize:13}}>{open?"▾":"▸"}</span>
+        <span style={{fontSize:12,fontWeight:700,color:"#0b2a6f"}}>Dilution recipe — {props.testLabel}</span>
+        <span style={{fontSize:10,color:"#8e9bb5",fontStyle:"italic"}}>{levels.length} level{levels.length===1?"":"s"}</span>
+      </span>
+      <span style={{fontSize:10,color:"#5a6984"}}>{open?"hide":"show"}</span>
+    </button>
+    {open && <div style={{padding:"12px 14px"}}>
+      {/* ICH guidance line */}
+      <div style={{padding:"8px 11px",background: prepStyle===guidance.recommended ? "#eff7ee" : "#fff7e8",border:"1px solid "+(prepStyle===guidance.recommended ? "#cfe5cf" : "#f0d6a0"),borderRadius:6,fontSize:11,color: prepStyle===guidance.recommended ? "#1b5e20" : "#8a6420",marginBottom:11,lineHeight:1.5}}>
+        <strong>{prepStyle===guidance.recommended ? "✓ Matches ICH recommendation." : "⚠ ICH recommends a different prep style."}</strong>{" "}
+        {guidance.note}
+      </div>
+
+      {/* Inputs: stock conc + final volume (simplified: stock pre-filled with suggested, no unit choice, no waste toggle) */}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:11}}>
+        <div>
+          <div style={{fontSize:10,fontWeight:700,color:"#5a6984",marginBottom:4}}>Stock concentration</div>
+          <div style={{display:"flex",gap:4,alignItems:"center"}}>
+            <input type="text" value={stock} onChange={function(e){setStock(e.target.value);}} style={Object.assign({},inputS,{width:"100%"})} />
+            <span style={{fontSize:11,color:"#5a6984",fontWeight:600,whiteSpace:"nowrap"}}>{unit}</span>
+          </div>
+          <div style={{fontSize:10,color:"#6337b9",marginTop:3,fontStyle:"italic"}}>{(parseFloat(stock) === parseFloat(suggestedStock)) ? "suggested: 2× highest level" : "custom (suggested: "+suggestedStock+" "+unit+")"}</div>
+        </div>
+        <div>
+          <div style={{fontSize:10,fontWeight:700,color:"#5a6984",marginBottom:4}}>Final volume per replicate</div>
+          <div style={{display:"flex",gap:4}}>
+            <input type="text" value={finalVol} onChange={function(e){setFinalVol(e.target.value);}} placeholder="1.0" style={Object.assign({},inputS,{width:"100%"})} />
+            <select value={finalVolUnit} onChange={function(e){setFinalVolUnit(e.target.value);}} style={Object.assign({},inputS,{width:60,background:"#fff"})}>
+              <option value="mL">mL</option>
+              <option value="uL">µL</option>
+            </select>
+          </div>
+          <div style={{fontSize:10,color:"#8e9bb5",marginTop:3,fontStyle:"italic"}}>Includes 10% pipetting waste.</div>
+        </div>
+      </div>
+
+      {/* Recipe table */}
+      {recipe && <div>
+        {recipe.mode === "serial" ? (
+          <div>
+            <div style={{fontSize:11,color:"#5a6984",marginBottom:7,lineHeight:1.5}}>
+              <strong>Serial dilution chain.</strong> Prepare highest level first by diluting stock; then carry forward into each successive level.
+            </div>
+            <div style={{overflowX:"auto"}}>
+              <table style={{borderCollapse:"collapse",width:"100%",minWidth:640}}>
+                <thead><tr>
+                  <th style={thS}>Step</th>
+                  <th style={thS}>Level</th>
+                  <th style={thS}>Target conc</th>
+                  <th style={thS}>Source</th>
+                  <th style={thS}>Aliquot from source</th>
+                  <th style={thS}>Diluent</th>
+                  <th style={thS}>Total volume</th>
+                </tr></thead>
+                <tbody>
+                  {recipe.steps.map(function(s,i){
+                    var rowBg = s.precision !== "ok" ? "#fff7e8" : "transparent";
+                    var srcWithUnit = s.source.replace(/^Stock \(([^)]+)\)$/, "Stock ($1 "+unit+")");
+                    return <tr key={i} style={{background:rowBg}}>
+                      <td style={Object.assign({},tdS,{fontWeight:700})}>{s.step}</td>
+                      <td style={tdS}>{s.level}</td>
+                      <td style={tdS}>{s.targetC.toPrecision(3)} {unit}</td>
+                      <td style={Object.assign({},tdS,{fontSize:10,color:"#5a6984"})}>{srcWithUnit}</td>
+                      <td style={Object.assign({},tdS,{fontWeight:700,color:"#0b2a6f"})}>{fmtVol(s.aliquot_uL)}</td>
+                      <td style={Object.assign({},tdS,{fontWeight:700,color:"#0b2a6f"})}>{fmtVol(s.diluent_uL)}</td>
+                      <td style={tdS}>{fmtVol(s.total_uL)}</td>
+                    </tr>;
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        ) : (
+          <div>
+            <div style={{fontSize:11,color:"#5a6984",marginBottom:7,lineHeight:1.5}}>
+              <strong>Independent preparations.</strong> Prepare each level directly from the stock — no shared dilution chain.
+            </div>
+            <div style={{overflowX:"auto"}}>
+              <table style={{borderCollapse:"collapse",width:"100%",minWidth:560}}>
+                <thead><tr>
+                  <th style={thS}>Level</th>
+                  <th style={thS}>Target conc</th>
+                  <th style={thS}>Aliquot from stock</th>
+                  <th style={thS}>Diluent</th>
+                  <th style={thS}>Total to prepare</th>
+                </tr></thead>
+                <tbody>
+                  {recipe.steps.map(function(s,i){
+                    var rowBg = s.precision !== "ok" ? "#fff7e8" : "transparent";
+                    return <tr key={i} style={{background:rowBg}}>
+                      <td style={tdS}>{s.level}</td>
+                      <td style={tdS}>{s.targetC.toPrecision(3)} {unit}</td>
+                      <td style={Object.assign({},tdS,{fontWeight:700,color:"#0b2a6f"})}>{fmtVol(s.aliquot_uL)}</td>
+                      <td style={Object.assign({},tdS,{fontWeight:700,color:"#0b2a6f"})}>{fmtVol(s.diluent_uL)}</td>
+                      <td style={tdS}>{fmtVol(s.total_uL)}</td>
+                    </tr>;
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* Precision warnings */}
+        {recipe.steps.some(function(s){return s.precision !== "ok";}) && <div style={{marginTop:9,padding:"8px 11px",background:"#fff7e8",border:"1px solid #f0d6a0",borderRadius:6,fontSize:10,color:"#8a6420",lineHeight:1.5}}>
+          <strong>Pipetting precision warning.</strong> One or more aliquots are below 5% or above 50% of total volume — outside the typical accurate-pipetting range. {recipe.steps.some(function(s){return s.aliquotPct < 5;}) && "Try a more concentrated stock to increase low-end aliquots. "}{recipe.steps.some(function(s){return s.aliquotPct > 50;}) && "Try a less concentrated stock for the highest level."}
+        </div>}
+
+        {instructor && <div style={{marginTop:11,padding:"9px 12px",background:"#f6fbff",border:"1px solid #d7e7fb",borderRadius:6,fontSize:11,color:"#30437a",lineHeight:1.6}}>
+          <strong>Math.</strong> Aliquot = (target conc × total volume) / stock conc. Diluent = total volume − aliquot. For independent preps, each level is computed separately from stock. For serial preps, level 1 dilutes stock → C₁; level i (i≥2) carries forward from level i−1 with carryVol = C<sub>i</sub> × V<sub>total</sub> / C<sub>i−1</sub>.
+        </div>}
+      </div>}
+
+      {!recipe && <div style={{padding:"10px 12px",background:"#f4f7fb",border:"1px solid #e5e9f0",borderRadius:6,fontSize:11,color:"#5a6984",fontStyle:"italic"}}>
+        Enter both a stock concentration and a final volume to compute the recipe.
+      </div>}
+    </div>}
+  </div>;
+}
+
+function FullValidationPlanCard(props) {
+  var instructor = !!props.instructor;
+  var unit = props.unit || "ng/mL";
+
+  // ── Wizard state ──────────────────────────────────────────────────
+  // step: 1 = pick tests, 2 = configure each test (looped), 3 = output
+  var _step = useState(1), step = _step[0], setStep = _step[1];
+  var _selected = useState({}), selected = _selected[0], setSelected = _selected[1];  // {testId: true/false}
+  var _testParams = useState({}), testParams = _testParams[0], setTestParams = _testParams[1];  // {testId: {field: value}}
+  var _testIdx = useState(0), testIdx = _testIdx[0], setTestIdx = _testIdx[1];  // which test we're configuring in step 2
+  var _planName = useState(""), planName = _planName[0], setPlanName = _planName[1];
+  // Tracks which fields have been explicitly unlocked for editing. Keyed "testId:fieldKey".
+  var _unlockedFields = useState({}), unlockedFields = _unlockedFields[0], setUnlockedFields = _unlockedFields[1];
+  // Treatment Groups table view filter: "all" or one of the test ids
+  var _tableView = useState("all"), tableView = _tableView[0], setTableView = _tableView[1];
+  var _runFormat = useState("plate"), runFormat = _runFormat[0], setRunFormat = _runFormat[1];
+  var _plateFill = useState("rows"), plateFill = _plateFill[0], setPlateFill = _plateFill[1];
+  // Outer Dilution Recipes panel — collapsed by default (it's a secondary deliverable)
+  var _recipesOpen = useState(false), recipesOpen = _recipesOpen[0], setRecipesOpen = _recipesOpen[1];
+
+  var TEST_ORDER = ["rangeFinding","linearity","accuracy","repeatability","intermediatePrecision","dilutionIntegrity","lloq","spikeRecovery"];
+  var TEST_LABELS = {
+    rangeFinding:"Range-finding",
+    linearity:"Linearity", accuracy:"Accuracy", repeatability:"Repeatability",
+    intermediatePrecision:"Intermediate Precision", dilutionIntegrity:"Dilution Integrity",
+    lloq:"LLOQ", spikeRecovery:"Spike Recovery"
+  };
+
+  var selectedIds = TEST_ORDER.filter(function(id){return selected[id];});
+
+  // Auto-derive linearity range from a target concentration (80% to 120% of target)
+  // when user hasn't explicitly typed low/high. Implemented as a helper called from Step 2.
+  var deriveLinearityRange = function(target){
+    var t = parseFloat(target);
+    if (!isFinite(t) || t <= 0) return null;
+    return {low: (0.8 * t).toFixed(3), high: (1.2 * t).toFixed(3)};
+  };
+
+  // Auto-derive Accuracy QC concentrations.
+  // If a proposed LLOQ/ULOQ-style range is known, use the ICH M10 QC-placement convention:
+  //   Low (LQC)  = 3× LLOQ (range low)
+  //   Mid (MQC)  = midpoint of range
+  //   High (HQC) = ~80% of ULOQ (range high)
+  // If only a target concentration is known, propose a fit-for-purpose pre-validation range:
+  //   Low = target / sqrt(10), Mid = target, High = target * sqrt(10).
+  // This is a log-symmetric 10-fold window centered on the target.
+  // That is not a formal LLOQ/ULOQ claim; it is a qualification starting point.
+  // Returns {low, mid, high} as formatted strings, or null if cannot derive.
+  var deriveAccuracyQCs = function(){
+    var linP = testParams.linearity;
+    var accP = testParams.accuracy;
+    var lo = null, hi = null;
+    var fromKnownRange = false;
+    var targetDerivedLinearity = false;
+    if (accP && accP.knowsRange === "yes" && accP.lloq && accP.uloq) {
+      lo = parseFloat(accP.lloq);
+      hi = parseFloat(accP.uloq);
+      fromKnownRange = true;
+    } else if (linP && linP.rangeLow && linP.rangeHigh) {
+      lo = parseFloat(linP.rangeLow);
+      hi = parseFloat(linP.rangeHigh);
+      fromKnownRange = true;
+      if (linP.target) {
+        var autoLin = deriveLinearityRange(linP.target);
+        var autoLo = autoLin ? parseFloat(autoLin.low) : NaN;
+        var autoHi = autoLin ? parseFloat(autoLin.high) : NaN;
+        targetDerivedLinearity = isFinite(autoLo) && isFinite(autoHi) &&
+          Math.abs(lo-autoLo) <= Math.max(1e-9, Math.abs(autoLo)*1e-6) &&
+          Math.abs(hi-autoHi) <= Math.max(1e-9, Math.abs(autoHi)*1e-6) &&
+          !isUnlocked("linearity","rangeLow") &&
+          !isUnlocked("linearity","rangeHigh");
+      }
+    } else if (linP && linP.target) {
+      var linD = deriveLinearityRange(linP.target);
+      if (linD) {
+        lo = parseFloat(linD.low);
+        hi = parseFloat(linD.high);
+        targetDerivedLinearity = true;
+      }
+    }
+    if (targetDerivedLinearity && linP && linP.target) {
+      var targetT = parseFloat(linP.target);
+      if (isFinite(targetT) && targetT > 0) {
+      var spreadT = accSpreadFactor(accP && accP.qcSpread);
+        return {low: (targetT / spreadT).toPrecision(3), mid: targetT.toPrecision(3), high: (targetT * spreadT).toPrecision(3), mode:"target"};
+      }
+    }
+    if (!isFinite(lo) || !isFinite(hi) || lo<=0 || hi<=lo) {
+      // Fall back to accuracy's own target field if linearity range is unavailable.
+      // This is a fit-for-purpose qualification proposal: a 10-fold window around target.
+      var t = accP ? parseFloat(accP.target) : NaN;
+      if (!isFinite(t) || t <= 0) return null;
+      var spread = accSpreadFactor(accP && accP.qcSpread);
+      return {low: (t / spread).toPrecision(3), mid: t.toPrecision(3), high: (t * spread).toPrecision(3), mode:"target"};
+    }
+    if (!fromKnownRange && linP && linP.target) {
+      var lt = parseFloat(linP.target);
+      if (isFinite(lt) && lt > 0) {
+        var spreadL = accSpreadFactor(accP && accP.qcSpread);
+        return {low: (lt / spreadL).toPrecision(3), mid: lt.toPrecision(3), high: (lt * spreadL).toPrecision(3), mode:"target"};
+      }
+    }
+    // Per ICH M10 / FDA bioanalytical guidance:
+    //   LQC ≈ 3× LLOQ (often the lower-end QC closest to LLOQ but above its noise floor)
+    //   MQC ≈ midpoint (geometric mean if range >1 decade, arithmetic otherwise)
+    //   HQC ≈ 75–85% of ULOQ
+    var spanLog = Math.log10(hi/lo) > 1;
+    var lq = Math.min(3 * lo, 0.5 * (lo + hi));    // don't let LQC exceed midpoint
+    var mq = spanLog ? Math.sqrt(lo * hi) : 0.5 * (lo + hi);
+    var hq = 0.8 * hi;
+    return {low: lq.toPrecision(3), mid: mq.toPrecision(3), high: hq.toPrecision(3), mode:"range"};
+  };
+
+  var accSpreadFactor = function(mode){
+    if (mode === "tight") return 1.2;       // symmetric ±20% around target: 0.833x, 1x, 1.2x
+    if (mode === "broad") return Math.sqrt(10);
+    return 2;                               // default: moderate 0.5x, 1x, 2x
+  };
+
+  // Locked-style field renderer: shows value as a read-only-looking pill with a small
+  // "🔓 unlock to edit" / "🔒 lock" toggle. When unlocked, behaves as a normal input.
+  // Used to reduce decision fatigue — defaults look authoritative and stable.
+  // unlocked state is stored in `unlockedFields` keyed by `${testId}:${fieldKey}`.
+  var isUnlocked = function(testId, key){
+    return !!(unlockedFields[testId+":"+key]);
+  };
+  var setUnlocked = function(testId, key, val){
+    setUnlockedFields(function(prev){
+      var nu = {};
+      for (var k in prev) nu[k] = prev[k];
+      if (val) nu[testId+":"+key] = true;
+      else delete nu[testId+":"+key];
+      return nu;
+    });
+  };
+
+  var resetWizard = function(){
+    setStep(1); setSelected({}); setTestParams({}); setTestIdx(0); setPlanName("");
+  };
+
+  var toggleTest = function(id){
+    setSelected(function(prev){
+      var ns = {};
+      for (var k in prev) ns[k] = prev[k];
+      ns[id] = !ns[id];
+      return ns;
+    });
+  };
+
+  var updateTestParam = function(testId, key, value){
+    setTestParams(function(prev){
+      var nt = {};
+      for (var t in prev) {
+        var inner = {};
+        for (var k in prev[t]) inner[k] = prev[t][k];
+        nt[t] = inner;
+      }
+      if (!nt[testId]) nt[testId] = {};
+      nt[testId][key] = value;
+      return nt;
+    });
+  };
+
+  // Initialize default params for selected tests when entering Step 2
+  var initParamsForSelected = function(){
+    setTestParams(function(prev){
+      var nt = {};
+      for (var t in prev) nt[t] = prev[t];
+      selectedIds.forEach(function(id){
+        if (!nt[id]) nt[id] = getDefaultsForTest(id);
+      });
+      return nt;
+    });
+  };
+
+  // Defaults per test (mirrors the v5ck wizard's defaults but flattened for direct param dict).
+  // Defaults aim at ICH Q2/M10 minimum requirements: linearity 6 levels × 3 reps = 18 (≥5 levels);
+  // accuracy 3 QC × 3 reps = 9 determinations (ICH min); repeatability 5 reps; LLOQ 5 × 3 runs.
+  function getDefaultsForTest(id) {
+    var d = {};
+    if (id === "rangeFinding") {
+      d.topConc = ""; d.nLevels = 10; d.dilutionFactor = 3; d.reps = 2;
+    } else if (id === "linearity") {
+      d.target = ""; d.nLevels = 6; d.reps = 3; d.rangeLow = ""; d.rangeHigh = ""; d.prepStyle = "discrete";
+    } else if (id === "accuracy") {
+      // ICH Q2: at least 9 determinations across at least 3 concentration levels (e.g., 3×3).
+      d.target = ""; d.knowsRange = "no"; d.qcSpread = "moderate"; d.lloq = ""; d.uloq = ""; d.qcLevels = "L,M,H"; d.reps = 3; d.qcLow = ""; d.qcMid = ""; d.qcHigh = "";
+    } else if (id === "repeatability") {
+      d.qcLevel = ""; d.reps = 5; d.independentPreps = "yes";
+    } else if (id === "intermediatePrecision") {
+      d.qcLevel = ""; d.reps = 3; d.nDays = 3; d.nAnalysts = 2;
+    } else if (id === "dilutionIntegrity") {
+      d.highConc = ""; d.dilutions = "1:2, 1:5, 1:10"; d.reps = 3;
+    } else if (id === "lloq") {
+      d.lloqConc = ""; d.reps = 5; d.nRuns = 3;
+    } else if (id === "spikeRecovery") {
+      d.matrix = ""; d.spikeLevels = "L,M,H"; d.reps = 3; d.includeUnspiked = "yes";
+      d.spikeLow = ""; d.spikeMid = ""; d.spikeHigh = "";
+    }
+    return d;
+  }
+
+  // Resolve effective params for a given test, applying auto-derivation rules so that downstream
+  // row generation always has values to work with. Mirrors the visual auto-fill in Step 2.
+  function getEffectiveParams(testId) {
+    var raw = testParams[testId] || getDefaultsForTest(testId);
+    var eff = {};
+    for (var k in raw) eff[k] = raw[k];
+    if (testId === "rangeFinding") {
+      if (!eff.nLevels) eff.nLevels = 10;
+      if (!eff.dilutionFactor) eff.dilutionFactor = 3;
+      if (!eff.reps) eff.reps = 2;
+    } else if (testId === "linearity") {
+      var d = deriveLinearityRange(eff.target);
+      if (!eff.rangeLow && d) eff.rangeLow = d.low;
+      if (!eff.rangeHigh && d) eff.rangeHigh = d.high;
+      if (!eff.nLevels) eff.nLevels = 6;
+      if (!eff.reps) eff.reps = 3;
+      if (!eff.prepStyle) eff.prepStyle = "discrete";
+    } else if (testId === "accuracy") {
+      var qc = deriveAccuracyQCs();
+      if (!eff.qcLow && qc) eff.qcLow = qc.low;
+      if (!eff.qcMid && qc) eff.qcMid = qc.mid;
+      if (!eff.qcHigh && qc) eff.qcHigh = qc.high;
+      if (!eff.reps) eff.reps = 3;
+      if (!eff.qcLevels) eff.qcLevels = "L,M,H";
+      if (!eff.qcSpread) eff.qcSpread = "moderate";
+    } else if (testId === "repeatability") {
+      if (!eff.qcLevel) {
+        if (testParams.accuracy && testParams.accuracy.qcMid) eff.qcLevel = testParams.accuracy.qcMid;
+        else { var qcsR = deriveAccuracyQCs(); if (qcsR) eff.qcLevel = qcsR.mid; }
+      }
+      if (!eff.reps) eff.reps = 5;
+      if (!eff.independentPreps) eff.independentPreps = "yes";
+    } else if (testId === "intermediatePrecision") {
+      if (!eff.qcLevel) {
+        if (testParams.accuracy && testParams.accuracy.qcMid) eff.qcLevel = testParams.accuracy.qcMid;
+        else if (testParams.repeatability && testParams.repeatability.qcLevel) eff.qcLevel = testParams.repeatability.qcLevel;
+        else { var qcsIP = deriveAccuracyQCs(); if (qcsIP) eff.qcLevel = qcsIP.mid; }
+      }
+      if (!eff.reps) eff.reps = 3;
+      if (!eff.nDays) eff.nDays = 3;
+      if (!eff.nAnalysts) eff.nAnalysts = 2;
+    } else if (testId === "dilutionIntegrity") {
+      if (!eff.highConc && testParams.linearity && testParams.linearity.rangeHigh) {
+        var uloq = parseFloat(testParams.linearity.rangeHigh);
+        if (isFinite(uloq) && uloq > 0) eff.highConc = (5 * uloq).toPrecision(3);
+      }
+      if (!eff.dilutions) eff.dilutions = "1:2, 1:5, 1:10";
+      if (!eff.reps) eff.reps = 3;
+    } else if (testId === "lloq") {
+      if (!eff.lloqConc && testParams.linearity && testParams.linearity.rangeLow) eff.lloqConc = testParams.linearity.rangeLow;
+      if (!eff.reps) eff.reps = 5;
+      if (!eff.nRuns) eff.nRuns = 3;
+    } else if (testId === "spikeRecovery") {
+      var sLow = "", sMid = "", sHi = "";
+      if (testParams.accuracy) {
+        sLow = testParams.accuracy.qcLow || "";
+        sMid = testParams.accuracy.qcMid || "";
+        sHi = testParams.accuracy.qcHigh || "";
+      }
+      if (!sLow || !sMid || !sHi) {
+        var qcsS = deriveAccuracyQCs();
+        if (qcsS) {
+          if (!sLow) sLow = qcsS.low;
+          if (!sMid) sMid = qcsS.mid;
+          if (!sHi) sHi = qcsS.high;
+        }
+      }
+      if (!eff.spikeLow) eff.spikeLow = sLow;
+      if (!eff.spikeMid) eff.spikeMid = sMid;
+      if (!eff.spikeHigh) eff.spikeHigh = sHi;
+      if (!eff.reps) eff.reps = 3;
+      if (!eff.spikeLevels) eff.spikeLevels = "L,M,H";
+      if (!eff.includeUnspiked) eff.includeUnspiked = "yes";
+    }
+    return eff;
+  }
+
+  // ── Compute Treatment Groups (master + per-test) ──────────────────
+  var allRows = [];
+  var perTestRows = {};
+  selectedIds.forEach(function(id){
+    var p = getEffectiveParams(id);
+    var generator = validationTreatmentGenerators[id];
+    var rows = generator ? generator(p, unit) : [];
+    perTestRows[id] = rows;
+    rows.forEach(function(r){allRows.push(r);});
+  });
+
+  // ── Run Summary numbers ───────────────────────────────────────────
+  var totalSamples = allRows.length;
+  var totalReps = allRows.reduce(function(s,r){return s+1;}, 0);  // 1 sample = 1 prep = 1 well
+  var prepTypes = {};
+  allRows.forEach(function(r){ if (r.prepType) prepTypes[r.prepType] = true; });
+  var prepKeys = Object.keys(prepTypes);
+  var hasSerialPrep = prepKeys.some(function(k){return /serial/i.test(k);});
+  var hasOneStepPrep = prepKeys.some(function(k){return /one-step/i.test(k);});
+  var hasDilutionPrep = prepKeys.some(function(k){return /dilute/i.test(k);});
+  var dilutionType = hasSerialPrep
+    ? "Serial dilution + independent preps"
+    : (hasOneStepPrep ? "One-step dilutions + independent preps" : (hasDilutionPrep ? "Dilutions + independent preps" : "Independent preparations"));
+
+  // ── CSV export ────────────────────────────────────────────────────
+  var downloadCSV = function(){
+    var esc = function(v){
+      var s = String(v == null ? "" : v);
+      if (s.indexOf(",")>=0 || s.indexOf('"')>=0 || s.indexOf("\n")>=0) {
+        return '"' + s.replace(/"/g, '""') + '"';
+      }
+      return s;
+    };
+    var lines = [];
+    lines.push(esc("Validation Plan: " + (planName || "Full validation plan")));
+    lines.push(esc("Generated") + "," + esc(new Date().toISOString().slice(0,10)));
+    lines.push(esc("Tests included") + "," + esc(selectedIds.map(function(id){return TEST_LABELS[id];}).join("; ")));
+    lines.push("");
+    lines.push(esc("RUN SUMMARY"));
+    lines.push(esc("Total samples") + "," + totalSamples);
+    lines.push(esc("Total run positions") + "," + totalReps);
+    lines.push(esc("Run format") + "," + esc(runFormat));
+    lines.push(esc("Dilution type") + "," + esc(dilutionType));
+    lines.push("");
+
+    // Master Treatment Groups table
+    lines.push(esc("TREATMENT GROUPS — MASTER TABLE"));
+    var headers = ["Sample ID","Level / Condition","Replicate","Nominal Concentration","Test","Prep Type","Purpose"];
+    lines.push(headers.map(esc).join(","));
+    allRows.forEach(function(r){
+      lines.push([r.sel, r.level, r.replicate, r.nominal, r.test, r.prepType, r.purpose].map(esc).join(","));
+    });
+    lines.push("");
+
+    // Per-test breakdowns
+    lines.push(esc("PER-TEST BREAKDOWNS"));
+    selectedIds.forEach(function(id){
+      lines.push("");
+      lines.push(esc("--- " + TEST_LABELS[id] + " ---"));
+      lines.push(headers.map(esc).join(","));
+      (perTestRows[id]||[]).forEach(function(r){
+        lines.push([r.sel, r.level, r.replicate, r.nominal, r.test, r.prepType, r.purpose].map(esc).join(","));
+      });
+    });
+    lines.push("");
+
+    // Stats Map
+    lines.push(esc("STATISTICS MAP (what the analyzer will calculate when results are imported)"));
+    lines.push([esc("Test"), esc("Sample ID Prefix"), esc("Statistics computed")].join(","));
+    selectedIds.forEach(function(id){
+      var sm = validationStatsMap[id];
+      if (sm) lines.push([esc(TEST_LABELS[id]), esc(sm.prefix), esc(sm.stats)].join(","));
+    });
+
+    if (instructor) {
+      lines.push("");
+      lines.push(esc("RATIONALE (instructor mode)"));
+      selectedIds.forEach(function(id){
+        var t = validationTemplates[id];
+        if (t) {
+          lines.push("");
+          lines.push(esc(TEST_LABELS[id]) + "," + esc(t.rationale));
+        }
+      });
+    }
+
+    // Dilution Recipes — deterministic recipe per test using suggested stock (2× max level)
+    // and 1 mL final volume per replicate + 10% pipetting waste. Matches the defaults the
+    // UI pre-fills, so CSV recipes equal what the user sees if they open the panel without changes.
+    lines.push("");
+    lines.push(esc("DILUTION RECIPES"));
+    lines.push(esc("Defaults: stock = 2× highest level, final volume = 1.0 mL/replicate, +10% pipetting waste."));
+    selectedIds.forEach(function(id){
+      var rowsForTest = perTestRows[id] || [];
+      if (rowsForTest.length === 0) return;
+      var prepStyleForTest = (testParams[id] && testParams[id].prepStyle) ||
+        (id === "rangeFinding" ? "serial" : "discrete");
+      // First, compute with stock=null/Vf=null to get suggestedStock
+      var probe = computeDilutionRecipe(rowsForTest, prepStyleForTest, NaN, NaN);
+      if (!probe || !probe.suggestedStock) return;
+      var stockNum = parseFloat(probe.suggestedStock);
+      var Vf_uL = 1000;  // 1 mL = 1000 µL
+      var rec = computeDilutionRecipe(rowsForTest, prepStyleForTest, stockNum, Vf_uL);
+      if (!rec || !rec.mode) return;
+      var guidance = ICH_PREP_GUIDANCE[id] || {};
+      var matches = prepStyleForTest === guidance.recommended;
+      lines.push("");
+      lines.push(esc("--- " + TEST_LABELS[id] + " ---"));
+      lines.push(esc("Prep style") + "," + esc(prepStyleForTest) + "," + esc(matches ? "matches ICH" : "differs from ICH"));
+      lines.push(esc("Suggested stock") + "," + esc(probe.suggestedStock + " " + unit));
+      lines.push(esc("Final volume per replicate") + "," + esc("1.0 mL"));
+      lines.push(esc("ICH note") + "," + esc(guidance.note || ""));
+      lines.push("");
+      if (rec.mode === "serial") {
+        lines.push([esc("Step"), esc("Level"), esc("Target conc"), esc("Source"), esc("Aliquot from source"), esc("Diluent"), esc("Total volume"), esc("Aliquot %"), esc("Precision flag")].join(","));
+        rec.steps.forEach(function(s){
+          var srcWithUnit = s.source.replace(/^Stock \(([^)]+)\)$/, "Stock ($1 " + unit + ")");
+          lines.push([
+            esc(s.step),
+            esc(s.level),
+            esc(s.targetC.toPrecision(3) + " " + unit),
+            esc(srcWithUnit),
+            esc(fmtVolUL(s.aliquot_uL)),
+            esc(fmtVolUL(s.diluent_uL)),
+            esc(fmtVolUL(s.total_uL)),
+            esc(s.aliquotPct.toFixed(1) + "%"),
+            esc(s.precision)
+          ].join(","));
+        });
+      } else {
+        lines.push([esc("Level"), esc("Target conc"), esc("Aliquot from stock"), esc("Diluent"), esc("Total to prepare"), esc("Aliquot %"), esc("Precision flag")].join(","));
+        rec.steps.forEach(function(s){
+          lines.push([
+            esc(s.level),
+            esc(s.targetC.toPrecision(3) + " " + unit),
+            esc(fmtVolUL(s.aliquot_uL)),
+            esc(fmtVolUL(s.diluent_uL)),
+            esc(fmtVolUL(s.total_uL)),
+            esc(s.aliquotPct.toFixed(1) + "%"),
+            esc(s.precision)
+          ].join(","));
+        });
+      }
+      if (rec.hasPrecisionWarn) {
+        lines.push(esc("WARNING") + "," + esc("One or more aliquots are <5% or >50% of total volume — pipetting precision may suffer. Consider adjusting stock concentration."));
+      }
+    });
+
+    var csv = lines.join("\n");
+    var blob = new Blob([csv], {type:"text/csv;charset=utf-8"});
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url;
+    a.download = (planName || "validation_plan") + ".csv";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  // ── JSON download (version 2.0 schema) ────────────────────────────
+  var downloadPlanJSON = function(){
+    var plan = {
+      version: "2.0",
+      app: "eSSF Curve Validation Designer — Full Plan",
+      mode: "multi",
+      planName: planName || "Full validation plan",
+      createdAt: new Date().toISOString(),
+      unit: unit,
+      tests: selectedIds.map(function(id){
+        return {
+          id: id,
+          label: TEST_LABELS[id],
+          params: testParams[id] || {},
+          rows: perTestRows[id] || []
+        };
+      }),
+      summary: {
+        totalSamples: totalSamples,
+        totalWells: totalReps,
+        runFormat: runFormat,
+        plateFill: plateFill,
+        dilutionType: dilutionType
+      }
+    };
+    var blob = new Blob([JSON.stringify(plan, null, 2)], {type:"application/json"});
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url;
+    a.download = (planName || "validation_plan") + ".json";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  // ── JSON upload ───────────────────────────────────────────────────
+  var uploadPlanJSON = function(e){
+    var file = e.target.files && e.target.files[0];
+    if (!file) return;
+    var reader = new FileReader();
+    reader.onload = function(ev){
+      try {
+        var plan = JSON.parse(ev.target.result);
+        if (plan.version === "2.0" && plan.mode === "multi") {
+          // New format
+          var ns = {}, np = {};
+          (plan.tests || []).forEach(function(t){
+            ns[t.id] = true;
+            np[t.id] = t.params || {};
+          });
+          setSelected(ns);
+          setTestParams(np);
+          setPlanName(plan.planName || "");
+          if (plan.summary && plan.summary.runFormat) setRunFormat(plan.summary.runFormat);
+          if (plan.summary && plan.summary.plateFill) setPlateFill(plan.summary.plateFill);
+          setStep(3);
+        } else if (plan.testId && validationTemplates[plan.testId]) {
+          // v5ck single-test format — convert on the fly
+          var ns2 = {}; ns2[plan.testId] = true;
+          var np2 = {}; np2[plan.testId] = plan.values || {};
+          setSelected(ns2);
+          setTestParams(np2);
+          setPlanName(plan.planName || "");
+          setStep(3);
+        } else {
+          alert("Plan file format not recognized.");
+        }
+      } catch(err) {
+        alert("Could not read plan file: " + err.message);
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = "";
+  };
+
+  // ── UI styles ─────────────────────────────────────────────────────
+  var stepLabel = {fontSize:11,fontWeight:700,color:"#6e6e73",textTransform:"uppercase",letterSpacing:0.5,marginBottom:8};
+  var heading = {fontSize:16,fontWeight:800,color:"#0b2a6f",marginBottom:6};
+  var hint = {fontSize:12,color:"#6e6e73",marginBottom:14,lineHeight:1.5};
+  var btnPrimary = {background:"#6337b9",color:"#fff",border:"none",padding:"8px 20px",borderRadius:8,fontSize:12,fontWeight:700,cursor:"pointer"};
+  var btnSecondary = {background:"#fff",border:"1px solid #d8dfeb",color:"#5a6984",padding:"8px 16px",borderRadius:8,fontSize:12,fontWeight:600,cursor:"pointer"};
+  var inputS = {padding:"8px 12px",border:"1px solid #d8dfeb",borderRadius:6,fontSize:13,fontFamily:"inherit"};
+  var fieldCard = {padding:"12px 14px",background:"#fafcff",border:"1px solid #e5e9f0",borderRadius:10};
+
+  // ── Step 1: pick tests ────────────────────────────────────────────
+  var renderStep1 = function(){
+    var nSel = selectedIds.length;
+    return <div>
+      <div style={stepLabel}>Step 1 — Select tests</div>
+      <div style={heading}>Which validation tests do you want to include?</div>
+      <p style={hint}>Pick one or more. The wizard will generate a single Treatment Groups plan with deterministic <strong>Sample IDs</strong> so future imported data can be auto-analyzed.</p>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(240px, 1fr))",gap:10,marginBottom:18}}>
+        {TEST_ORDER.map(function(id){
+          var t = validationTemplates[id];
+          var sm = validationStatsMap[id];
+          var isSel = !!selected[id];
+          return <button key={id} onClick={function(){toggleTest(id);}} style={{textAlign:"left",cursor:"pointer",border:"2px solid "+(isSel?"#6337b9":"#d8dfeb"),background:isSel?"#f5f0ff":"#fff",borderRadius:12,padding:"14px 16px",fontFamily:"inherit",transition:"all 0.15s",position:"relative"}}>
+            {isSel && <div style={{position:"absolute",top:10,right:10,width:20,height:20,borderRadius:10,background:"#6337b9",color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700}}>✓</div>}
+            <div style={{fontSize:13,fontWeight:800,color:"#0b2a6f",marginBottom:4,paddingRight:24}}>{t.label}</div>
+            <div style={{fontSize:11,color:"#6e6e73",lineHeight:1.4,marginBottom:6}}>{t.blurb}</div>
+            <div style={{fontSize:10,color:"#8e9bb5",fontFamily:"monospace"}}>Sample ID prefix: <strong>{sm.prefix}</strong></div>
+          </button>;
+        })}
+      </div>
+      <div style={{padding:"12px 14px",background:"#fafafa",border:"1px dashed #d0d8ea",borderRadius:8,marginBottom:14}}>
+        <div style={{fontSize:11,fontWeight:700,color:"#5a6984",marginBottom:6}}>Or load a saved plan:</div>
+        <label style={{display:"inline-flex",alignItems:"center",gap:6,cursor:"pointer",fontSize:11,padding:"6px 12px",background:"#fff",border:"1px solid #d8dfeb",borderRadius:6,fontWeight:600,color:"#30437a"}}>
+          📂 Choose plan file (.json)
+          <input type="file" accept="application/json,.json" onChange={uploadPlanJSON} style={{display:"none"}} />
+        </label>
+        <span style={{fontSize:10,color:"#8e9bb5",marginLeft:8,fontStyle:"italic"}}>Supports v5ck single-test plans and v2.0 multi-test plans</span>
+      </div>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10}}>
+        <div style={{fontSize:12,color:"#5a6984"}}>{nSel===0?"Select at least one test to continue.":nSel+" test"+(nSel===1?"":"s")+" selected"}</div>
+        <button onClick={function(){if(nSel>0){initParamsForSelected();setTestIdx(0);setStep(2);}}} disabled={nSel===0} style={Object.assign({},btnPrimary,{opacity:nSel===0?0.4:1,cursor:nSel===0?"not-allowed":"pointer"})}>Configure tests →</button>
+      </div>
+    </div>;
+  };
+
+  // ── Step 2: configure each test (one screen per test) ─────────────
+  var renderStep2 = function(){
+    if (selectedIds.length === 0) return null;
+    var curId = selectedIds[testIdx];
+    if (!curId) { setStep(3); return null; }
+    var p = testParams[curId] || getDefaultsForTest(curId);
+    var t = validationTemplates[curId];
+    var nTotal = selectedIds.length;
+
+    var setVal = function(key, value){updateTestParam(curId, key, value);};
+
+    // Locked-field UI: shows the value as a read-only-looking pill with a subtle edit link.
+    // When unlocked, renders a normal input. The "lock" returns it to its computed default.
+    // Args: label, key, value, computedDefault, helperText, inputType ("text"|"number"), unitSuffix
+    var LockedField = function(opts){
+      var unlocked = isUnlocked(curId, opts.key);
+      var displayValue = (opts.value !== undefined && opts.value !== null && opts.value !== "")
+        ? opts.value
+        : (opts.computedDefault !== undefined && opts.computedDefault !== null ? opts.computedDefault : "");
+      var hasComputed = opts.computedDefault !== undefined && opts.computedDefault !== null && opts.computedDefault !== "";
+      var fieldStyle = {padding:"8px 12px",border:"1px solid #d8dfeb",borderRadius:6,fontSize:13,fontFamily:"inherit"};
+      var lockedStyle = {padding:"8px 12px",borderRadius:6,fontSize:13,fontFamily:"inherit",background:"#f4f7fb",border:"1px solid #e5e9f0",color:"#30437a",fontWeight:600,display:"inline-block",minHeight:"15px",cursor:"text",textAlign:"left"};
+      var width = opts.width || (opts.inputType === "number" ? 80 : 140);
+      var finishEdit = function(){
+        setUnlocked(curId, opts.key, false);
+        if (hasComputed && (opts.value === "" || opts.value === undefined || opts.value === null)) {
+          setVal(opts.key, opts.computedDefault);
+        }
+      };
+      return <div style={fieldCard}>
+        <label style={{display:"block",fontSize:12,fontWeight:700,color:"#30437a",marginBottom:6}}>
+          {opts.label}{opts.unitSuffix && <span style={{fontWeight:400,color:"#8e9bb5",marginLeft:4}}>({opts.unitSuffix})</span>}
+        </label>
+        <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+          {unlocked ? (
+            <input
+              type={opts.inputType||"text"}
+              value={opts.value !== null && opts.value !== undefined ? opts.value : ""}
+              onChange={function(e){
+                var raw = e.target.value;
+                setVal(opts.key, opts.inputType==="number" ? (raw === "" ? "" : (parseInt(raw)||0)) : raw);
+              }}
+              placeholder={opts.placeholder || (hasComputed ? String(opts.computedDefault) : "")}
+              style={Object.assign({},fieldStyle,{width:width,background:"#fffbe8",borderColor:"#e0c87a"})}
+              onBlur={finishEdit}
+              onKeyDown={function(e){if(e.key==="Enter") e.currentTarget.blur();}}
+              autoFocus
+            />
+          ) : (
+            <button type="button" onClick={function(){setUnlocked(curId, opts.key, true);}} style={Object.assign({},lockedStyle,{minWidth:width,boxSizing:"border-box"})} title="Click to edit">
+              {displayValue || <span style={{color:"#aeaeb2",fontStyle:"italic",fontWeight:400}}>not set</span>}
+            </button>
+          )}
+          {instructor && opts.helper && <span style={{fontSize:11,color:"#8e9bb5",fontStyle:"italic"}}>{opts.helper}</span>}
+        </div>
+      </div>;
+    };
+
+    // Build the per-test field UI based on test id
+    var fieldElements = null;
+    if (curId === "rangeFinding") {
+      fieldElements = <div>
+        <div style={Object.assign({},fieldCard,{marginBottom:10})}>
+          <label style={{display:"block",fontSize:12,fontWeight:700,color:"#30437a",marginBottom:6}}>Highest planned concentration <span style={{fontWeight:400,color:"#8e9bb5"}}>({unit})</span></label>
+          <input type="text" value={p.topConc||""} onChange={function(e){setVal("topConc", e.target.value);}} placeholder="optional, e.g. 100" style={Object.assign({},inputS,{width:160})} />
+          {instructor && <span style={{fontSize:11,color:"#8e9bb5",fontStyle:"italic",marginLeft:10}}>If unknown, leave blank and use the sample IDs to label relative dilution levels.</span>}
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10}}>
+          {LockedField({label:"Scouting levels",key:"nLevels",value:p.nLevels,computedDefault:10,inputType:"number",helper:"8–10 levels is typical for first-pass range finding."})}
+          {LockedField({label:"Serial dilution factor",key:"dilutionFactor",value:p.dilutionFactor,computedDefault:3,inputType:"number",helper:"3-fold balances broad coverage with usable spacing."})}
+          {LockedField({label:"Replicates per level",key:"reps",value:p.reps,computedDefault:2,inputType:"number",helper:"Duplicate is enough for scouting; formal validation uses more."})}
+        </div>
+        {instructor && <div style={{fontSize:11,color:"#5a6984",fontStyle:"italic",marginTop:10,lineHeight:1.5}}>
+          Use this before formal validation when LLOQ/ULOQ are not known. These data help identify blank separation at the low end and saturation/nonlinearity at the high end.
+        </div>}
+      </div>;
+    } else if (curId === "linearity") {
+      // Auto-derive low/high from target whenever target changes (visible fill)
+      var targetVal = p.target || "";
+      var derived = deriveLinearityRange(targetVal);
+      // The user can override by unlocking. Otherwise the fields display the auto-fill.
+      fieldElements = <div>
+        <div style={Object.assign({},fieldCard,{marginBottom:10})}>
+          <label style={{display:"block",fontSize:12,fontWeight:700,color:"#30437a",marginBottom:6}}>Target / test concentration <span style={{fontWeight:400,color:"#8e9bb5"}}>({unit})</span></label>
+          <input type="text" value={targetVal} onChange={function(e){
+            setVal("target", e.target.value);
+            var d = deriveLinearityRange(e.target.value);
+            if (d) {
+              if (!isUnlocked(curId,"rangeLow")) setVal("rangeLow", d.low);
+              if (!isUnlocked(curId,"rangeHigh")) setVal("rangeHigh", d.high);
+            }
+          }} placeholder="e.g. 5" style={Object.assign({},inputS,{width:140})} />
+          {instructor && <span style={{fontSize:11,color:"#8e9bb5",fontStyle:"italic",marginLeft:10}}>Range auto-fills at 80%–120% of this value (ICH Q2 minimum)</span>}
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
+          {LockedField({label:"Range low",key:"rangeLow",value:p.rangeLow,computedDefault:derived?derived.low:"",unitSuffix:unit,helper:"= 80% of target"})}
+          {LockedField({label:"Range high",key:"rangeHigh",value:p.rangeHigh,computedDefault:derived?derived.high:"",unitSuffix:unit,helper:"= 120% of target"})}
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+          {LockedField({label:"Number of levels",key:"nLevels",value:p.nLevels,computedDefault:6,inputType:"number",helper:"ICH Q2 ≥5; default 6"})}
+          {LockedField({label:"Replicates per level",key:"reps",value:p.reps,computedDefault:3,inputType:"number",helper:"ICH Q2: 2–3"})}
+        </div>
+        <div style={Object.assign({},fieldCard,{marginTop:10})}>
+          <label style={{display:"block",fontSize:12,fontWeight:700,color:"#30437a",marginBottom:6}}>Preparation style</label>
+          <select value={p.prepStyle||"discrete"} onChange={function(e){setVal("prepStyle", e.target.value);}} style={Object.assign({},inputS,{background:"#fff",minWidth:250})}>
+            <option value="discrete">Independent discrete preparations</option>
+            <option value="serial">Serial dilution from stock</option>
+            <option value="oneStep">One-step dilutions from stock</option>
+          </select>
+          {instructor && <div style={{fontSize:10,color:"#8e9bb5",marginTop:6,lineHeight:1.4}}>ICH Q2 requires justified concentration levels across the range; it does not mandate one universal prep style. For formal validation, independent/discrete preparations are stronger evidence than a single serial chain. Serial dilution is efficient for scouting and routine calibration.</div>}
+        </div>
+      </div>;
+    } else if (curId === "accuracy") {
+      // Auto-derive QC concentrations from linearity range (or accuracy's own target if linearity not selected)
+      var qcs = deriveAccuracyQCs();
+      // Detect source of derivation for hint
+      var derivationSrc = null;
+      if (qcs && qcs.mode === "target") {
+        derivationSrc = "target concentration";
+      } else if (p.knowsRange === "yes" && p.lloq && p.uloq) {
+        derivationSrc = "known LLOQ/ULOQ";
+      } else if (testParams.linearity && testParams.linearity.rangeLow && testParams.linearity.rangeHigh) {
+        derivationSrc = "linearity range";
+      } else if (p.target) {
+        derivationSrc = "your target";
+      }
+      var hasLinearityRange = testParams.linearity && testParams.linearity.rangeLow && testParams.linearity.rangeHigh;
+      var hasKnownRange = p.knowsRange === "yes" && p.lloq && p.uloq;
+      var showTargetInput = !hasLinearityRange && !hasKnownRange;
+      fieldElements = <div>
+        {showTargetInput && <div style={Object.assign({},fieldCard,{marginBottom:10})}>
+          <label style={{display:"block",fontSize:12,fontWeight:700,color:"#30437a",marginBottom:6}}>Target / test concentration <span style={{fontWeight:400,color:"#8e9bb5"}}>({unit})</span></label>
+          <input type="text" value={p.target||""} onChange={function(e){setVal("target",e.target.value);}} placeholder="e.g. 5" style={Object.assign({},inputS,{width:140})} />
+          {instructor && <span style={{fontSize:11,color:"#8e9bb5",fontStyle:"italic",marginLeft:10}}>QC levels will derive from this. (Or add Linearity to share its range, or click "Add known range" below.)</span>}
+        </div>}
+        <div style={Object.assign({},fieldCard,{marginBottom:10})}>
+          {p.knowsRange==="yes" ? <div>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,marginBottom:8}}>
+              <label style={{display:"block",fontSize:12,fontWeight:700,color:"#30437a"}}>Known LLOQ / ULOQ</label>
+              <button type="button" onClick={function(){setVal("knowsRange","no");}} style={{background:"transparent",border:"none",color:"#8e9bb5",fontSize:10,cursor:"pointer",padding:0,textDecoration:"underline",textDecorationStyle:"dotted"}}>use target estimate</button>
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+            <div>
+              <div style={{fontSize:10,fontWeight:700,color:"#5a6984",marginBottom:4}}>LLOQ / low end <span style={{fontWeight:400,color:"#8e9bb5"}}>({unit})</span></div>
+              <input type="text" value={p.lloq||""} onChange={function(e){setVal("lloq", e.target.value);}} placeholder="e.g. 0.1" style={Object.assign({},inputS,{width:"100%",boxSizing:"border-box"})} />
+            </div>
+            <div>
+              <div style={{fontSize:10,fontWeight:700,color:"#5a6984",marginBottom:4}}>ULOQ / high end <span style={{fontWeight:400,color:"#8e9bb5"}}>({unit})</span></div>
+              <input type="text" value={p.uloq||""} onChange={function(e){setVal("uloq", e.target.value);}} placeholder="e.g. 10" style={Object.assign({},inputS,{width:"100%",boxSizing:"border-box"})} />
+            </div>
+          </div>
+          </div> : <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,flexWrap:"wrap"}}>
+            <div>
+              <div style={{fontSize:12,fontWeight:700,color:"#30437a"}}>LLOQ / ULOQ not provided</div>
+              {instructor && <div style={{fontSize:11,color:"#8e9bb5",marginTop:2}}>QC levels will be estimated from target.</div>}
+            </div>
+            <button type="button" onClick={function(){setVal("knowsRange","yes");}} style={{background:"#fff",border:"1px solid #d8dfeb",color:"#30437a",fontSize:11,fontWeight:700,cursor:"pointer",padding:"6px 10px",borderRadius:8}}>Add known range</button>
+          </div>}
+          {instructor && <div style={{fontSize:10,color:"#8e9bb5",marginTop:6,lineHeight:1.4}}>{p.knowsRange==="yes" ? "Known LLOQ/ULOQ will drive formal QC placement." : "Without LLOQ/ULOQ, the app estimates provisional L/M/H levels from the target concentration."}</div>}
+        </div>
+        {qcs && qcs.mode==="target" && <div style={Object.assign({},fieldCard,{marginBottom:10})}>
+          <label style={{display:"block",fontSize:12,fontWeight:700,color:"#30437a",marginBottom:6}}>How wide should the target estimate be?</label>
+          <select value={p.qcSpread||"moderate"} onChange={function(e){setVal("qcSpread", e.target.value);}} style={Object.assign({},inputS,{background:"#fff",minWidth:230})}>
+            <option value="tight">Tight: ~0.83× / 1× / 1.2× (near target)</option>
+            <option value="moderate">Moderate: 0.5× / 1× / 2×</option>
+            <option value="broad">Broad: log-symmetric 10-fold (0.316× / 1× / 3.16×)</option>
+          </select>
+          {instructor && <div style={{fontSize:10,color:"#8e9bb5",marginTop:6,lineHeight:1.4}}>Default is moderate. Use broad when you have little confidence in the working range; use tight only when the assay is intended to report near a narrow target.</div>}
+        </div>}
+        <div style={Object.assign({},fieldCard,{marginBottom:10})}>
+          <label style={{display:"block",fontSize:12,fontWeight:700,color:"#30437a",marginBottom:6}}>QC level concentrations <span style={{fontWeight:400,color:"#8e9bb5"}}>({unit})</span></label>
+          {instructor && qcs && qcs.mode==="target" && <div style={{fontSize:11,color:"#5a6984",background:"#f8fbff",border:"1px solid #dfe7f2",borderRadius:6,padding:"7px 9px",marginBottom:8,lineHeight:1.45}}>
+            Estimated from target because LLOQ/ULOQ are not known yet. Use these as fit-for-purpose starting levels, then analyze the data to estimate LOQ and refine the formal validation range.
+          </div>}
+          {instructor && derivationSrc && <div style={{fontSize:11,color:"#6337b9",marginBottom:8,fontStyle:"italic"}}>{qcs && qcs.mode==="target" ? "Target-only estimate uses the selected span. Moderate gives 0.5x / 1x / 2x; broad gives a log-symmetric 10-fold window; tight stays close to target. This avoids pretending LLOQ/ULOQ are known before data exist." : "Derived from "+derivationSrc+" (ICH M10 convention: LQC approx 3x LLOQ, MQC midpoint, HQC approx 80% ULOQ)."}</div>}
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
+            {LockedField({label:"Low (LQC)",key:"qcLow",value:p.qcLow,computedDefault:qcs?qcs.low:"",unitSuffix:unit,width:100})}
+            {LockedField({label:"Mid (MQC)",key:"qcMid",value:p.qcMid,computedDefault:qcs?qcs.mid:"",unitSuffix:unit,width:100})}
+            {LockedField({label:"High (HQC)",key:"qcHigh",value:p.qcHigh,computedDefault:qcs?qcs.high:"",unitSuffix:unit,width:100})}
+          </div>
+        </div>
+        {LockedField({label:"Replicates per QC",key:"reps",value:p.reps,computedDefault:3,inputType:"number",helper:"ICH Q2: ≥9 determinations total. 3 reps × 3 QC = 9 minimum."})}
+      </div>;
+    } else if (curId === "repeatability") {
+      // QC concentration: prefer mid-QC from accuracy if available, else from linearity midpoint
+      var midDefault = "";
+      if (testParams.accuracy && testParams.accuracy.qcMid) midDefault = testParams.accuracy.qcMid;
+      else {
+        var qcsR = deriveAccuracyQCs();
+        if (qcsR) midDefault = qcsR.mid;
+      }
+      fieldElements = <div>
+        {LockedField({label:"QC concentration",key:"qcLevel",value:p.qcLevel,computedDefault:midDefault,unitSuffix:unit,helper:midDefault?"= mid-QC (typical choice)":"set manually"})}
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginTop:10}}>
+          {LockedField({label:"Replicates",key:"reps",value:p.reps,computedDefault:5,inputType:"number",helper:"ICH Q2: ≥5"})}
+          <div style={fieldCard}>
+            <label style={{display:"block",fontSize:12,fontWeight:700,color:"#30437a",marginBottom:6}}>Independent preparations?</label>
+            <select value={p.independentPreps||"yes"} onChange={function(e){setVal("independentPreps", e.target.value);}} style={Object.assign({},inputS,{background:"#fff"})}>
+              <option value="yes">Yes (preferred)</option>
+              <option value="no">No (single prep)</option>
+            </select>
+          </div>
+        </div>
+      </div>;
+    } else if (curId === "intermediatePrecision") {
+      var midDefault2 = "";
+      if (testParams.accuracy && testParams.accuracy.qcMid) midDefault2 = testParams.accuracy.qcMid;
+      else if (testParams.repeatability && testParams.repeatability.qcLevel) midDefault2 = testParams.repeatability.qcLevel;
+      else {
+        var qcsIP = deriveAccuracyQCs();
+        if (qcsIP) midDefault2 = qcsIP.mid;
+      }
+      fieldElements = <div>
+        {LockedField({label:"QC concentration",key:"qcLevel",value:p.qcLevel,computedDefault:midDefault2,unitSuffix:unit,helper:"= mid-QC (typical)"})}
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginTop:10}}>
+          {LockedField({label:"Days",key:"nDays",value:p.nDays,computedDefault:3,inputType:"number",helper:"ICH min 2"})}
+          {LockedField({label:"Analysts",key:"nAnalysts",value:p.nAnalysts,computedDefault:2,inputType:"number",helper:"ICH min 2"})}
+          {LockedField({label:"Reps per session",key:"reps",value:p.reps,computedDefault:3,inputType:"number",helper:"3 typical"})}
+        </div>
+      </div>;
+    } else if (curId === "dilutionIntegrity") {
+      // High sample default: 5× ULOQ (well above the upper limit)
+      var hiDefault = "";
+      if (testParams.linearity && testParams.linearity.rangeHigh) {
+        var uloq = parseFloat(testParams.linearity.rangeHigh);
+        if (isFinite(uloq) && uloq > 0) hiDefault = (5 * uloq).toPrecision(3);
+      }
+      fieldElements = <div>
+        {LockedField({label:"High sample concentration",key:"highConc",value:p.highConc,computedDefault:hiDefault,unitSuffix:unit,helper:hiDefault?"= 5× ULOQ":"above upper range"})}
+        <div style={{marginTop:10}}>
+          {LockedField({label:"Dilution factors",key:"dilutions",value:p.dilutions,computedDefault:"1:2, 1:5, 1:10",helper:"comma-separated, integer",width:240})}
+        </div>
+        <div style={{marginTop:10}}>
+          {LockedField({label:"Replicates per dilution",key:"reps",value:p.reps,computedDefault:3,inputType:"number",helper:"3 typical"})}
+        </div>
+      </div>;
+    } else if (curId === "lloq") {
+      // LLOQ default: range low (= LLOQ from linearity)
+      var lloqDefault = "";
+      if (testParams.linearity && testParams.linearity.rangeLow) lloqDefault = testParams.linearity.rangeLow;
+      fieldElements = <div>
+        {LockedField({label:"Proposed LLOQ concentration",key:"lloqConc",value:p.lloqConc,computedDefault:lloqDefault,unitSuffix:unit,helper:lloqDefault?"= linearity range low":"set manually"})}
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginTop:10}}>
+          {LockedField({label:"Replicates per run",key:"reps",value:p.reps,computedDefault:5,inputType:"number",helper:"ICH M10: ≥5"})}
+          {LockedField({label:"Number of runs",key:"nRuns",value:p.nRuns,computedDefault:3,inputType:"number",helper:"3 typical"})}
+        </div>
+      </div>;
+    } else if (curId === "spikeRecovery") {
+      // Spike levels: default to accuracy QC concentrations if available
+      var sLow = "", sMid = "", sHi = "";
+      if (testParams.accuracy) {
+        sLow = testParams.accuracy.qcLow || "";
+        sMid = testParams.accuracy.qcMid || "";
+        sHi = testParams.accuracy.qcHigh || "";
+      }
+      if (!sLow || !sMid || !sHi) {
+        var qcsS = deriveAccuracyQCs();
+        if (qcsS) {
+          if (!sLow) sLow = qcsS.low;
+          if (!sMid) sMid = qcsS.mid;
+          if (!sHi) sHi = qcsS.high;
+        }
+      }
+      fieldElements = <div>
+        <div style={Object.assign({},fieldCard,{marginBottom:10})}>
+          <label style={{display:"block",fontSize:12,fontWeight:700,color:"#30437a",marginBottom:6}}>Sample matrix</label>
+          <input type="text" value={p.matrix||""} onChange={function(e){setVal("matrix", e.target.value);}} placeholder="e.g. plasma, formulation buffer" style={Object.assign({},inputS,{width:240})} />
+        </div>
+        <div style={Object.assign({},fieldCard,{marginBottom:10})}>
+          <label style={{display:"block",fontSize:12,fontWeight:700,color:"#30437a",marginBottom:6}}>Spike concentrations <span style={{fontWeight:400,color:"#8e9bb5"}}>({unit})</span></label>
+          {instructor && <div style={{fontSize:11,color:"#6337b9",marginBottom:8,fontStyle:"italic"}}>Defaults match Accuracy QC levels for direct comparability</div>}
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
+            {LockedField({label:"Low",key:"spikeLow",value:p.spikeLow,computedDefault:sLow,unitSuffix:unit,width:100})}
+            {LockedField({label:"Mid",key:"spikeMid",value:p.spikeMid,computedDefault:sMid,unitSuffix:unit,width:100})}
+            {LockedField({label:"High",key:"spikeHigh",value:p.spikeHigh,computedDefault:sHi,unitSuffix:unit,width:100})}
+          </div>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+          {LockedField({label:"Replicates per spike level",key:"reps",value:p.reps,computedDefault:3,inputType:"number",helper:"3 typical"})}
+          <div style={fieldCard}>
+            <label style={{display:"block",fontSize:12,fontWeight:700,color:"#30437a",marginBottom:6}}>Include unspiked control?</label>
+            <select value={p.includeUnspiked||"yes"} onChange={function(e){setVal("includeUnspiked", e.target.value);}} style={Object.assign({},inputS,{background:"#fff"})}>
+              <option value="yes">Yes (preferred)</option>
+              <option value="no">No</option>
+            </select>
+          </div>
+        </div>
+      </div>;
+    }
+
+    return <div>
+      <div style={stepLabel}>Step 2 — Configure ({testIdx+1} of {nTotal}: {t.label})</div>
+      <div style={heading}>{t.label}</div>
+      <p style={hint}>{t.blurb}.</p>
+      {!instructor && <div style={{fontSize:11,color:"#6e6e73",marginBottom:14,fontStyle:"italic"}}>Tip: click any value to edit it.</div>}
+      {instructor && <div style={{padding:"8px 12px",background:"#fff7e8",border:"1px solid #f0d6a0",borderRadius:6,fontSize:11,color:"#8a6420",marginBottom:14,lineHeight:1.5}}>
+        <strong>Defaults are ICH-aligned.</strong> Locked values use ICH Q2/M10 conventions and are recommended for most methods. Click a value to override only when needed.
+      </div>}
+      {fieldElements}
+      {instructor && <div style={{marginTop:14,padding:"12px 16px",background:"#f6fbff",border:"1px solid #d7e7fb",borderRadius:8,fontSize:12,color:"#30437a",lineHeight:1.6}}>
+        <div style={{fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:0.5,marginBottom:4,color:"#5a6984"}}>Why this design?</div>
+        {t.rationale}
+      </div>}
+      <div style={{display:"flex",gap:8,justifyContent:"space-between",marginTop:18}}>
+        <button onClick={function(){
+          if (testIdx > 0) setTestIdx(testIdx-1);
+          else setStep(1);
+        }} style={btnSecondary}>← Back</button>
+        <button onClick={function(){
+          if (testIdx < nTotal-1) setTestIdx(testIdx+1);
+          else setStep(3);
+        }} style={btnPrimary}>{testIdx < nTotal-1 ? "Next: "+TEST_LABELS[selectedIds[testIdx+1]]+" →" : "See full plan →"}</button>
+      </div>
+    </div>;
+  };
+
+  // ── Step 3: Output (Run Summary, Master table, Per-test breakdowns, Stats Map) ─
+  var renderStep3 = function(){
+    var thS = {padding:"8px 10px",fontSize:10,fontWeight:700,color:"#30437a",textTransform:"uppercase",letterSpacing:0.5,textAlign:"left",borderBottom:"2px solid #d8dfeb",background:"#fafafa",whiteSpace:"nowrap"};
+    var tdS = {padding:"7px 10px",fontSize:11,color:"#1d1d1f",borderBottom:"1px solid #f0f0f3",verticalAlign:"top"};
+    var selS = Object.assign({},tdS,{fontFamily:"monospace",fontWeight:700,color:"#6337b9",whiteSpace:"nowrap"});
+
+    var renderRows = function(rows){
+      return rows.map(function(r, i){
+        var prev = rows[i-1];
+        var newGroup = i===0 || !prev || prev.test!==r.test || prev.level!==r.level;
+        var groupBorder = newGroup ? "3px solid #c7d3e8" : "1px solid #f0f0f3";
+        return <tr key={i} style={{borderTop:groupBorder}}>
+          <td style={selS}>{r.sel}</td>
+          <td style={tdS}>{r.level}</td>
+          <td style={Object.assign({},tdS,{textAlign:"center"})}>{r.replicate}</td>
+          <td style={Object.assign({},tdS,{whiteSpace:"nowrap"})}>{r.nominal}</td>
+          <td style={Object.assign({},tdS,{fontSize:10,color:"#5a6984"})}>{r.test}</td>
+          <td style={Object.assign({},tdS,{fontSize:10,color:"#5a6984"})}>{r.prepType}</td>
+          <td style={Object.assign({},tdS,{fontSize:10,color:"#5a6984"})}>{r.purpose}</td>
+        </tr>;
+      });
+    };
+
+    var renderPlateMap = function(rows){
+      var mapRows = rows.slice(0,96);
+      var mode = plateFill==="columns" ? "classical" : (plateFill==="rows" ? "transposed" : plateFill);
+      var wells = Array.from({length:96}, function(_,i){
+        var rowIdx = Math.floor(i/12);
+        var colIdx = i%12;
+        var pos = mode==="classical" ? colIdx*8 + rowIdx : rowIdx*12 + colIdx;
+        return mapRows[pos] || null;
+      });
+      var legend = [];
+      rows.forEach(function(r){
+        if(r && !legend.some(function(x){return x.test===r.test;})) legend.push({test:r.test,color:testColor(r.test)});
+      });
+      var rowLetters = ["A","B","C","D","E","F","G","H"];
+      return <div style={{background:"linear-gradient(180deg,#fbfdff,#f5f8fc)",border:"1px solid #d8dfeb",borderRadius:12,padding:"14px 16px",marginBottom:14,boxShadow:"0 8px 22px rgba(15,35,80,0.06)"}}>
+        <div style={{display:"flex",justifyContent:"space-between",gap:10,alignItems:"center",marginBottom:10,flexWrap:"wrap"}}>
+          <div>
+            <div style={{fontSize:11,fontWeight:800,color:"#0b2a6f",textTransform:"uppercase",letterSpacing:0.5}}>Plate map preview</div>
+            <div style={{fontSize:10,color:"#6e6e73",marginTop:2}}>
+              {mode==="classical" ? "Classical-compatible: fills down columns first (A1 to H1, then A2)." : "Transposed-compatible: fills across rows first (A1 to A12, then B1)."}
+            </div>
+          </div>
+          <select value={mode} onChange={function(e){setPlateFill(e.target.value);}} style={Object.assign({},inputS,{fontSize:11,padding:"5px 8px",background:"#fff",minWidth:220})}>
+            <option value="classical">Classical column-wise</option>
+            <option value="transposed">Transposed row-wise</option>
+          </select>
+        </div>
+        <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:10}}>
+          {legend.map(function(l){
+            return <div key={l.test} style={{display:"inline-flex",alignItems:"center",gap:5,fontSize:10,color:"#5a6984",fontWeight:700,background:"#fff",border:"1px solid #e5e9f0",borderRadius:999,padding:"4px 8px"}}>
+              <span style={{width:9,height:9,borderRadius:9,background:l.color,display:"inline-block"}} />
+              {l.test}
+            </div>;
+          })}
+        </div>
+        <div style={{overflowX:"auto",padding:"10px 10px 12px",background:"#eef3f8",border:"1px solid #cfd8e6",borderRadius:14}}>
+          <div style={{display:"grid",gridTemplateColumns:"22px repeat(12, 42px)",gridTemplateRows:"20px repeat(8, 42px)",gap:6,alignItems:"center",justifyContent:"start",minWidth:610}}>
+            <div />
+            {Array.from({length:12}).map(function(_,c){
+              return <div key={"col"+c} style={{fontSize:10,color:"#6f7fa0",fontWeight:800,textAlign:"center"}}>{c+1}</div>;
+            })}
+            {rowLetters.map(function(letter,rIdx){
+              return <div key={"row"+letter} style={{display:"contents"}}>
+                <div style={{fontSize:10,color:"#6f7fa0",fontWeight:800,textAlign:"center"}}>{letter}</div>
+                {Array.from({length:12}).map(function(_,cIdx){
+                  var i = rIdx*12+cIdx;
+                  var r = wells[i];
+                  var wellId = letter+(cIdx+1);
+                  var color = r ? testColor(r.test) : "#ccd6e4";
+                  return <div key={wellId} title={r ? (wellId+" · "+r.sel+" · "+r.test+" · "+r.level) : wellId} style={{width:38,height:38,borderRadius:38,background:r?("radial-gradient(circle at 34% 30%, #fff 0%, #fff 12%, "+color+"33 24%, "+color+"66 100%)"):"#f9fbfd",border:"1px solid "+(r?color:"#d7dfec"),boxShadow:r?"inset 0 2px 5px rgba(255,255,255,0.75), inset 0 -4px 8px "+color+"33, 0 1px 2px rgba(20,40,70,0.08)":"inset 0 1px 3px rgba(255,255,255,0.9)",display:"flex",alignItems:"center",justifyContent:"center",boxSizing:"border-box"}}>
+                    <span style={{fontSize:8.5,fontFamily:"monospace",fontWeight:800,color:r?color:"#bac5d4",maxWidth:32,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r?r.sel:""}</span>
+                  </div>;
+                })}
+              </div>;
+            })}
+          </div>
+        </div>
+        <div style={{display:"flex",gap:10,alignItems:"flex-start",marginTop:9,flexWrap:"wrap"}}>
+          <div style={{fontSize:10,color:"#6e6e73",lineHeight:1.45,flex:"1 1 280px"}}>
+            This is a bench-layout preview. It gives a plate order for the validation plan; formal data import should still use one of the app's normal plate orientations.
+          </div>
+          <div style={{fontSize:10,color:"#30437a",fontWeight:700,background:"#fff",border:"1px solid #dfe7f2",borderRadius:8,padding:"6px 8px"}}>
+            Suggested order: {mode==="classical" ? "column-wise" : "row-wise"}
+          </div>
+        </div>
+        {rows.length>96 && <div style={{marginTop:8,fontSize:10,color:"#bf4800",fontWeight:700}}>This plan has {rows.length} samples, so it exceeds one 96-well plate. Only the first 96 are shown.</div>}
+      </div>;
+    };
+
+    // Pick which rows to show based on tableView selection
+    var visibleRows = tableView === "all" ? allRows : (perTestRows[tableView] || []);
+    var visibleLabel = tableView === "all" ? "All tests" : TEST_LABELS[tableView];
+
+    return <div>
+      <div style={stepLabel}>Step 3 — Plan output</div>
+      <div style={heading}>Your validation plan</div>
+      <p style={hint}>Review, name, download. The Treatment Groups table below is what your tech follows at the bench. Each sample gets a unique <strong>Sample ID</strong> so future imported data can be auto-analyzed.</p>
+
+      {/* Plan name input */}
+      <div style={Object.assign({},fieldCard,{marginBottom:14})}>
+        <label style={{display:"block",fontSize:11,fontWeight:700,color:"#5a6984",textTransform:"uppercase",letterSpacing:0.5,marginBottom:6}}>Plan name</label>
+        <input type="text" value={planName} placeholder={"Validation plan — "+new Date().toISOString().slice(0,10)} onChange={function(e){setPlanName(e.target.value);}} style={Object.assign({},inputS,{width:"100%",maxWidth:480,boxSizing:"border-box"})} />
+      </div>
+
+      <div style={Object.assign({},fieldCard,{marginBottom:14})}>
+        <label style={{display:"block",fontSize:11,fontWeight:700,color:"#5a6984",textTransform:"uppercase",letterSpacing:0.5,marginBottom:6}}>How will this be run?</label>
+        <select value={runFormat} onChange={function(e){setRunFormat(e.target.value);}} style={Object.assign({},inputS,{background:"#fff",minWidth:220})}>
+          <option value="plate">Plate / wells</option>
+          <option value="vials">Vials / autosampler</option>
+          <option value="protocol">Protocol only</option>
+        </select>
+      </div>
+
+      {/* Run Summary */}
+      <div style={{padding:"14px 18px",background:"linear-gradient(180deg,#f5f0ff,#ede5ff)",border:"1px solid #c7b2e8",borderRadius:12,marginBottom:14}}>
+        <div style={{fontSize:10,fontWeight:700,color:"#6337b9",textTransform:"uppercase",letterSpacing:0.5,marginBottom:8}}>Run Summary</div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(160px, 1fr))",gap:14}}>
+          <div>
+            <div style={{fontSize:24,fontWeight:800,color:"#0b2a6f",lineHeight:1}}>{totalSamples}</div>
+            <div style={{fontSize:11,color:"#6e6e73",marginTop:2}}>Total samples</div>
+          </div>
+          <div>
+            <div style={{fontSize:24,fontWeight:800,color:"#0b2a6f",lineHeight:1}}>{totalReps}</div>
+            <div style={{fontSize:11,color:"#6e6e73",marginTop:2}}>{runFormat==="plate"?"Total wells":"Total positions"}</div>
+          </div>
+          <div>
+            <div style={{fontSize:24,fontWeight:800,color:"#0b2a6f",lineHeight:1}}>{selectedIds.length}</div>
+            <div style={{fontSize:11,color:"#6e6e73",marginTop:2}}>Tests included</div>
+          </div>
+          <div>
+            <div style={{fontSize:13,fontWeight:700,color:"#0b2a6f",lineHeight:1.3}}>{dilutionType}</div>
+            <div style={{fontSize:11,color:"#6e6e73",marginTop:2}}>Dilution type</div>
+          </div>
+          <div>
+            <div style={{fontSize:13,fontWeight:700,color:"#0b2a6f",lineHeight:1.3}}>{runFormat==="plate"?"Plate / wells":runFormat==="vials"?"Vials / autosampler":"Protocol only"}</div>
+            <div style={{fontSize:11,color:"#6e6e73",marginTop:2}}>Run format</div>
+          </div>
+        </div>
+      </div>
+
+      {runFormat==="plate" && renderPlateMap(visibleRows)}
+
+      {/* Sample ID Key — visible by default, no disclosure */}
+      <div style={{padding:"12px 16px",background:"#fafcff",border:"1px solid #e5e9f0",borderRadius:10,marginBottom:14}}>
+        <div style={{fontSize:11,fontWeight:700,color:"#30437a",textTransform:"uppercase",letterSpacing:0.5,marginBottom:8}}>📐 Sample ID Key</div>
+        <div style={{fontSize:11,color:"#5a6984",marginBottom:10,lineHeight:1.5}}>
+          Format: <code style={{fontFamily:"monospace",background:"#f0eaff",padding:"1px 5px",borderRadius:3}}>[Prefix][Level]_[Replicate]</code>. The prefix tells you which test each sample belongs to.
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(220px, 1fr))",gap:8}}>
+          {selectedIds.map(function(id){
+            var sm = validationStatsMap[id];
+            var keyExamples = {
+              rangeFinding: "F1=highest scout level, F10=lowest scout level",
+              linearity: "L1=lowest, L6=highest level",
+              accuracy: "AL=Low, AM=Mid, AH=High QC",
+              repeatability: "P_1, P_2, ... (single QC × N reps)",
+              intermediatePrecision: "IP1, IP2, ... (session×rep)",
+              dilutionIntegrity: "D2=1:2, D5=1:5, D10=1:10",
+              lloq: "Q1=run 1, Q2=run 2, ...",
+              spikeRecovery: "SL/SM/SH=spike levels; S0=unspiked"
+            };
+            return <div key={id} style={{padding:"8px 10px",background:"#fff",border:"1px solid #e5e9f0",borderRadius:6}}>
+              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+                <code style={{fontFamily:"monospace",fontSize:12,fontWeight:800,color:"#6337b9",background:"#f0eaff",padding:"2px 8px",borderRadius:4}}>{sm.prefix}</code>
+                <span style={{fontSize:11,fontWeight:700,color:"#0b2a6f"}}>{TEST_LABELS[id]}</span>
+              </div>
+              <div style={{fontSize:10,color:"#5a6984",lineHeight:1.4}}>{keyExamples[id]}</div>
+            </div>;
+          })}
+        </div>
+      </div>
+
+      {/* Treatment Groups table with Excel-style tab switcher */}
+      <div style={{background:"#fff",border:"1px solid #e5e5ea",borderRadius:12,overflow:"hidden",marginBottom:14}}>
+        <div style={{padding:"10px 16px",background:"#fafafa",borderBottom:"1px solid #e5e5ea",fontSize:11,fontWeight:700,color:"#0b2a6f",textTransform:"uppercase",letterSpacing:0.5,display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,flexWrap:"wrap"}}>
+          <span>Treatment Groups — {visibleLabel} ({visibleRows.length} rows)</span>
+        </div>
+        {/* Excel-style tab strip */}
+        <div style={{display:"flex",gap:0,background:"#f0f3f8",borderBottom:"1px solid #d8dfeb",overflowX:"auto"}}>
+          <button onClick={function(){setTableView("all");}} style={{padding:"8px 14px",fontSize:11,fontWeight:tableView==="all"?800:600,color:tableView==="all"?"#6337b9":"#5a6984",background:tableView==="all"?"#fff":"transparent",border:"none",borderRight:"1px solid #d8dfeb",borderTop:tableView==="all"?"2px solid #6337b9":"2px solid transparent",cursor:"pointer",fontFamily:"inherit",whiteSpace:"nowrap"}}>All ({allRows.length})</button>
+          {selectedIds.map(function(id){
+            var rows = perTestRows[id] || [];
+            var active = tableView===id;
+            return <button key={id} onClick={function(){setTableView(id);}} style={{padding:"8px 14px",fontSize:11,fontWeight:active?800:600,color:active?"#6337b9":"#5a6984",background:active?"#fff":"transparent",border:"none",borderRight:"1px solid #d8dfeb",borderTop:active?"2px solid #6337b9":"2px solid transparent",cursor:"pointer",fontFamily:"inherit",whiteSpace:"nowrap"}}>{TEST_LABELS[id]} ({rows.length})</button>;
+          })}
+        </div>
+        <div style={{maxHeight:420,overflowY:"auto",overflowX:"auto"}}>
+          <table style={{borderCollapse:"collapse",width:"100%",minWidth:900}}>
+            <thead><tr>
+              <th style={thS}>Sample ID</th>
+              <th style={thS}>Level / Condition</th>
+              <th style={thS}>Rep</th>
+              <th style={thS}>Nominal concentration</th>
+              <th style={thS}>Test</th>
+              <th style={thS}>Prep Type</th>
+              <th style={thS}>Purpose</th>
+            </tr></thead>
+            <tbody>{renderRows(visibleRows)}</tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Dilution Recipes — outer collapsible panel containing per-test recipes */}
+      <div style={{background:"#fff",border:"1px solid #e5e5ea",borderRadius:12,overflow:"hidden",marginBottom:14}}>
+        <button
+          type="button"
+          onClick={function(){setRecipesOpen(!recipesOpen);}}
+          style={{
+            width:"100%",
+            padding:"10px 16px",
+            background:recipesOpen?"#f5f9fd":"#fafafa",
+            border:"none",
+            borderBottom:recipesOpen?"1px solid #e5e5ea":"none",
+            cursor:"pointer",
+            display:"flex",
+            alignItems:"center",
+            justifyContent:"space-between",
+            gap:10,
+            textAlign:"left",
+            fontFamily:"inherit"
+          }}
+        >
+          <span style={{fontSize:11,fontWeight:700,color:"#0b2a6f",textTransform:"uppercase",letterSpacing:0.5,display:"flex",alignItems:"center",gap:8}}>
+            <span style={{fontSize:13}}>{recipesOpen?"▾":"▸"}</span>
+            💧 Dilution Recipes
+            <span style={{fontSize:9,color:"#6e6e73",fontWeight:600,letterSpacing:0,textTransform:"none",fontStyle:"italic"}}>({selectedIds.length} test{selectedIds.length===1?"":"s"})</span>
+          </span>
+          <span style={{fontSize:10,color:"#5a6984",textTransform:"none",letterSpacing:0,fontWeight:500}}>{recipesOpen?"hide":"show"}</span>
+        </button>
+        {recipesOpen && <div style={{padding:"10px 14px"}}>
+          <div style={{fontSize:11,color:"#5a6984",marginBottom:9,lineHeight:1.5}}>
+            Click any test below to compute aliquot and diluent volumes per level. Recipes use the prep style chosen in Step 2 and flag pipetting concerns. Recipes are also included in the CSV download.
+          </div>
+          {selectedIds.map(function(id){
+            var rowsForTest = perTestRows[id] || [];
+            if (rowsForTest.length === 0) return null;
+            var prepStyleForTest = (testParams[id] && testParams[id].prepStyle) ||
+              (id === "rangeFinding" ? "serial" : "discrete");
+            return <DilutionRecipeCard
+              key={id}
+              testId={id}
+              testLabel={TEST_LABELS[id]}
+              rows={rowsForTest}
+              unit={unit}
+              prepStyle={prepStyleForTest}
+              instructor={instructor}
+            />;
+          })}
+        </div>}
+      </div>
+
+      {/* Stats Map */}
+      <div style={{background:"#fff",border:"1px solid #e5e5ea",borderRadius:12,overflow:"hidden",marginBottom:14}}>
+        <div style={{padding:"10px 16px",background:"#fafafa",borderBottom:"1px solid #e5e5ea",fontSize:11,fontWeight:700,color:"#0b2a6f",textTransform:"uppercase",letterSpacing:0.5}}>Statistics Map — what gets calculated when results are imported</div>
+        <table style={{borderCollapse:"collapse",width:"100%"}}>
+          <thead><tr>
+            <th style={thS}>Test</th>
+            <th style={thS}>Sample ID Prefix</th>
+            <th style={thS}>Statistics</th>
+          </tr></thead>
+          <tbody>
+            {selectedIds.map(function(id){
+              var sm = validationStatsMap[id];
+              return <tr key={id}>
+                <td style={Object.assign({},tdS,{fontWeight:700,color:"#0b2a6f"})}>{TEST_LABELS[id]}</td>
+                <td style={Object.assign({},tdS,{fontFamily:"monospace",fontWeight:700,color:"#6337b9"})}>{sm.prefix}</td>
+                <td style={tdS}>{sm.stats}</td>
+              </tr>;
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Instructor mode rationale */}
+      {instructor && <details style={{marginBottom:14,background:"#f6fbff",border:"1px solid #d7e7fb",borderRadius:10,overflow:"hidden"}}>
+        <summary style={{cursor:"pointer",padding:"12px 16px",fontSize:12,fontWeight:700,color:"#30437a",background:"#f6fbff",listStyle:"none"}}>🎓 Instructor mode — rationale per test (click to expand)</summary>
+        <div style={{padding:"4px 16px 14px"}}>
+          {selectedIds.map(function(id){
+            var t = validationTemplates[id];
+            return <div key={id} style={{marginTop:12,paddingTop:10,borderTop:"1px dashed #c7b2e8"}}>
+              <div style={{fontSize:12,fontWeight:800,color:"#0b2a6f",marginBottom:4}}>{TEST_LABELS[id]}</div>
+              <div style={{fontSize:11,color:"#5a6984",lineHeight:1.6}}>{t.rationale}</div>
+            </div>;
+          })}
+        </div>
+      </details>}
+
+      {/* Actions */}
+      <div style={{display:"flex",flexWrap:"wrap",gap:8,marginBottom:8}}>
+        <button onClick={downloadCSV} style={{background:"#1b7f6a",color:"#fff",border:"none",padding:"10px 16px",borderRadius:8,fontSize:12,fontWeight:700,cursor:"pointer"}}>📊 Download CSV (opens in Excel)</button>
+        <button onClick={downloadPlanJSON} style={{background:"#0b2a6f",color:"#fff",border:"none",padding:"10px 16px",borderRadius:8,fontSize:12,fontWeight:700,cursor:"pointer"}}>💾 Download plan file (.json)</button>
+        <button onClick={function(){setStep(2);setTestIdx(0);}} style={btnSecondary}>← Edit configuration</button>
+        <button onClick={resetWizard} style={Object.assign({},btnSecondary,{marginLeft:"auto"})}>+ New plan</button>
+      </div>
+      <div style={{padding:"8px 12px",background:"#fafafa",borderRadius:6,fontSize:10,color:"#8e9bb5",lineHeight:1.5}}>
+        💡 The CSV includes one sheet-section per test plus a master table, run summary, and stats map. The .json plan file is portable and re-uploadable in Step 1.
+      </div>
+    </div>;
+  };
+
+  return <div style={{background:"#fff",border:"1px solid "+BORDER,borderRadius:14,padding:"1.5rem",boxShadow:"0 4px 12px rgba(11,42,111,0.04)"}}>
+    <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:16,paddingBottom:14,borderBottom:"1px solid #f0f0f3"}}>
+      <div style={{width:40,height:40,borderRadius:10,background:"#6337b9",color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>📋</div>
+      <div style={{flex:1}}>
+        <div style={{fontSize:15,fontWeight:800,color:"#0b2a6f"}}>Full Validation Plan</div>
+        <div style={{fontSize:11,color:"#6e6e73"}}>Multi-test wizard with deterministic Sample IDs for future auto-analysis.</div>
+      </div>
+      {props.onBack && <button onClick={props.onBack} style={btnSecondary}>← Choose another mode</button>}
+    </div>
+    <div style={{display:"flex",gap:6,marginBottom:18}}>
+      {[1,2,3].map(function(s){
+        var active = s===step;
+        var done = s<step;
+        return <div key={s} style={{flex:1,height:4,borderRadius:2,background:done?"#6337b9":active?"#a989d8":"#e5e9f0",transition:"all 0.15s"}}></div>;
+      })}
+    </div>
+    {step===1 && renderStep1()}
+    {step===2 && renderStep2()}
+    {step===3 && renderStep3()}
+  </div>;
+}
+
+
+// Entry chooser — presents two paths (Quick experiment vs Full validation plan)
+function ValidationDesignerEntry(props) {
+  var _mode = useState(null), mode = _mode[0], setMode = _mode[1];
+  if (mode === "quick") {
+    return <div>
+      <button onClick={function(){setMode(null);}} style={{background:"#fff",border:"1px solid #d8dfeb",color:"#5a6984",padding:"6px 12px",borderRadius:8,fontSize:11,fontWeight:600,cursor:"pointer",marginBottom:14}}>← Choose another mode</button>
+      <ValidationDesignerCard instructor={props.instructor} />
+    </div>;
+  }
+  if (mode === "full") {
+    return <FullValidationPlanCard instructor={props.instructor} unit={props.unit} onBack={function(){setMode(null);}} />;
+  }
+  // Mode picker
+  var tile = function(modeId, title, desc, badge, color){
+    return <button onClick={function(){setMode(modeId);}} style={{textAlign:"left",cursor:"pointer",border:"1px solid "+BORDER,background:"#fff",borderRadius:14,padding:"20px 22px",fontFamily:"inherit",transition:"all 0.15s",display:"flex",gap:14,alignItems:"flex-start",boxShadow:"0 4px 10px rgba(11,42,111,0.04)"}} onMouseEnter={function(e){e.currentTarget.style.borderColor=color;e.currentTarget.style.transform="translateY(-2px)";e.currentTarget.style.boxShadow="0 8px 18px rgba(11,42,111,0.08)";}} onMouseLeave={function(e){e.currentTarget.style.borderColor=BORDER;e.currentTarget.style.transform="translateY(0)";e.currentTarget.style.boxShadow="0 4px 10px rgba(11,42,111,0.04)";}}>
+      <div style={{width:50,height:50,borderRadius:12,background:color,color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:22,flexShrink:0,fontWeight:700}}>{badge}</div>
+      <div style={{flex:1,minWidth:0}}>
+        <div style={{fontSize:15,fontWeight:800,color:"#0b2a6f",marginBottom:4}}>{title}</div>
+        <div style={{fontSize:12,color:"#6e6e73",lineHeight:1.5}}>{desc}</div>
+      </div>
+    </button>;
+  };
+  return <div style={{background:"#fff",border:"1px solid "+BORDER,borderRadius:14,padding:"1.5rem",boxShadow:"0 4px 12px rgba(11,42,111,0.04)"}}>
+    <div style={{marginBottom:18}}>
+      <div style={{fontSize:15,fontWeight:800,color:"#0b2a6f",marginBottom:4}}>Validation Designer</div>
+      <div style={{fontSize:12,color:"#6e6e73"}}>What do you want to design?</div>
+    </div>
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
+      {tile("quick", "Quick experiment", "Design a single validation test (linearity, accuracy, etc.) with a printable instruction sentence and CSV output. Best when you just need to plan one test.", "✓", "#0F8AA2")}
+      {tile("full", "Full validation plan", "Design a multi-test plan (any combination of the 7 tests). Generates a Treatment Groups table with deterministic Sample IDs so future imported data can be auto-analyzed.", "📋", "#6337b9")}
+    </div>
+  </div>;
+}
+
+
 export default function App() {
   var _s=useState(false),on=_s[0],setOn=_s[1];
   var _t=useState(0),tab=_t[0],setTab=_t[1];
+  var _ae=useState(""),analyzeError=_ae[0],setAnalyzeError=_ae[1];
+  var _pra=useState(false),pendingReanalyze=_pra[0],setPendingReanalyze=_pra[1];
   var _d=useState(false),dbg=_d[0],setDbg=_d[1];
   var _dc=useState(0),dc2=_dc[0],setDc2=_dc[1];
   var _sm=useState("literature"),sm=_sm[0],setSm=_sm[1];
@@ -2442,8 +6761,11 @@ export default function App() {
   var _pm=useState(false),planningMode=_pm[0],setPlanningMode=_pm[1];
   var _tt=useState(null),selectedTool=_tt[0],setSelectedTool=_tt[1];
   var _sp=useState([{plate:"1",endo:"0",spiked:"1",spikeProtein:"GFP",stockConc:"500",stockUnit:"ug/uL",spikeVol:"10",spikeVolUnit:"uL",sampleVol:"1000",sampleVolUnit:"uL",noEndo:false}]),spikeSets=_sp[0],setSpikeSets=_sp[1];
+  var _activePlate=useState(0),activePlate=_activePlate[0],setActivePlate=_activePlate[1];
+  var _collapsedPlate=useState(false),collapsedPlate=_collapsedPlate[0],setCollapsedPlate=_collapsedPlate[1];
 
   var u=function(k,v){setCfg(function(p){var n={};for(var x in p)n[x]=p[x];n[k]=v;return n;});};
+  useEffect(function(){if(activePlate>=np)setActivePlate(np-1);},[np]);
   var np=Math.max(1,Math.min(24,parseInt(cfg.np)||1));
   var sr=parseInt(cfg.sr)||3; var xr=parseInt(cfg.xr)||3;
   var nl=cfg.names.split(/[,\n]/).map(function(s){return s.trim();}).filter(Boolean);
@@ -2453,6 +6775,13 @@ export default function App() {
   // when the user changes the input unit (so stale display values don't persist).
   var _duChart = useState(unit), displayUnitChart = _duChart[0], setDisplayUnitChart = _duChart[1];
   var _duResults = useState(unit), displayUnitResults = _duResults[0], setDisplayUnitResults = _duResults[1];
+  // Toggle for showing the "at DF=X" subscript under each concentration in the Results & Recommendations summary
+  // tables. Default OFF so the analyst can copy/paste the table cleanly. Toggle is a small dotted-link in each
+  // table header.
+  var _showDils = useState(false), showDilutions = _showDils[0], setShowDilutions = _showDils[1];
+  // Toggle for drawing solid horizontal lines between plates in flat-listed result tables (multi-plate runs only).
+  // Makes it easier to visually scan where one plate's samples end and another's begin. Default ON.
+  var _showPlateSep = useState(true), showPlateSeparators = _showPlateSep[0], setShowPlateSeparators = _showPlateSep[1];
   // Sync display units when input unit changes (e.g. user switches from mg/mL to ng/mL in General Info)
   useEffect(function(){ setDisplayUnitChart(unit); setDisplayUnitResults(unit); }, [unit]);
   // Dilution display format: "ratio" (default, "1:N") or "factor" ("N×"). Affects landing-page series previews
@@ -2460,6 +6789,13 @@ export default function App() {
   var _dilFmt = useState("ratio"), dilFormat = _dilFmt[0], setDilFormat = _dilFmt[1];
   var targetP=cfg.tp==="yes"?"Total Protein":(cfg.target||cfg.sn);
   var assayKind=cfg.tp==="yes"?"total":(cfg.at==="elisa"?"elisa":"direct");
+  // Display name for the standard, scoped to a plate when there are multiple plates so
+  // analysts can tell apart "GFP standard" on plate 1 vs. plate 2 in charts/tables/exports.
+  // Single-plate runs read just "GFP standard" (no parenthetical).
+  var stdDisplayName = function(pi){
+    var base = (cfg.sn || "Standard") + " standard";
+    return np>1 ? base + " (P" + (pi+1) + ")" : base;
+  };
 
   useEffect(function(){
     setCfg(function(p){
@@ -2508,6 +6844,67 @@ export default function App() {
   var getLayout=function(){
     var rows=det[0]?det[0].rows:8;
     var cols=det[0]?det[0].cols:12;
+    if(cfg.layout==="transposed_mixed"){
+      // Transposed mixed-rep ("Andrew+ format"): same half-row slot model as classical transposed,
+      // but per-sample rep counts come from cfg.xrMix (e.g. "3,3,2").
+      // Standard curve always takes the first cfg.sr rows of the LEFT half.
+      // Pattern then resets at the half boundary — samples never span halves.
+      var halfWidth = Math.floor(cols / 2);
+      var dilsPerRep = halfWidth - 1;
+      var halfStart = function(halfIdx){return halfIdx===0 ? 0 : halfWidth;};
+      var halfBlank = function(halfIdx){return halfIdx===0 ? halfWidth-1 : cols-1;};
+      var buildGroupFromSlots=function(type, name, slots){
+        var ds = [];
+        for(var di=0; di<dilsPerRep; di++){
+          var reps = slots.map(function(sl){return [sl.row, halfStart(sl.halfIdx) + di];});
+          ds.push(reps);
+        }
+        var bc = slots.map(function(sl){return [sl.row, halfBlank(sl.halfIdx)];});
+        return {
+          type:type, name:name, dilutions:ds, blankCells:bc, axis:"row",
+          slots:slots,
+          rowsUsed: Array.from(new Set(slots.map(function(s){return s.row;}))),
+          dilsPerRep: dilsPerRep
+        };
+      };
+      var srN_mix = Math.max(1, parseInt(cfg.sr)||3);
+      var mixParsed = parseRepMix(cfg.xrMix || "3,3,2");
+      var pattern = mixParsed.valid ? mixParsed.parts : [1];
+      var groups_mix = [];
+      // ── LEFT HALF ──
+      // Standard takes first srN_mix rows; pattern fills remaining rows
+      var leftStdSlots = [];
+      for (var rL=0; rL<srN_mix && rL<rows; rL++) leftStdSlots.push({row:rL, halfIdx:0});
+      groups_mix.push(buildGroupFromSlots("std","Standard",leftStdSlots));
+      var leftRemaining = [];
+      for (var rL2=srN_mix; rL2<rows; rL2++) leftRemaining.push({row:rL2, halfIdx:0});
+      var sampleIdx_mix = 1;
+      var patIdxL = 0;
+      while (leftRemaining.length > 0) {
+        var n_takeL = pattern[patIdxL % pattern.length];
+        if (n_takeL > leftRemaining.length) n_takeL = leftRemaining.length; // partial last group in left half
+        var grpSlotsL = leftRemaining.slice(0, n_takeL);
+        leftRemaining = leftRemaining.slice(n_takeL);
+        groups_mix.push(buildGroupFromSlots("smp","Sample "+sampleIdx_mix,grpSlotsL));
+        sampleIdx_mix++;
+        patIdxL++;
+      }
+      // ── RIGHT HALF ──
+      // Pattern restarts from the top; standard does NOT repeat. All rows used for samples.
+      var rightRemaining = [];
+      for (var rR=0; rR<rows; rR++) rightRemaining.push({row:rR, halfIdx:1});
+      var patIdxR = 0;
+      while (rightRemaining.length > 0) {
+        var n_takeR = pattern[patIdxR % pattern.length];
+        if (n_takeR > rightRemaining.length) n_takeR = rightRemaining.length; // partial last group in right half
+        var grpSlotsR = rightRemaining.slice(0, n_takeR);
+        rightRemaining = rightRemaining.slice(n_takeR);
+        groups_mix.push(buildGroupFromSlots("smp","Sample "+sampleIdx_mix,grpSlotsR));
+        sampleIdx_mix++;
+        patIdxR++;
+      }
+      return {groups:groups_mix, totalRows:rows, totalCols:cols, axis:"row", dilsPerRep:dilsPerRep, dilutionCount:dilsPerRep, halfWidth:halfWidth, mixPattern:pattern};
+    }
     if(cfg.layout==="transposed"){
       // Transposed: each "slot" is a half-row holding one analyte's dilution series.
       // 8 rows × 2 halves = 16 slots. Standard occupies sr slots, samples occupy xr slots each.
@@ -2649,7 +7046,231 @@ export default function App() {
   var removeSpike=function(i){setSpikeSets(function(p){return p.filter(function(_,idx){return idx!==i;});});};
 
   var analyze=useCallback(function(){
+    // ── AUTOSAMPLER PATH ───────────────────────────────────────────────────
+    // For vials/LC-MS mode, build the result from cfg.msInjections (flat list of injection rows).
+    // Each row: {sampleType, sampleName, levelOrDilution, reps:[]}.
+    //
+    //   For Standards: levelOrDilution is the integer level number. Concentration is computed via
+    //     asStandardConcForLevel(level, cfg).
+    //   For Unknowns / SST: dilution factor is auto-derived from the row's position among same-name
+    //     rows. First row of a sample = pDil(cfg.xdf); each subsequent = previous × pDil(cfg.xds).
+    //   For Blanks: skipped (no data point produced — could be subtracted in future).
+    //
+    // Multiple rows with the same level (Standards) get pooled as replicates for that level. Multiple
+    // rows with the same sample name (Unknowns/SST) become separate dilution rows for that sample.
+    //
+    // Output structure (res[0].samps[].dils[]) is parallel to the plate-reader path.
+    if (cfg.layout === "autosampler") {
+      var injections = (function(){try{var x=JSON.parse(cfg.msInjections||"[]");return Array.isArray(x)?x:[];}catch(_){return[];}})();
+
+      // ─── Step 1: Standards grouped by level number ───
+      var stdGroups = {};
+      var unresolvedLevels = [];
+      injections.forEach(function(r){
+        if (r.sampleType !== "Standard") return;
+        var level = parseInt(r.levelOrDilution);
+        if (!isFinite(level) || level < 1) return;
+        var conc = asStandardConcForLevel(level, cfg);
+        if (conc == null) {
+          if (unresolvedLevels.indexOf(level) < 0) unresolvedLevels.push(level);
+          return;
+        }
+        var validReps = (r.reps||[]).map(function(v){return parseFloat(v);}).filter(function(v){return isFinite(v) && v > 0;});
+        if (validReps.length === 0) return;
+        var key = String(level);
+        if (!stdGroups[key]) stdGroups[key] = {level: level, conc: conc, reps: []};
+        stdGroups[key].reps = stdGroups[key].reps.concat(validReps);
+      });
+      var validStd = Object.keys(stdGroups).map(function(k){return stdGroups[k];}).sort(function(a,b){return b.conc - a.conc;});
+      if (validStd.length < 2) {
+        var msg = "Need at least 2 Standard rows with a level number AND at least one replicate.";
+        if (unresolvedLevels.length > 0) {
+          msg += "\n\nLevel(s) referenced in the table but not yet defined in General Information: "+unresolvedLevels.join(", ")+".\n\n";
+          msg += "Either set the top concentration + serial DF (serial mode), or add concentrations for those levels (discrete mode).";
+        }
+        window.alert(msg);
+        return;
+      }
+
+      // ─── Step 2: Pick fit model & build calibration regression ───
+      // "auto" mode: fit all four models, pick highest R². User can later override via in-canvas picker.
+      var asCurveModel;
+      if (cfg.fm === "loglog") asCurveModel = "loglog";
+      else if (cfg.fm === "4pl" || cfg.fm === "5pl") asCurveModel = cfg.fm;
+      else if (cfg.fm === "auto") asCurveModel = "auto";
+      else asCurveModel = "linear";
+
+      var asXR = [], asYR = [];
+      var asDbS = validStd.map(function(l, idx){
+        var avg = l.reps.reduce(function(s,v){return s+v;},0) / l.reps.length;
+        var sd = l.reps.length > 1 ? Math.sqrt(l.reps.reduce(function(s,v){return s+(v-avg)*(v-avg);},0)/(l.reps.length-1)) : 0;
+        var cv = avg > 0 ? sd/avg : 0;
+        asXR.push(l.conc); asYR.push(avg);
+        return {row:idx, conc:l.conc, raw:l.reps, blank:0, cor:l.reps, avg:avg, sd:sd, cv:cv};
+      });
+
+      var asLf;
+      if (asCurveModel === "auto") {
+        // Try all four models, keep the one with highest R²
+        var candidates = [];
+        try {
+          var _lin = linReg(asXR, asYR);
+          if (_lin && isFinite(_lin.r2)) candidates.push({model:"linear", slope:_lin.slope, intercept:_lin.intercept, r2:_lin.r2});
+        } catch(_){}
+        try {
+          var _ll = logLogReg(asXR, asYR);
+          if (_ll && isFinite(_ll.r2)) candidates.push({model:"loglog", slope:_ll.slope, intercept:_ll.intercept, r2:_ll.r2});
+        } catch(_){}
+        try {
+          var _4 = fitLogistic(asXR, asYR, "4pl");
+          if (_4 && isFinite(_4.r2)) candidates.push(_4);
+        } catch(_){}
+        try {
+          var _5 = fitLogistic(asXR, asYR, "5pl");
+          if (_5 && isFinite(_5.r2)) candidates.push(_5);
+        } catch(_){}
+        if (candidates.length === 0) {
+          // Fallback: linear straight-line, even if R² is bad — better than nothing
+          var lrFallback = linReg(asXR, asYR);
+          asLf = {model:"linear", slope:lrFallback.slope, intercept:lrFallback.intercept, r2:lrFallback.r2, fallback:true};
+        } else {
+          candidates.sort(function(a,b){return b.r2 - a.r2;});
+          asLf = candidates[0];
+        }
+        asCurveModel = asLf.model;
+      } else if (asCurveModel === "linear") {
+        var lr = linReg(asXR, asYR);
+        asLf = {model:"linear", slope:lr.slope, intercept:lr.intercept, r2:lr.r2};
+      } else if (asCurveModel === "loglog") {
+        var llr = logLogReg(asXR, asYR);
+        asLf = {model:"loglog", slope:llr.slope, intercept:llr.intercept, r2:llr.r2};
+      } else {
+        asLf = fitLogistic(asXR, asYR, asCurveModel);
+        if (!asLf) {
+          var lr2 = linReg(asXR, asYR);
+          asLf = {model:"linear", slope:lr2.slope, intercept:lr2.intercept, r2:lr2.r2, fallback:true};
+          asCurveModel = "linear";
+        }
+      }
+      var asFFn = function(x){
+        if (asLf.model==="linear") return asLf.slope*x + asLf.intercept;
+        if (asLf.model==="loglog") {
+          if (x<=0||!isFinite(x)) return null;
+          return Math.pow(10, asLf.slope*Math.log10(x) + asLf.intercept);
+        }
+        return logisticY(x, asLf.params, asLf.model);
+      };
+      var asIFn = function(y){
+        if (asLf.model==="linear") return asLf.slope ? (y-asLf.intercept)/asLf.slope : null;
+        if (asLf.model==="loglog") {
+          if (y<=0||!isFinite(y)||!asLf.slope) return null;
+          var lx = (Math.log10(y) - asLf.intercept) / asLf.slope;
+          var xv = Math.pow(10, lx);
+          return isFinite(xv) && xv > 0 ? xv : null;
+        }
+        return logisticInv(y, asLf.params, asLf.model);
+      };
+      var asMxA = Math.max.apply(null, asYR), asMnA = Math.min.apply(null, asYR);
+      var asMidA = (asMxA + asMnA) / 2;
+      var asSP = asDbS.map(function(s){return {conc:s.conc, avg:s.avg, sd:s.sd, cv:s.cv};});
+
+      // ─── Step 3: Group Unknown + SST rows by sampleName, walk in order to assign DF ───
+      // Hybrid model: each row's DF is either:
+      //   (a) per-row override — analyst typed something into r.levelOrDilution that parses as a
+      //       valid dilution (1/N, 1:N, or decimal 0<v≤1) — that value wins.
+      //   (b) auto-derived — pDil(cfg.xdf) × pDil(cfg.xds)^rowOrderIdx
+      // The rowOrderIdx counter still increments for ALL rows of a sample (overridden or not) so
+      // the auto-derived series for non-overridden rows stays consistent.
+      var smpFirstDF = pDil(cfg.xdf || "1/10");  if (!isFinite(smpFirstDF) || smpFirstDF<=0) smpFirstDF = 0.1;
+      var smpSerialDF = pDil(cfg.xds || "1/2");  if (!isFinite(smpSerialDF) || smpSerialDF<=0) smpSerialDF = 0.5;
+
+      var sampleOrder = [];
+      var sampleMap = {};
+      var sstRowKeys = {};
+      var sampleSeenCount = {};
+      injections.forEach(function(r){
+        if (r.sampleType !== "Unknown" && r.sampleType !== "SST") return;
+        var name = (r.sampleName||"").trim();
+        if (!name) return;
+        var validReps = (r.reps||[]).map(function(v){return parseFloat(v);}).filter(function(v){return isFinite(v) && v > 0;});
+        if (validReps.length === 0) {
+          sampleSeenCount[name] = (sampleSeenCount[name] || 0) + 1;
+          return;
+        }
+        var rowOrderIdx = sampleSeenCount[name] || 0;
+        sampleSeenCount[name] = rowOrderIdx + 1;
+        // Check for per-row override
+        var rawOverride = (r.levelOrDilution || "").trim();
+        var df = null;
+        if (rawOverride !== "") {
+          var parsedOverride = pDil(rawOverride);
+          if (isFinite(parsedOverride) && parsedOverride > 0 && parsedOverride <= 1) {
+            df = parsedOverride;
+          }
+        }
+        if (df == null) {
+          df = smpFirstDF * Math.pow(smpSerialDF, rowOrderIdx);
+        }
+
+        if (!sampleMap[name]) {
+          sampleMap[name] = {name: name, dils: [], anySST: false};
+          sampleOrder.push(name);
+        }
+        if (r.sampleType === "SST") sampleMap[name].anySST = true;
+        sampleMap[name].dils.push({reps: validReps, df: df, rowOrderIdx: rowOrderIdx});
+      });
+
+      // ─── Step 4: For each grouped sample, compute back-calculated concs ───
+      var asSamps = sampleOrder.map(function(name, sIdx){
+        var samp = sampleMap[name];
+        var dils = samp.dils.map(function(d, di){
+          var avg = d.reps.reduce(function(s,v){return s+v;},0) / d.reps.length;
+          var sd = d.reps.length > 1 ? Math.sqrt(d.reps.reduce(function(s,v){return s+(v-avg)*(v-avg);},0)/(d.reps.length-1)) : 0;
+          var cv = avg > 0 ? sd/avg : 0;
+          var ir = avg <= asMxA && avg >= asMnA;
+          var cW = null;
+          var inv = asIFn(avg);
+          if (inv != null && isFinite(inv) && inv > 0) cW = inv;
+          var cS = cW != null ? cW / d.df : null;
+          return {di:di, avgA:avg, cv:cv, ir:ir, cW:cW, cS:cS, df:d.df, lbaOK:false, lbaNote:""};
+        });
+        var aS = selAll(dils, asMidA, "direct");
+        if (samp.anySST) sstRowKeys[sIdx] = true;
+        return {name: name, dils: dils, aS: aS};
+      });
+
+      // ─── Step 5: Auto-flag SST samples in cfg.sstFlags ───
+      var existingFlags = (function(){try{var x=JSON.parse(cfg.sstFlags||"{}");return (x&&typeof x==="object")?x:{};}catch(_){return {};}})();
+      var nextFlags = Object.assign({}, existingFlags);
+      var flagsChanged = false;
+      Object.keys(sstRowKeys).forEach(function(sIdx){
+        var key = "0-"+sIdx;
+        if (!nextFlags[key]) {
+          nextFlags[key] = true;
+          flagsChanged = true;
+        }
+      });
+      if (flagsChanged) u("sstFlags", JSON.stringify(nextFlags));
+
+      var asResult = {
+        sc: {slope:asLf.slope, intercept:asLf.intercept, r2:asLf.r2, pts:asSP, model:asLf.model, params:asLf.params, fallback:asLf.fallback},
+        fFn: asFFn,
+        iFn: asIFn,
+        fL: asLf.model==="linear"?"Linear":(asLf.model==="loglog"?"Log-log":(asLf.model==="5pl"?"5PL":"4PL")),
+        samps: asSamps,
+        dbS: asDbS,
+        bA: 0,
+        mxA: asMxA,
+        mnA: asMnA
+      };
+      setRes([asResult]);
+      setTab(1);
+      return;
+    }
+
     var sc=parseFloat(cfg.sc),df1=pDil(cfg.sdf),ds=pDil(cfg.sds),xf1=pDil(cfg.xdf),xs=pDil(cfg.xds);
+    df1*=pOptionalDil(cfg.stdPredil);
+    xf1*=pOptionalDil(cfg.smpPredil);
     if([sc,df1,ds,xf1,xs].some(isNaN))return;var all=[];
     for(var pi=0;pi<np;pi++){
       var plate=pl[pi];if(!plate)continue;var ly=getLayout();
@@ -2681,13 +7302,91 @@ export default function App() {
         xR.push(concs[i]);yR.push(a);
         dbS.push({row:i,conc:concs[i],raw:raw,blank:bA,cor:cor,avg:a,sd:sd,cv:cv});
       }
+      // Curve model selection priority:
+      //   - cfg.fm "auto" → fit all four models, pick highest R²
+      //   - cfg.fm explicitly set to "loglog" → log-log linear
+      //   - cfg.fm "5pl" or "4pl" → 4PL or 5PL (ELISA shape)
+      //   - otherwise → straight linear
+      var curveModel;
+      if (cfg.fm === "auto") {
+        curveModel = "auto";
+      } else if (cfg.fm === "loglog") {
+        curveModel = "loglog";
+      } else if (cfg.at === "elisa") {
+        curveModel = (cfg.fm === "5pl" ? "5pl" : "4pl");
+      } else {
+        curveModel = "linear";
+      }
       // Optionally include the blank well as a (conc=0, fluorescence_corrected=0) calibration point.
       // Default off (matches ICH M10 / immunoassay convention: standards only).
       // On = matches the older "Excel forces origin" approach common in classroom worksheets.
-      if(cfg.forceOriginInCurve==="yes"){
+      // Note: log-log can't include zero-conc points (log(0) is undefined), so this flag is silently
+      // ignored in loglog mode.
+      if(curveModel==="linear"&&cfg.forceOriginInCurve==="yes"){
         xR.push(0); yR.push(0);
       }
-      var lr=linReg(xR,yR);var fFn=function(x){return lr.slope*x+lr.intercept;};var iFn=function(y){return lr.slope?(y-lr.intercept)/lr.slope:null;};
+      var lr=null,lf=null;
+      if(curveModel==="auto"){
+        // Fit all four models, pick highest R²
+        var candidates = [];
+        try {
+          var _lin = linReg(xR, yR);
+          if (_lin && isFinite(_lin.r2)) candidates.push({model:"linear", slope:_lin.slope, intercept:_lin.intercept, r2:_lin.r2});
+        } catch(_){}
+        try {
+          var _ll = logLogReg(xR, yR);
+          if (_ll && isFinite(_ll.r2)) candidates.push({model:"loglog", slope:_ll.slope, intercept:_ll.intercept, r2:_ll.r2});
+        } catch(_){}
+        try {
+          var _4 = fitLogistic(xR, yR, "4pl");
+          if (_4 && isFinite(_4.r2)) candidates.push(_4);
+        } catch(_){}
+        try {
+          var _5 = fitLogistic(xR, yR, "5pl");
+          if (_5 && isFinite(_5.r2)) candidates.push(_5);
+        } catch(_){}
+        if (candidates.length === 0) {
+          var lrFb = linReg(xR, yR);
+          lf = {model:"linear", slope:lrFb.slope, intercept:lrFb.intercept, r2:lrFb.r2, fallback:true};
+        } else {
+          candidates.sort(function(a,b){return b.r2 - a.r2;});
+          lf = candidates[0];
+        }
+        curveModel = lf.model;
+      } else if(curveModel==="linear"){
+        lr=linReg(xR,yR);
+        lf={model:"linear",slope:lr.slope,intercept:lr.intercept,r2:lr.r2};
+      } else if(curveModel==="loglog"){
+        lr=logLogReg(xR,yR);
+        // Slope/intercept here are on the LOG10 axes. Forward fn: y = 10^(slope*log10(x)+intercept).
+        // Inverse: x = 10^((log10(y)-intercept)/slope).
+        lf={model:"loglog",slope:lr.slope,intercept:lr.intercept,r2:lr.r2};
+      } else {
+        lf=fitLogistic(xR,yR,curveModel);
+        if(!lf){
+          lr=linReg(xR,yR);
+          lf={model:"linear",slope:lr.slope,intercept:lr.intercept,r2:lr.r2,fallback:true};
+          curveModel="linear";
+        }
+      }
+      var fFn=function(x){
+        if(lf.model==="linear") return lf.slope*x+lf.intercept;
+        if(lf.model==="loglog"){
+          if(x<=0||!isFinite(x)) return null;
+          return Math.pow(10, lf.slope*Math.log10(x) + lf.intercept);
+        }
+        return logisticY(x,lf.params,lf.model);
+      };
+      var iFn=function(y){
+        if(lf.model==="linear") return lf.slope?(y-lf.intercept)/lf.slope:null;
+        if(lf.model==="loglog"){
+          if(y<=0||!isFinite(y)||!lf.slope) return null;
+          var lx = (Math.log10(y) - lf.intercept) / lf.slope;
+          var xv = Math.pow(10, lx);
+          return isFinite(xv) && xv > 0 ? xv : null;
+        }
+        return logisticInv(y,lf.params,lf.model);
+      };
       var mxA=Math.max.apply(null,yR),mnA=Math.min.apply(null,yR),midA=(mxA+mnA)/2;
       var samps=[];
       for(var si=0;si<smpG.length;si++){
@@ -2707,12 +7406,26 @@ export default function App() {
           // teaching moment (you CAN do the math but you should NOT report it).
           var cW=null;{var inv=iFn(a2);cW=inv!=null&&isFinite(inv)&&inv>0?inv:null;}
           var df=xf1*Math.pow(xs,d),cS2=cW!=null?cW/df:null;
-          dils.push({di:d,avgA:a2,cv:cv2,ir:ir2,cW:cW,cS:cS2});
+          dils.push({di:d,avgA:a2,cv:cv2,ir:ir2,cW:cW,cS:cS2,df:df,lbaOK:false,lbaNote:""});
           dbD.push({di:d,raw:raw2,blank:sB,cor:cor2,avgA:a2,cv:cv2,ir:ir2,cW:cW,df:df,cS:cS2});
         }
-        samps.push({name:nm,dils:dils,aS:selAll(dils,midA),dbD:dbD});
+        if(assayKind==="elisa"){
+          for(var li=0;li<dils.length;li++){
+            var here=dils[li];
+            if(!(here.ir&&here.cS!=null))continue;
+            for(var lj=Math.max(0,li-1);lj<=Math.min(dils.length-1,li+1);lj++){
+              if(lj===li)continue;
+              var nb=dils[lj];
+              if(!(nb&&nb.ir&&nb.cS!=null))continue;
+              var agreement=100*Math.min(here.cS,nb.cS)/Math.max(here.cS,nb.cS);
+              if(agreement>=80){here.lbaOK=true;here.lbaNote="Dilutionally linear with neighboring dilution ("+agreement.toFixed(0)+"%)";break;}
+            }
+            if(!here.lbaOK)here.lbaNote="No neighboring in-range dilution agrees within 80–120%; review for hook effect or matrix interference";
+          }
+        }
+        samps.push({name:nm,dils:dils,aS:selAll(dils,midA,assayKind),dbD:dbD});
       }
-      all.push({sc:{slope:lr.slope,intercept:lr.intercept,r2:lr.r2,pts:sP},fFn:fFn,fL:"Linear",samps:samps,dbS:dbS,bA:bA,mxA:mxA,mnA:mnA});
+      all.push({sc:{slope:lf.slope,intercept:lf.intercept,r2:lf.r2,pts:sP,model:lf.model,params:lf.params,fallback:lf.fallback},fFn:fFn,iFn:iFn,fL:lf.model==="linear"?"Linear":(lf.model==="loglog"?"Log-log":(lf.model==="5pl"?"5PL":"4PL")),samps:samps,dbS:dbS,bA:bA,mxA:mxA,mnA:mnA});
     }
     if(all.length===0){window.alert("Analysis produced no results — the plates may be empty or missing standard curve data. Try loading the demo to verify setup.");return;}
     var anyCurve = all.some(function(p){return p.sc && p.sc.pts && p.sc.pts.length>=2;});
@@ -2754,7 +7467,65 @@ export default function App() {
         });
       }
     }
-    var bb=new Blob([c],{type:"text/csv"});var u2=URL.createObjectURL(bb);var a=document.createElement("a");a.href=u2;a.download="essf_curve_results_"+APP_VERSION+".csv";a.click();URL.revokeObjectURL(u2);
+    // Try download first; if it fails (sandboxed iframe, embedded preview, no Blob support, etc.),
+    // fall back to copying the CSV to clipboard with a brief alert. This ensures the export still
+    // works in environments where downloads are blocked.
+    var filename = "essf_curve_results_"+APP_VERSION+".csv";
+    var downloadOk = false;
+    try {
+      var bb=new Blob([c],{type:"text/csv"});
+      var u2=URL.createObjectURL(bb);
+      var a=document.createElement("a");
+      a.href=u2;
+      a.download=filename;
+      a.style.display="none";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(u2);
+      downloadOk = true;
+    } catch(err) {
+      // Download path failed — fall through to clipboard
+      console.warn("CSV download failed; falling back to clipboard:", err);
+    }
+    if (!downloadOk) {
+      // Clipboard fallback: try modern API first, fall back to execCommand path for older browsers / sandboxes.
+      var copied = false;
+      if (navigator && navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(c).then(function(){
+          alert("Download blocked in this environment. CSV copied to clipboard — paste into a text editor and save as "+filename+".");
+        }, function(){
+          // Modern clipboard API rejected (often: not in user gesture, or document not focused). Fall through.
+          legacyCopy();
+        });
+        return;
+      }
+      legacyCopy();
+      function legacyCopy(){
+        try {
+          var ta = document.createElement("textarea");
+          ta.value = c;
+          ta.style.position = "fixed";
+          ta.style.opacity = "0";
+          document.body.appendChild(ta);
+          ta.select();
+          copied = document.execCommand("copy");
+          document.body.removeChild(ta);
+        } catch(_){copied = false;}
+        if (copied) {
+          alert("Download blocked in this environment. CSV copied to clipboard — paste into a text editor and save as "+filename+".");
+        } else {
+          // Last resort: open the CSV in a new tab so the user can copy/save manually.
+          var w = window.open();
+          if (w) {
+            w.document.write("<pre style='font-family:monospace;font-size:12px;padding:1rem;'>"+c.replace(/&/g,"&amp;").replace(/</g,"&lt;")+"</pre>");
+            w.document.title = filename;
+          } else {
+            alert("Could not export CSV: download blocked, clipboard unavailable, and popup blocked. Try the deployed app on Vercel where downloads work directly.");
+          }
+        }
+      }
+    }
   };
 
   var demo=function(){
@@ -2802,7 +7573,37 @@ export default function App() {
     // Classical demo (default)
     setCfg({sn:"GFP",sc:"1",sdf:"1/10",sds:"1/2",xdf:"1/10",xds:"1/2",np:"1",tp:"no",at:"direct",fm:"linear",names:"SS\nSS spike\nTT",sr:"3",xr:"3",unit:"mg/mL",target:"GFP",tmpl:"bca",spikeUsed:"no",layout:"classical"});setSpikeSets([{plate:"1",endo:"0",spiked:"1",spikeProtein:"GFP",stockConc:"500",stockUnit:"ug/uL",spikeVol:"10",spikeVolUnit:"uL",sampleVol:"1000",sampleVolUnit:"uL",noEndo:false}]);var d=EP();var raw=[[.796,.797,.798,.772,.764,.762,2.805,2.89,2.88,.703,.71,.712],[.425,.423,.422,.415,.41,.415,1.237,1.22,1.222,.322,.324,.332],[.261,.262,.263,.246,.248,.247,.753,.702,.705,.201,.202,.203],[.194,.192,.19,.178,.185,.184,.434,.481,.479,.167,.165,.165],[.125,.124,.125,.129,.128,.127,.245,.279,.278,.117,.116,.118],[.114,.115,.116,.113,.115,.114,.205,.205,.207,.105,.104,.103],[.106,.107,.105,.102,.102,.101,.165,.165,.167,.1,.1,.099],[.09,.09,.09,.088,.088,.088,.088,.089,.086,.09,.09,.09]];for(var r=0;r<raw.length;r++)for(var c=0;c<raw[r].length;c++)d[r][c]=raw[r][c].toString();setPl([d]);setDet([{rows:8,cols:12}]);setOn(true);
   };
-  var reset=function(){setCfg(defaultCfg());setOn(false);setTab(0);setRes(null);setPl([EP()]);setDet([]);setDbg(false);setMathRow(null);setPicks({});setResultsExpanded({});setExpanded({});setCmp(false);setSpikeSets([{plate:"1",endo:"0",spiked:"1",spikeProtein:"GFP",stockConc:"500",stockUnit:"ug/uL",spikeVol:"10",spikeVolUnit:"uL",sampleVol:"1000",sampleVolUnit:"uL",noEndo:false}]);};
+  var reset=function(){
+    try {
+      // First: clear all state synchronously so React re-renders to landing.
+      setCfg(defaultCfg());
+      setTab(0);
+      setRes(null);
+      setPl([EP()]);
+      setDet([]);
+      setDbg(false);
+      setMathRow(null);
+      setPicks({});
+      setResultsExpanded({});
+      setExpanded({});
+      setCmp(false);
+      setSpikeSets([{plate:"1",endo:"0",spiked:"1",spikeProtein:"GFP",stockConc:"500",stockUnit:"ug/uL",spikeVol:"10",spikeVolUnit:"uL",sampleVol:"1000",sampleVolUnit:"uL",noEndo:false}]);
+      setActivePlate(0);
+      setCollapsedPlate(false);
+      setPlanningMode(false);
+      setOn(false);
+      // Belt-and-suspenders: if for any reason the React state path didn't return to landing,
+      // force a hard reload after a short delay. This is a no-op if state reset already worked
+      // (the page just reloads to the same fresh-landing state). If state reset failed silently,
+      // this guarantees the user sees a clean landing.
+      setTimeout(function(){
+        try { window.location.reload(); } catch(_e) {}
+      }, 100);
+    } catch (e) {
+      window.alert("Reset failed: " + (e && e.message ? e.message : String(e)) + "\n\nForcing page reload.");
+      try { window.location.reload(); } catch(_e) {}
+    }
+  };
   var htc=function(){var n=dc2+1;setDc2(n);if(n>=3){setDbg(!dbg);setDc2(0);}setTimeout(function(){setDc2(0);},1000);};
   var dv=!isNaN(pDil(cfg.sdf))&&!isNaN(pDil(cfg.sds))&&!isNaN(pDil(cfg.xdf))&&!isNaN(pDil(cfg.xds));
   var totalCols=layout.totalCols||0;
@@ -2854,7 +7655,7 @@ export default function App() {
         if(scPts && scPts.length){
           var wellMax = Math.max.apply(null, scPts.map(function(p){return p.conc;}));
           var wellMin = Math.min.apply(null, scPts.map(function(p){return p.conc;}));
-          var xf1 = pDil(cfg.xdf), xs = pDil(cfg.xds);
+          var xf1 = pDil(cfg.xdf) * pOptionalDil(cfg.smpPredil), xs = pDil(cfg.xds);
           // First-dilution sample range (least diluted; widest quantifiable)
           if(!isNaN(xf1)){
             curveMaxSample = wellMax / xf1;
@@ -2973,6 +7774,97 @@ export default function App() {
     var rows=spikeRows();
     return rows.filter(function(r){return r.plateIdx===pi && r.spikedIdx===si;});
   };
+  // Shared summary-row builder for the Recommendations summary and the Results "Show summary of picks"
+  // disclosure. Pass strategyId="literature" for the canonical ICH M10 view (Recommendations default), or
+  // pass the currently selected sm to mirror what the analyst sees on Results.
+  // Each row carries BOTH the algorithm pick (per strategyId) and the analyst's actual reported pick (gsc),
+  // plus a `disagrees` flag set when the two differ. Recovery is included for the analyst pick context only,
+  // since that's what the analyst is actually reporting.
+  var buildSummaryRows = function(strategyId){
+    if(!res) return [];
+    return res.flatMap(function(pp,pi){return pp.samps.map(function(s,si){
+      var algoPick = s.aS && s.aS[strategyId];
+      var analystPick = gsc(pi, si);  // respects picks[]; falls back to active strategy when no override
+      var srs = spikeRowsForSample(pi,si);
+      var rec = srs.length>0 ? srs[0].recovery : null;
+      // disagrees: the dilution chosen by the algorithm differs from the analyst's reported dilution.
+      // null-handling: if either side has no qualified pick, no disagreement (we just show "—").
+      var algoDil = algoPick && algoPick.dil!=null ? algoPick.dil : null;
+      var analystDil = analystPick && analystPick.dil!=null ? analystPick.dil : null;
+      // Look up the actual DF FRACTION for each picked dilution index. samp.dils[i].df already stores
+      // it (e.g. 0.1 for a 1:10). This is what the table's "at 1:10" subscript needs.
+      var algoDilDf = null, analystDilDf = null;
+      if (algoDil != null && s.dils) {
+        var aRow = s.dils.find(function(d){return d.di === algoDil;});
+        if (aRow) algoDilDf = aRow.df;
+      }
+      if (analystDil != null && s.dils) {
+        var bRow = s.dils.find(function(d){return d.di === analystDil;});
+        if (bRow) analystDilDf = bRow.df;
+      }
+      var disagrees = (algoDil!=null && analystDil!=null && algoDil !== analystDil);
+      return {
+        pi: pi+1,
+        plateIdx: pi,
+        sampleIdx: si,
+        name: s.name,
+        algoDil: algoDil,
+        algoDilDf: algoDilDf,
+        algoCv: algoPick && algoPick.cv!=null ? algoPick.cv : null,
+        algoConc: algoPick && algoPick.conc!=null ? algoPick.conc : null,
+        analystDil: analystDil,
+        analystDilDf: analystDilDf,
+        analystCv: analystPick && analystPick.cv!=null ? analystPick.cv : null,
+        analystConc: analystPick && analystPick.conc!=null ? analystPick.conc : null,
+        recovery: rec,
+        disagrees: disagrees,
+        // hasOverride: did the analyst explicitly click a radio button (vs. accepting algorithm)?
+        // picks[plate-sample] is set only on explicit click.
+        hasOverride: !!picks[pi+"-"+si]
+      };
+    });});
+  };
+  // SST helpers — bridge between cfg (JSON-stringified dict) and the SystemSuitabilityCard component.
+  // cfg.sstExpected is "{}" by default; values are stored as strings of the expected concentration in BASE unit (cfg.unit).
+  // The card receives a parsed object for read access and a setter that writes individual keys back.
+  var sstExpectedDict = (function(){
+    try {
+      var parsed = JSON.parse(cfg.sstExpected || "{}");
+      return (parsed && typeof parsed === "object") ? parsed : {};
+    } catch(_){ return {}; }
+  })();
+  var setSSTExpected = function(key, value){
+    var next = {};
+    for (var k in sstExpectedDict) next[k] = sstExpectedDict[k];
+    if (value === "" || value == null) {
+      delete next[key];
+    } else {
+      next[key] = String(value);
+    }
+    u("sstExpected", JSON.stringify(next));
+  };
+  // sstFlags: manual SST designation. Lets the analyst pick from the existing sample list and tag a sample
+  // as SST without renaming it. Stored as JSON string {key: true} where key="plateIdx-sampleIdx".
+  var sstFlagsDict = (function(){
+    try {
+      var parsed = JSON.parse(cfg.sstFlags || "{}");
+      return (parsed && typeof parsed === "object") ? parsed : {};
+    } catch(_){ return {}; }
+  })();
+  var toggleSSTFlag = function(key, on){
+    var next = {};
+    for (var k in sstFlagsDict) next[k] = sstFlagsDict[k];
+    if (on) next[key] = true;
+    else delete next[key];
+    u("sstFlags", JSON.stringify(next));
+  };
+  // analystPickFor: returns the analyst's reported pick for the given (plate, sample) in BASE unit.
+  // Used by the SST card so it can pull the "observed" value with all manual overrides honored.
+  var analystPickFor = function(pi, si){
+    var pick = gsc(pi, si);
+    if (!pick) return null;
+    return { conc: pick.conc, dil: pick.dil, cv: pick.cv };
+  };
   // Run-level QC summary: summarize recovery across all spike sets
   var runQC=function(){
     if(cfg.spikeUsed!=="yes") return null;
@@ -2997,7 +7889,53 @@ export default function App() {
       status:allPass?"pass":(allFail?"fail":"mixed")
     };
   };
+  var changeFitAndReanalyze = function(newFm){
+    if (newFm === cfg.fm) return;
+    u("fm", newFm);
+    setPendingReanalyze(true);
+  };
   var confirmAnalyze=function(){
+    setAnalyzeError(""); // clear any previous error
+    // Autosampler-mode validation: source of truth is cfg.msInjections, not pl[]
+    if (cfg.layout === "autosampler") {
+      var injections = (function(){try{var x=JSON.parse(cfg.msInjections||"[]");return Array.isArray(x)?x:[];}catch(_){return[];}})();
+      // Need at least 2 Standard rows with valid level numbers AND at least one numeric rep each
+      var stdLevelsWithData = {};
+      var anySampleHasData = false;
+      injections.forEach(function(r){
+        var hasRep = (r.reps||[]).some(function(v){return isFinite(parseFloat(v)) && parseFloat(v) > 0;});
+        if (!hasRep) return;
+        if (r.sampleType === "Standard") {
+          var lv = parseInt(r.levelOrDilution);
+          if (isFinite(lv) && lv >= 1) stdLevelsWithData[lv] = true;
+        } else if (r.sampleType === "Unknown" || r.sampleType === "SST") {
+          anySampleHasData = true;
+        }
+      });
+      var nStdLevelsWithData = Object.keys(stdLevelsWithData).length;
+      if (nStdLevelsWithData < 2) {
+        setAnalyzeError("Need data in at least 2 Standard rows (with level numbers) before analyzing. Paste your peak-area values into the Data Entry table above.");
+        return;
+      }
+      // Also confirm the standard curve definition is set (top conc + DF, or discrete list)
+      var hasStdDef = false;
+      if (cfg.asStdMode === "discrete") {
+        var lvls = (function(){try{var x=JSON.parse(cfg.asDiscreteLevels||"[]");return Array.isArray(x)?x:[];}catch(_){return[];}})();
+        var validCount = lvls.filter(function(v){return isFinite(parseFloat(v)) && parseFloat(v) > 0;}).length;
+        if (validCount >= 2) hasStdDef = true;
+      } else {
+        var topC = parseFloat(cfg.asTopConc);
+        var sdf = pDil(cfg.asSerialDF);
+        if (isFinite(topC) && topC > 0 && isFinite(sdf) && sdf > 0 && sdf < 1) hasStdDef = true;
+      }
+      if (!hasStdDef) {
+        setAnalyzeError("Set the Standard curve definition in General Information first — top concentration + serial dilution factor (or discrete level list).");
+        return;
+      }
+      analyze();
+      return;
+    }
+    // Plate-mode validation (original logic below)
     // Pre-flight: check that at least one plate has any numeric data
     var hasAnyData = false;
     for(var p=0; p<np; p++){
@@ -3024,6 +7962,8 @@ export default function App() {
     if(isNaN(ds)) bad.push("standard remaining-rows dilution");
     if(isNaN(xf1)) bad.push("sample first-row dilution");
     if(isNaN(xs)) bad.push("sample remaining-rows dilution");
+    if(cfg.stdPredil && isNaN(pDil(cfg.stdPredil))) bad.push("standard pre-plate dilution");
+    if(cfg.smpPredil && isNaN(pDil(cfg.smpPredil))) bad.push("sample pre-plate dilution");
     if(bad.length){
       window.alert("Cannot analyze: please fix these field(s) — "+bad.join(", ")+".\n\nDilution factors should be entered as '1/2' (for 1:2 dilution), '1/10', etc.");
       return;
@@ -3032,21 +7972,66 @@ export default function App() {
     // Run analysis and navigate to Analysis tab.
     analyze();
   };
+  // Reanalyze trigger: when changeFitAndReanalyze sets pendingReanalyze=true, this effect fires
+  // on the next render (after cfg.fm has propagated to the new value), runs confirmAnalyze with
+  // the fresh closure that sees the new cfg, and clears the flag. Avoids the stale-closure issue
+  // that prevented the in-canvas fit picker from triggering a re-analysis.
+  useEffect(function(){
+    if (pendingReanalyze) {
+      setPendingReanalyze(false);
+      confirmAnalyze();
+    }
+  }, [pendingReanalyze, cfg.fm]);
 
   if(!on) return (
     <div style={{padding:"1.25rem 0 2.5rem",maxWidth:1060}}>
       <div style={{background:"linear-gradient(180deg,#f4f9fd,#eef5fb)",border:"1px solid "+BORDER,borderRadius:20,marginBottom:"1rem",boxShadow:SHADOW,overflow:"hidden"}}>
-        <PageHeader instructor={instructor} setInstructor={setInstructor} />
-        <div style={{padding:"6px 16px 14px",fontSize:12,color:"#6f7fa0",fontStyle:"italic"}}>Plate-based assay analysis and quantitation</div>
+        <PageHeader instructor={instructor} setInstructor={setInstructor} large={true} />
+        <div style={{padding:"6px 20px 16px",fontSize:14,color:"#5a6984",fontStyle:"italic"}}>Curve, qualify, validate.</div>
       </div>
       <div style={{background:"linear-gradient(180deg,#ffffff,#fbfdff)",borderRadius:24,border:"1px solid "+BORDER,padding:"1.5rem",boxShadow:"0 18px 44px rgba(11,42,111,0.08)",marginBottom:"1.25rem"}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,marginBottom:"1rem",flexWrap:"wrap"}}>
           <div>
             <div style={{fontSize:21,fontWeight:800,color:"#18233f",marginBottom:5}}>Assay setup</div>
-            <div style={{fontSize:13,color:"#6f7fa0"}}>Choose plates and replicate layout before opening the workspace.</div>
+            <div style={{fontSize:13,color:"#6f7fa0"}}>{cfg.layout==="autosampler"?"Vial-based assay (LC-MS, intact mass, LC quant).":"Plate-based assay — pick plate count and replicate layout."}</div>
           </div>
         </div>
-        <div style={{display:"grid",gridTemplateColumns:"1.25fr 1fr",gap:"1rem"}}>
+        {/* ── Step 1: Assay mode toggle ──
+            Top-level Plate vs Vials picker. Drives everything else on the page. Switching modes
+            also nudges cfg.fm to a sensible default (loglog for vials, linear for plates) so the
+            user doesn't get stuck with a stale fit choice from the other mode.
+        */}
+        <div style={{background:"linear-gradient(180deg,#fbfeff,#f4fbff)",border:"1px solid #e5edf7",borderRadius:20,padding:"1.2rem 1.25rem",boxShadow:"inset 0 1px 0 rgba(255,255,255,0.8)",marginBottom:"1rem"}}>
+          <label style={{display:"block",fontSize:13,fontWeight:800,marginBottom:10,color:"#18233f"}}>What are you doing today?</label>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12}}>
+            {[
+              {id:"plate",   title:"Plate assay",  desc:"96-well plate, microplate reader. Classical or transposed orientation, multi-plate support.", isSel: cfg.layout!=="autosampler", color:TEAL},
+              {id:"vials",   title:"Vials / autosampler",  desc:"LC-MS, intact mass quant, or LC peak-area quant. Each row in your data is one injection.", isSel: cfg.layout==="autosampler", color:TEAL},
+              {id:"tools",   title:"Tools (no data needed)", desc:"Plan a validation experiment, calculate spike volumes, design a dilution series, or convert units — without setting up an assay.", isSel:false, color:"#6337b9"}
+            ].map(function(opt){
+              return <button key={opt.id} onClick={function(){
+                if (opt.id === "vials") {
+                  u("layout","autosampler");
+                  if (cfg.fm !== "linear" && cfg.fm !== "loglog" && cfg.fm !== "auto" && cfg.fm !== "4pl" && cfg.fm !== "5pl") u("fm","linear");
+                  else if (cfg.fm === "loglog" || cfg.fm === "auto") u("fm","linear");
+                } else if (opt.id === "tools") {
+                  // Skip assay setup. Jump to Tools tab in planning mode.
+                  setOn(true); setTab(4); setPlanningMode(true);
+                } else {
+                  if (cfg.layout === "autosampler") u("layout","classical");
+                  if (cfg.fm === "loglog" || cfg.fm === "auto") u("fm", cfg.at === "elisa" ? "4pl" : "linear");
+                }
+              }} style={{textAlign:"left",cursor:"pointer",border:"2px solid "+(opt.isSel?opt.color:"#d8dfeb"),background:opt.isSel?(opt.color===TEAL?"#eefcfd":"#f5f0ff"):"#fff",borderRadius:14,padding:"14px 16px",boxShadow:opt.isSel?"0 8px 20px rgba(19,156,182,0.10)":"none",transition:"all 0.15s"}}>
+                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
+                  <span style={{fontSize:14,fontWeight:800,color:opt.isSel?NAVY:"#18233f"}}>{opt.title}</span>
+                  {opt.isSel && <span style={{fontSize:10,color:opt.color,fontWeight:700,padding:"2px 7px",background:"#fff",borderRadius:10,border:"1px solid "+opt.color}}>SELECTED</span>}
+                </div>
+                <div style={{fontSize:12,color:"#5a6984",lineHeight:1.5}}>{opt.desc}</div>
+              </button>;
+            })}
+          </div>
+        </div>
+        {cfg.layout!=="autosampler" && <div style={{display:"grid",gridTemplateColumns:"1.25fr 1fr",gap:"1rem"}}>
           <div style={{background:"linear-gradient(180deg,#fbfeff,#f4fbff)",border:"1px solid #e5edf7",borderRadius:20,padding:"1.2rem 1.25rem",boxShadow:"inset 0 1px 0 rgba(255,255,255,0.8)"}}>
             <label style={{display:"block",fontSize:13,fontWeight:800,marginBottom:12,color:"#18233f"}}>How many plates?</label>
             <div style={{display:"flex",gap:12,flexWrap:"wrap",alignItems:"center",marginBottom:12}}>
@@ -3058,7 +8043,49 @@ export default function App() {
             </div>
           </div>
           <div style={{background:"linear-gradient(180deg,#fbfeff,#f4fbff)",border:"1px solid #e5edf7",borderRadius:20,padding:"1.2rem 1.25rem",boxShadow:"inset 0 1px 0 rgba(255,255,255,0.8)"}}>
-            {cfg.layout==="transposed" ? <div>
+            {cfg.layout==="transposed_mixed" ? (function(){
+              // Standard always takes first cfg.sr rows of LEFT half. Pattern then resets per half.
+              var srN = Math.max(1, parseInt(cfg.sr)||3);
+              var mixParsed = parseRepMix(cfg.xrMix || "3,3,2");
+              var pattern = mixParsed.valid ? mixParsed.parts : [];
+              // Simulate per-half allocation
+              var allocate = function(rowsAvail){
+                var out = []; var idx = 0; var rem = rowsAvail;
+                while (rem > 0 && out.length < 50 && pattern.length > 0) {
+                  var n = pattern[idx % pattern.length];
+                  if (n > rem) { out.push({n:rem, partial:true}); rem = 0; }
+                  else { out.push({n:n, partial:false}); rem -= n; }
+                  idx++;
+                }
+                return out;
+              };
+              var leftSamples = mixParsed.valid ? allocate(8 - srN) : [];
+              var rightSamples = mixParsed.valid ? allocate(8) : [];
+              var totalSamples = leftSamples.length + rightSamples.length;
+              var anyPartial = leftSamples.some(function(s){return s.partial;}) || rightSamples.some(function(s){return s.partial;});
+              return <div>
+                <label style={{display:"block",fontSize:13,fontWeight:800,marginBottom:7,color:"#18233f"}}>Replicate setup</label>
+                <div style={{fontSize:11,color:"#6f7fa0",marginBottom:10,lineHeight:1.5}}>The standard curve takes the first row(s) of the left half. Sample reps fill the rest of the left half, then the rep pattern restarts on the right half. Samples never span halves.</div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0.9rem",marginBottom:10}}>
+                  <div>
+                    <label style={{display:"block",fontSize:11,fontWeight:700,marginBottom:7,color:"#18233f"}}>Standard replicates</label>
+                    <select value={cfg.sr} onChange={function(e){u("sr",e.target.value);}} style={{width:"100%",padding:"10px 11px",borderRadius:12,border:"1px solid #d8dfeb",fontSize:14,color:"#1d1d1f",background:"#fff"}}>
+                      <option value="1">Singlicate (1 half-row)</option>
+                      <option value="2">Duplicate (2 half-rows)</option>
+                      <option value="3">Triplicate (3 half-rows)</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label style={{display:"block",fontSize:11,fontWeight:700,marginBottom:7,color:"#18233f"}}>Rep mix</label>
+                    <input type="text" value={cfg.xrMix} onChange={function(e){u("xrMix",e.target.value);}} placeholder="e.g. 3,3,2" style={{width:"100%",padding:"10px 11px",borderRadius:12,border:"1px solid "+(mixParsed.valid?"#d8dfeb":"#e8b8b8"),fontSize:14,color:"#1d1d1f",background:mixParsed.valid?"#fff":"#fdf3f3",fontFamily:"monospace"}} />
+                  </div>
+                </div>
+                <div style={{fontSize:11,color:"#5a6984",padding:"7px 10px",background:mixParsed.valid?"#f7f1ff":"#fdf3f3",borderRadius:8,border:"1px solid "+(mixParsed.valid?"#e2d7fb":"#f5b7b1"),lineHeight:1.5}}>
+                  {!mixParsed.valid ? <span><strong style={{color:"#a02c1c"}}>Invalid:</strong> {mixParsed.error}. Use a comma-separated list of positive integers.</span>
+                  : <span><strong>This setup:</strong> Standard takes {srN} half-row{srN===1?"":"s"} (top of left half). Then {totalSamples} sample{totalSamples===1?"":"s"}: left half = [{leftSamples.map(function(s){return s.n+(s.partial?"*":"");}).join(", ") || "—"}], right half = [{rightSamples.map(function(s){return s.n+(s.partial?"*":"");}).join(", ") || "—"}].{anyPartial && <span style={{color:"#a02c1c"}}> *Partial — pattern didn't fit cleanly.</span>}</span>}
+                </div>
+              </div>;
+            })() : cfg.layout==="transposed" ? <div>
               <label style={{display:"block",fontSize:13,fontWeight:800,marginBottom:7,color:"#18233f"}}>Replicate setup</label>
               <div style={{fontSize:11,color:"#6f7fa0",marginBottom:10,lineHeight:1.5}}>The plate is two side-by-side mini-plates (left half and right half). Each replicate takes one half-row. Replicates of the same analyte stack vertically within a half — duplicate = 2 rows, triplicate = 3 rows.</div>
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0.9rem"}}>
@@ -3098,15 +8125,71 @@ export default function App() {
               <div><label style={{display:"block",fontSize:11,fontWeight:700,marginBottom:7,color:"#18233f"}}>Sample replicates</label><select value={cfg.xr} onChange={function(e){u("xr",e.target.value);}} style={{width:"100%",padding:"10px 11px",borderRadius:12,border:"1px solid #d8dfeb",fontSize:14,color:"#1d1d1f",background:"#fff"}}><option value="1">Singlicate</option><option value="2">Duplicate</option><option value="3">Triplicate</option></select></div>
             </div>}
           </div>
-        </div>
-        <div style={{marginTop:"1.25rem",background:"linear-gradient(180deg,#fbfeff,#f4fbff)",border:"1px solid #e5edf7",borderRadius:20,padding:"1.2rem 1.25rem",boxShadow:"inset 0 1px 0 rgba(255,255,255,0.8)"}}>
-          <label style={{display:"block",fontSize:13,fontWeight:800,marginBottom:4,color:"#18233f"}}>Plate layout</label>
-          <div style={{fontSize:12,color:"#6f7fa0",marginBottom:14}}>Pick the orientation that matches how you load your plate. The math is the same; only the wells map differently.</div>
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
+        </div>}
+        {cfg.layout==="autosampler" && <div style={{display:"grid",gridTemplateColumns:"1.25fr 1fr",gap:"1rem"}}>
+          {/* Left panel: sample count with chunky number buttons + override (mirrors "How many plates?") */}
+          <div style={{background:"linear-gradient(180deg,#fbfeff,#f4fbff)",border:"1px solid #e5edf7",borderRadius:20,padding:"1.2rem 1.25rem",boxShadow:"inset 0 1px 0 rgba(255,255,255,0.8)"}}>
+            <label style={{display:"block",fontSize:13,fontWeight:800,marginBottom:12,color:"#18233f"}}>How many samples?</label>
+            <div style={{display:"flex",gap:12,flexWrap:"wrap",alignItems:"center",marginBottom:12}}>
+              {[1,2,3,4,5].map(function(n){var sel=String(n)===cfg.asNSamples;return <button key={n} onClick={function(){u("asNSamples",String(n));}} style={{width:58,height:58,borderRadius:16,border:"1.5px solid "+(sel?TEAL:"#d8dfeb"),background:sel?"#eefcfd":"#fff",color:sel?NAVY:"#1d1d1f",fontSize:21,fontWeight:700,cursor:"pointer",boxShadow:sel?"0 8px 20px rgba(19,156,182,0.10)":"none"}}>{n}</button>;})}
+            </div>
+            <div style={{display:"flex",alignItems:"center",gap:10}}>
+              <span style={{fontSize:12,color:"#6f7fa0"}}>Use a different sample count:</span>
+              <input type="number" min="1" max="50" value={cfg.asNSamples} onChange={function(e){u("asNSamples",e.target.value);}} style={{width:84,padding:"10px 12px",borderRadius:12,border:"1px solid #d8dfeb",fontSize:14,color:"#1d1d1f",background:"#fff"}} />
+            </div>
+          </div>
+          {/* Right panel: replicate cards + dilution-level cards in a 2x2 grid */}
+          <div style={{background:"linear-gradient(180deg,#fbfeff,#f4fbff)",border:"1px solid #e5edf7",borderRadius:20,padding:"1.2rem 1.25rem",boxShadow:"inset 0 1px 0 rgba(255,255,255,0.8)"}}>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0.9rem"}}>
+              <div>
+                <label style={{display:"block",fontSize:11,fontWeight:700,marginBottom:7,color:"#18233f"}}>Standard replicates</label>
+                <select value={cfg.sr} onChange={function(e){u("sr",e.target.value);}} style={{width:"100%",padding:"10px 11px",borderRadius:12,border:"1px solid #d8dfeb",fontSize:14,color:"#1d1d1f",background:"#fff"}}>
+                  <option value="1">Singlicate</option>
+                  <option value="2">Duplicate</option>
+                  <option value="3">Triplicate</option>
+                </select>
+              </div>
+              <div>
+                <label style={{display:"block",fontSize:11,fontWeight:700,marginBottom:7,color:"#18233f"}}>Sample replicates</label>
+                <select value={cfg.xr} onChange={function(e){u("xr",e.target.value);}} style={{width:"100%",padding:"10px 11px",borderRadius:12,border:"1px solid #d8dfeb",fontSize:14,color:"#1d1d1f",background:"#fff"}}>
+                  <option value="1">Singlicate</option>
+                  <option value="2">Duplicate</option>
+                  <option value="3">Triplicate</option>
+                </select>
+              </div>
+              <div>
+                <label style={{display:"block",fontSize:11,fontWeight:700,marginBottom:7,color:"#18233f"}}>Standard dilution levels</label>
+                <input type="number" min="2" max="20" value={cfg.asNStdLevels||"6"} onChange={function(e){u("asNStdLevels",e.target.value);}} style={{width:"100%",boxSizing:"border-box",padding:"10px 11px",borderRadius:12,border:"1px solid #d8dfeb",fontSize:14,color:"#1d1d1f",background:"#fff"}} />
+              </div>
+              <div>
+                <label style={{display:"block",fontSize:11,fontWeight:700,marginBottom:7,color:"#18233f"}}>Sample dilution levels</label>
+                <input type="number" min="1" max="12" value={cfg.asNDilutions||"3"} onChange={function(e){u("asNDilutions",e.target.value);}} style={{width:"100%",boxSizing:"border-box",padding:"10px 11px",borderRadius:12,border:"1px solid #d8dfeb",fontSize:14,color:"#1d1d1f",background:"#fff"}} />
+              </div>
+            </div>
+            <div style={{fontSize:11,color:"#5a6984",marginTop:10,padding:"7px 10px",background:"#eefcfd",borderRadius:8,border:"1px solid #c9eaef",lineHeight:1.5}}>
+              <strong>This setup:</strong> {(parseInt(cfg.asNStdLevels)||6)} standard level{(parseInt(cfg.asNStdLevels)||6)===1?"":"s"} × {parseInt(cfg.sr)||3} rep{(parseInt(cfg.sr)||3)===1?"":"s"}, plus {(parseInt(cfg.asNSamples)||3)} sample{(parseInt(cfg.asNSamples)||3)===1?"":"s"} × {parseInt(cfg.asNDilutions)||3} dilution{(parseInt(cfg.asNDilutions)||3)===1?"":"s"} × {parseInt(cfg.xr)||3} rep{(parseInt(cfg.xr)||3)===1?"":"s"}. The data-entry table will be pre-seeded with these rows when you continue.
+            </div>
+          </div>
+        </div>}
+        {cfg.layout!=="autosampler" && <div style={{marginTop:"1.25rem",background:"linear-gradient(180deg,#fbfeff,#f4fbff)",border:"1px solid #e5edf7",borderRadius:20,padding:"1.2rem 1.25rem",boxShadow:"inset 0 1px 0 rgba(255,255,255,0.8)"}}>
+          <label style={{display:"block",fontSize:13,fontWeight:800,marginBottom:4,color:"#18233f"}}>Plate orientation</label>
+          <div style={{fontSize:12,color:"#6f7fa0",marginBottom:14}}>Pick the orientation that matches how you loaded the plate. The math is the same; only the wells map differently.</div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:14}}>
             {(function(){
               var renderOpt=function(id, title, blurb, svg){
                 var sel = cfg.layout===id;
-                return <button key={id} onClick={function(){u("layout",id);}} style={{textAlign:"left",cursor:"pointer",border:"2px solid "+(sel?TEAL:"#d8dfeb"),background:sel?"#eefcfd":"#fff",borderRadius:14,padding:"12px 14px",boxShadow:sel?"0 8px 20px rgba(19,156,182,0.10)":"none",transition:"all 0.15s"}}>
+                return <button key={id} onClick={function(){
+                  u("layout",id);
+                  // Side-effect: default to linear when switching modes (unless ELISA → 4PL).
+                  // "auto" remains an opt-in choice via the in-canvas fit picker.
+                  if (id === "autosampler" && cfg.fm !== "linear" && cfg.fm !== "loglog" && cfg.fm !== "auto" && cfg.fm !== "4pl" && cfg.fm !== "5pl") {
+                    u("fm", "linear");
+                  } else if (id === "autosampler" && (cfg.fm === "loglog" || cfg.fm === "auto")) {
+                    u("fm", "linear");
+                  } else if (id !== "autosampler" && (cfg.fm === "loglog" || cfg.fm === "auto")) {
+                    u("fm", cfg.at === "elisa" ? "4pl" : "linear");
+                  }
+                }} style={{textAlign:"left",cursor:"pointer",border:"2px solid "+(sel?TEAL:"#d8dfeb"),background:sel?"#eefcfd":"#fff",borderRadius:14,padding:"12px 14px",boxShadow:sel?"0 8px 20px rgba(19,156,182,0.10)":"none",transition:"all 0.15s"}}>
                   <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
                     <span style={{fontSize:14,fontWeight:800,color:sel?NAVY:"#18233f"}}>{title}</span>
                     {sel && <span style={{fontSize:10,color:TEAL,fontWeight:700,padding:"2px 7px",background:"#fff",borderRadius:10,border:"1px solid "+TEAL}}>SELECTED</span>}
@@ -3299,21 +8382,133 @@ export default function App() {
                 }
                 return wellsSvg({mode:"transposed", cellFill:cellFill, sideLabels:sideLabels});
               })();
+
+              // === TRANSPOSED MIXED-REP GRAPHIC (data-driven from cfg.xrMix; standard always present, pattern resets per half) ===
+              var transposedMixedSvg = (function(){
+                var srT = Math.max(1, parseInt(cfg.sr)||3);
+                var mixParsed = parseRepMix(cfg.xrMix || "3,3,2");
+                var pattern = mixParsed.valid ? mixParsed.parts : [1];
+                var slotOwner = {};
+                // LEFT HALF
+                for (var rL=0; rL<srT && rL<8; rL++) slotOwner[rL+"-0"] = {type:"std", colors:stdColor, name:"Std"};
+                var sIdxLeft = 0;
+                var patIdxL = 0;
+                var rowL = srT;
+                while (rowL < 8) {
+                  var n = pattern[patIdxL % pattern.length];
+                  var rowsLeft = 8 - rowL;
+                  if (n > rowsLeft) n = rowsLeft;
+                  var col = sampleColors[sIdxLeft % sampleColors.length];
+                  for (var k=0; k<n; k++) slotOwner[(rowL+k)+"-0"] = {type:"smp", sIdx:sIdxLeft, colors:col, name:"Sample "+(sIdxLeft+1)};
+                  rowL += n; sIdxLeft++; patIdxL++;
+                }
+                // RIGHT HALF — pattern restarts, sample numbering continues from where left half stopped
+                var sIdxRight = sIdxLeft;
+                var patIdxR = 0;
+                var rowR = 0;
+                while (rowR < 8) {
+                  var n2 = pattern[patIdxR % pattern.length];
+                  var rowsLeftR = 8 - rowR;
+                  if (n2 > rowsLeftR) n2 = rowsLeftR;
+                  var col2 = sampleColors[sIdxRight % sampleColors.length];
+                  for (var k2=0; k2<n2; k2++) slotOwner[(rowR+k2)+"-1"] = {type:"smp", sIdx:sIdxRight, colors:col2, name:"Sample "+(sIdxRight+1)};
+                  rowR += n2; sIdxRight++; patIdxR++;
+                }
+                var cellFill = function(r,c){
+                  var isBlank = c===5 || c===11;
+                  if(isBlank) return {fill:"#c9ced8", opacity:0.5};
+                  var halfIdx = c<6 ? 0 : 1;
+                  var owner = slotOwner[r+"-"+halfIdx];
+                  if(!owner) return {fill:"#e8e8eb", opacity:0.3};
+                  var dilIdx = c<5 ? c : c-6;
+                  var op = 0.92 - dilIdx*0.16;
+                  return {fill:owner.colors.fill, opacity:Math.max(0.15, op)};
+                };
+                var sideLabels = [];
+                for(var r=0;r<8;r++){
+                  var ownerL = slotOwner[r+"-0"];
+                  var ownerR = slotOwner[r+"-1"];
+                  if(ownerL && ownerR && ownerL.name===ownerR.name){
+                    sideLabels.push({row:r, text:ownerL.name, color:ownerL.colors.text, bg:ownerL.colors.bg});
+                  } else if(ownerL || ownerR){
+                    var L = ownerL ? {text:ownerL.name, color:ownerL.colors.text, bg:ownerL.colors.bg}
+                                   : {text:"—", color:"#aeaeb2", bg:"#f4f4f6"};
+                    var R = ownerR ? {text:ownerR.name, color:ownerR.colors.text, bg:ownerR.colors.bg}
+                                   : {text:"—", color:"#aeaeb2", bg:"#f4f4f6"};
+                    sideLabels.push({row:r, split:{left:L, right:R}});
+                  } else {
+                    sideLabels.push({row:r, text:"unused", color:"#aeaeb2", bg:"#f4f4f6"});
+                  }
+                }
+                return wellsSvg({mode:"transposed", cellFill:cellFill, sideLabels:sideLabels});
+              })();
+              // Vial-rack illustration for autosampler option. Same dimensions as the plate SVGs so visual weight balances.
+              // Drawn as a small grid of circles representing vials in a tray (e.g., 4 rows × 6 cols = 24 vials).
+              var autosamplerSvg = (function(){
+                var rows = 4, cols = 6;
+                var trayW = 220, trayH = 120;
+                var pad = 16;
+                var vialR = 7;
+                var stepX = (trayW - 2*pad) / (cols - 1);
+                var stepY = (trayH - 2*pad) / (rows - 1);
+                var vials = [];
+                for(var r=0;r<rows;r++){
+                  for(var c=0;c<cols;c++){
+                    var idx = r*cols + c;
+                    // Color a few vials to suggest standards (teal) and SST (purple) and samples (amber).
+                    var fill = "#dde5f0", stroke = "#aebcd0";
+                    if(c===0){ fill="#cdf2f8"; stroke="#139cb6"; }       // first column: standards
+                    else if(idx===8 || idx===15){ fill="#f0e3ff"; stroke="#6337b9"; } // SSTs
+                    else if(c<5){ fill="#ffe7c7"; stroke="#bf7a1a"; }                 // samples
+                    vials.push({cx: pad+c*stepX, cy: pad+r*stepY, fill:fill, stroke:stroke});
+                  }
+                }
+                return <svg viewBox={"0 0 "+trayW+" "+trayH} style={{width:"100%",height:"auto",maxWidth:trayW,display:"block"}}>
+                  <rect x="2" y="2" width={trayW-4} height={trayH-4} rx="10" ry="10" fill="#f9fbfd" stroke="#d8dfeb" strokeWidth="1" />
+                  {vials.map(function(v,i){return <circle key={i} cx={v.cx} cy={v.cy} r={vialR} fill={v.fill} stroke={v.stroke} strokeWidth="1.2" />;})}
+                </svg>;
+              })();
               return [
                 renderOpt("classical","Classical (column-wise)","Each column is one sample (or the standard). Each row is a dilution step. Bottom row is the blank. The default for hand-loaded plates and most ELISA workflows.",classicalSvg),
-                renderOpt("transposed","Transposed (Andrew+ / row-wise)","Each row is one sample. Each column is a dilution step. The middle and last columns are blanks. Up to 16 sample slots (8 rows × 2 halves) — pair both halves for replicates, or run singlicates and fit twice as many samples.",transposedSvg)
+                renderOpt("transposed","Transposed (row-wise, uniform reps)","Each row is one sample. Each column is a dilution step. The middle and last columns are blanks. Up to 16 sample slots — pair both halves for replicates, or run singlicates and fit twice as many samples.",transposedSvg),
+                renderOpt("transposed_mixed","Transposed (row-wise, mixed reps)","Same row-wise layout as Transposed, but each sample can have a different replicate count. Useful when you need one sample with 3 reps next to two more with 2 reps each, etc. Pattern is applied symmetrically to both halves.",transposedMixedSvg)
               ];
             })()}
           </div>
-        </div>
+        </div>}
         <div style={{display:"flex",gap:12,marginTop:"1.35rem",alignItems:"center",flexWrap:"wrap"}}>
-          <button onClick={function(){setOn(true);setTab(0);setPlanningMode(false);}} style={{background:"linear-gradient(135deg,"+TEAL_DARK+","+NAVY+")",color:"#fff",border:"none",padding:"11px 22px",borderRadius:12,fontSize:13,fontWeight:800,cursor:"pointer",boxShadow:"0 10px 22px rgba(11,42,111,0.12)"}}>Continue to workspace</button>
+          <button onClick={function(){
+            // In autosampler mode, if the data-entry table is empty, pre-seed it with rows based on
+            // the landing-page settings: cfg.asNStdLevels Standard rows + cfg.asNSamples × cfg.asNDilutions Unknown rows.
+            // The analyst can edit / add / delete from there.
+            if (cfg.layout === "autosampler") {
+              var existing = (function(){try{var x=JSON.parse(cfg.msInjections||"[]");return Array.isArray(x)?x:[];}catch(_){return[];}})();
+              if (existing.length === 0) {
+                var nStdLevels = parseInt(cfg.asNStdLevels) || 6;
+                var nSamples = parseInt(cfg.asNSamples) || 3;
+                var nSampleDils = parseInt(cfg.asNDilutions) || 3;
+                var nStdReps = parseInt(cfg.sr) || 3;
+                var nSmpReps = parseInt(cfg.xr) || 3;
+                var nMaxReps = Math.max(nStdReps, nSmpReps);
+                var emptyReps = function(n){var a = []; for (var i=0;i<n;i++) a.push(""); return a;};
+                var seeded = [];
+                // Standard rows: one per level. Names left empty so user fills them in (or pastes).
+                for (var lvl = 1; lvl <= nStdLevels; lvl++) {
+                  seeded.push({sampleType: "Standard", sampleName: "", levelOrDilution: String(lvl), reps: emptyReps(nMaxReps)});
+                }
+                // Sample rows: nSampleDils per sample, nSamples samples. Names left empty.
+                for (var si = 1; si <= nSamples; si++) {
+                  for (var di = 0; di < nSampleDils; di++) {
+                    seeded.push({sampleType: "Unknown", sampleName: "", levelOrDilution: "", reps: emptyReps(nMaxReps)});
+                  }
+                }
+                u("msInjections", JSON.stringify(seeded));
+              }
+            }
+            setOn(true);setTab(0);setPlanningMode(false);
+          }} style={{background:"linear-gradient(135deg,"+TEAL_DARK+","+NAVY+")",color:"#fff",border:"none",padding:"11px 22px",borderRadius:12,fontSize:13,fontWeight:800,cursor:"pointer",boxShadow:"0 10px 22px rgba(11,42,111,0.12)"}}>Continue to workspace</button>
           <button onClick={demo} style={{background:"transparent",border:"1px solid #d8dfeb",padding:"11px 18px",borderRadius:12,fontSize:12,color:"#6e6e73",cursor:"pointer",fontWeight:600}}>Load demo</button>
           <span style={{fontSize:11,color:"#6f7fa0"}}>The app will wait here until setup is confirmed.</span>
-        </div>
-        <div style={{marginTop:"1.1rem",paddingTop:"0.9rem",borderTop:"1px dashed #e0eaf4",display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
-          <span style={{fontSize:11,color:"#8e9bb5"}}>Planning an experiment?</span>
-          <button onClick={function(){setOn(true);setTab(4);setPlanningMode(true);}} style={{background:"transparent",border:"none",fontSize:11,color:"#30437a",cursor:"pointer",fontWeight:600,textDecoration:"underline",textDecorationStyle:"dotted",padding:0}}>Open Tools (no plate data required) →</button>
         </div>
       </div>
     </div>
@@ -3322,19 +8517,41 @@ export default function App() {
   return (
     <div style={{padding:"1rem 0",maxWidth:1040}}>
       <div style={{background:"linear-gradient(180deg,#f4f9fd,#eef5fb)",border:"1px solid "+BORDER,borderRadius:20,marginBottom:"1rem",boxShadow:SHADOW,overflow:"hidden"}}>
-        <PageHeader instructor={instructor} setInstructor={setInstructor} />
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,padding:"8px 16px 10px"}}>
-          <div onClick={htc} style={{fontSize:11,color:"#6e6e73",cursor:"default",userSelect:"none"}}>{np} plate{np>1?"s":""} · {unit}{instructor?" · Instructor mode":""}</div>
-          <button onClick={reset} style={{background:"#f7f9fc",border:"1px solid #d8dfeb",padding:"6px 14px",borderRadius:8,fontSize:11,color:"#6e6e73",cursor:"pointer",fontWeight:700}}>Reset</button>
-        </div>
+        <PageHeader instructor={instructor} setInstructor={setInstructor} onReset={reset} onSecretTap={htc} />
       </div>
       <div style={{display:"flex",gap:6,marginBottom:"1.25rem",background:"#eef3f8",borderRadius:14,padding:5,border:"1px solid #e2e9f2"}}>{TABS.map(function(l,i){return <button key={i} onClick={function(){setTab(i);}} style={{flex:1,padding:"9px 14px",fontSize:12,fontWeight:i===tab?700:500,cursor:"pointer",background:i===tab?"#fff":"transparent",color:i===tab?NAVY:"#6e6e73",border:"none",borderRadius:10,boxShadow:i===tab?"0 4px 14px rgba(11,42,111,0.08)":"none"}}>{l}</button>;})}
       {dbg&&<button onClick={function(){setTab(5);}} style={{padding:"9px 14px",fontSize:12,fontWeight:tab===5?700:500,cursor:"pointer",background:tab===5?"#fef3e2":"transparent",color:tab===5?"#a05a00":"#aeaeb2",border:"none",borderRadius:10}}>Debug</button>}</div>
 
       {/* DATA ENTRY */}
       {tab===0&&(<div>
-        <div style={{background:"#edf9fb",borderRadius:14,padding:"12px 16px",marginBottom:"1rem",border:"1px solid #d9eef2"}}><p style={{margin:0,fontSize:13,color:"#0f5c4d"}}>Paste data into the first cell. Analysts can leave the optional sample name list collapsed and work directly from the familiar plate grid.</p></div>
-        {Array.from({length:np},function(_,pi){
+        {cfg.layout!=="autosampler" && <div style={{background:"#edf9fb",borderRadius:14,padding:"12px 16px",marginBottom:"1rem",border:"1px solid #d9eef2"}}><p style={{margin:0,fontSize:13,color:"#0f5c4d"}}>Paste data into the first cell. Analysts can leave the optional sample name list collapsed and work directly from the familiar plate grid.</p></div>}
+        {/* ── Plate tab strip (shown only when np > 1) ── */}
+        {cfg.layout!=="autosampler" && np > 1 && (function(){
+          // hasData[pi] = true if any cell in that plate is non-empty
+          var hasData = Array.from({length:np}, function(_,pi){
+            var d = pl[pi];
+            if(!d) return false;
+            for(var r=0;r<8;r++) for(var c=0;c<12;c++) if(d[r]&&d[r][c]&&d[r][c].trim()) return true;
+            return false;
+          });
+          return <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:8,flexWrap:"wrap"}}>
+            <span style={{fontSize:12,color:"#6e6e73",marginRight:4}}>Plate:</span>
+            {Array.from({length:np},function(_,pi){
+              var active = pi===activePlate;
+              var filled = hasData[pi];
+              return <button key={pi} onClick={function(){setActivePlate(pi);setCollapsedPlate(false);}}
+                style={{padding:"4px 13px",borderRadius:20,border:active?"1.5px solid #0b2a6f":"1.5px solid #d0d8ea",background:active?"#0b2a6f":"transparent",color:active?"#fff":"#5a6984",fontSize:12,fontWeight:active?700:500,cursor:"pointer",display:"flex",alignItems:"center",gap:5}}>
+                {pi+1}
+                <span style={{display:"inline-block",width:6,height:6,borderRadius:"50%",background:filled?(active?"#7ee8c8":"#1d9e75"):"#d0d8ea",flexShrink:0}} title={filled?"has data":"empty"} />
+              </button>;
+            })}
+          </div>;
+        })()}
+
+        {/* ── Single-plate grid: only render the active plate ── */}
+        {cfg.layout!=="autosampler" && Array.from({length:np},function(_,pi){
+          if(pi !== activePlate) return null;  // only show active plate
+
           var isTransposed = layout.axis==="row";
           var dilsPerRep = layout.dilsPerRep || 5;
           var halfWidth = layout.halfWidth || Math.floor(totalCols/2);
@@ -3500,10 +8717,9 @@ export default function App() {
               <button onClick={function(){
                 var hasData = pl[pi] && pl[pi].some(function(row){return row && row.some(function(v){return v && v.trim();});});
                 if(!hasData) return;
-                if(window.confirm("Clear all data from Plate "+(pi+1)+"? This only affects the well values — your experiment setup, sample names, and dilution factors stay the same.")){
-                  setPl(function(p){var n=p.slice();n[pi]=EP();return n;});
-                  setDet(function(p){var n=p.slice();n[pi]=null;return n;});
-                }
+                // No window.confirm — some sandboxed iframes suppress it. Click clears immediately.
+                setPl(function(p){var n=p.slice();n[pi]=EP();return n;});
+                setDet(function(p){var n=p.slice();n[pi]=null;return n;});
               }} style={{background:"#fff",border:"1px solid #d8dfeb",color:"#6e6e73",padding:"4px 10px",borderRadius:8,fontSize:11,fontWeight:600,cursor:"pointer",display:"inline-flex",alignItems:"center",gap:5}} title={"Clear data from Plate "+(pi+1)+" (keeps your setup)"}>
                 <span style={{fontSize:13,lineHeight:1}}>×</span>
                 Clear plate
@@ -3715,86 +8931,778 @@ export default function App() {
             {det[pi] && <p style={{fontSize:11,color:"#aeaeb2",margin:"6px 0 0"}}>{detNote}</p>}
           </div>);
         })}
-        {/* Sample names text input */}
-        <details style={{marginBottom:"1rem",background:SURFACE,borderRadius:14,border:"1px solid "+BORDER,padding:"0.85rem 1rem",boxShadow:"0 6px 18px rgba(11,42,111,0.03)"}}>
-          <summary style={{fontSize:13,fontWeight:700,cursor:"pointer",color:"#30437a"}}>Optional sample names</summary>
+        {/* ── AUTOSAMPLER ENTRY: flat injection-list table (vials), v5bq ─────
+            Like v5bp but:
+              - Type cell is plain text in the row's accent color with a dotted underline; click to change.
+              - Single "+ Add row" button (defaults to Unknown); type changed via the type cell.
+              - Optional sample-names paste textarea (mirrors plate workflow's "Sample labels" details).
+                Names map to Unknown/SST rows in order, skipping Standard/Blank.
+              - White input cells with grey grid lines; standards now teal (matches plate workflow's
+                #d70015 Standard accent text + teal row tint).
+              - Hatched cells for trailing rep columns the row didn't fill (flag visually unused).
+        */}
+        {cfg.layout==="autosampler" && (function(){
+          var rows = (function(){try{var x=JSON.parse(cfg.msInjections||"[]");return Array.isArray(x)?x:[];}catch(_){return[];}})();
+          var setRows = function(next){u("msInjections", JSON.stringify(next));};
+
+          var ensureReps = function(reps, n){
+            var out = (reps || []).slice();
+            while (out.length < n) out.push("");
+            return out;
+          };
+          // Total column count for the rep section = max of standard reps and sample reps from cfg.
+          // Each row's "expected rep count" is determined by its type (Standard → cfg.sr, others → cfg.xr).
+          // Cells past a row's expected count are hatched. So if cfg.sr=3 and cfg.xr=2, the table has
+          // 3 rep columns; Sample/SST/Blank rows get Rep 3 hatched permanently.
+          var nStdReps = parseInt(cfg.sr) || 3; if (nStdReps < 1) nStdReps = 1;
+          var nSmpReps = parseInt(cfg.xr) || 3; if (nSmpReps < 1) nSmpReps = 1;
+          var maxReps = Math.max(nStdReps, nSmpReps, 1);
+
+          // Auto-DF for non-Standard rows (same logic as v5bp)
+          var firstDF  = pDil(cfg.xdf || "1/10");  if (!isFinite(firstDF) || firstDF<=0) firstDF = 0.1;
+          var serialDF = pDil(cfg.xds || "1/2");   if (!isFinite(serialDF) || serialDF<=0) serialDF = 0.5;
+          var sampleSeenCount = {};
+          var rowAutoDF = rows.map(function(r){
+            if (r.sampleType !== "Unknown" && r.sampleType !== "SST") return null;
+            var nm = (r.sampleName||"").trim();
+            if (!nm) return null;
+            var idx = sampleSeenCount[nm] || 0;
+            sampleSeenCount[nm] = idx + 1;
+            return firstDF * Math.pow(serialDF, idx);
+          });
+          var fmtDF = function(df){
+            if (df==null || !isFinite(df) || df<=0) return "";
+            if (df >= 1) return df.toFixed(2)+"×";
+            var n = 1/df;
+            var r2 = Math.abs(n - Math.round(n)) < 0.05 ? Math.round(n) : n.toFixed(1);
+            return "1:"+r2;
+          };
+
+          // Color rotation — shared GC palette (defined at module level, used by plate workflow too)
+          // so vials and plate look identical. Standard always uses GC[0] (teal). SST always uses
+          // GC[8] (violet/purple). Each unique Unknown sample name gets its own GC index by
+          // first-appearance order, starting at GC[1] and skipping GC[0] (standard) and GC[8] (SST).
+          var STD_GC = GC[0];          // teal
+          var SST_GC = GC[8];          // violet
+          var BLANK_GC = {bg:"#f4f4f6", hd:"#dcd9cb", tx:"#444441", cell:"#fafafa"};
+          // Build a list of palette indices available for Unknowns (skip standard's and SST's slots)
+          var UNK_GC_INDICES = [];
+          for (var gci = 1; gci < GC.length; gci++) { if (gci !== 8) UNK_GC_INDICES.push(gci); }
+          var unknownColorMap = {};
+          (function(){
+            var idx = 0;
+            rows.forEach(function(r){
+              if (r.sampleType !== "Unknown") return;
+              var nm = (r.sampleName||"").trim();
+              if (!nm) return;
+              if (!(nm in unknownColorMap)) {
+                unknownColorMap[nm] = UNK_GC_INDICES[idx % UNK_GC_INDICES.length];
+                idx++;
+              }
+            });
+          })();
+          var rowColor = function(r){
+            // Returns an object with: bg (row tint), text (accent text color), hd (header tint, used for hatching darker line)
+            if (r.sampleType === "Standard") return {bg:STD_GC.cell, text:STD_GC.tx, hd:STD_GC.hd};
+            if (r.sampleType === "SST")      return {bg:SST_GC.cell, text:SST_GC.tx, hd:SST_GC.hd};
+            if (r.sampleType === "Blank")    return {bg:BLANK_GC.cell, text:BLANK_GC.tx, hd:BLANK_GC.hd};
+            var nm = (r.sampleName||"").trim();
+            var gcIdx = (nm && nm in unknownColorMap) ? unknownColorMap[nm] : UNK_GC_INDICES[0];
+            var theme = GC[gcIdx];
+            return {bg:theme.cell, text:theme.tx, hd:theme.hd};
+          };
+          // Type-cell text color — matches plate workflow's Standard/Sample label coloring:
+          //   Standard = "#d70015" (the red used for "Standard" word in plate General Info)
+          //   Sample (Unknown/SST) = "#30437a" (the navy used for "Sample" word in plate General Info)
+          //   Blank = gray
+          var typeTextColor = function(r){
+            if (r.sampleType === "Standard") return "#d70015";
+            if (r.sampleType === "Blank")    return "#5F5E5A";
+            return "#30437a";
+          };
+
+          // Helper to read fresh rows from cfg at mutation time (avoids stale closure)
+          var freshRows = function(){
+            try { var x = JSON.parse(cfg.msInjections||"[]"); return Array.isArray(x) ? x : []; }
+            catch(_) { return []; }
+          };
+          // Mutators — all read fresh state to avoid stale-closure issues across rapid edits
+          var addRow = function(){
+            var fr = freshRows();
+            setRows(fr.concat([{sampleName: "", sampleType: "Unknown", levelOrDilution: "", reps: ensureReps([], maxReps)}]));
+          };
+          var rmRow = function(i){
+            var fr = freshRows();
+            var n = fr.slice(); n.splice(i,1);
+            setRows(n);
+          };
+          var setField = function(i, field, value){
+            var fr = freshRows();
+            var n = fr.slice();
+            if (i >= n.length) return;
+            var r = Object.assign({}, n[i]); r[field] = value;
+            n[i] = r;
+            setRows(n);
+          };
+          var setRep = function(i, repIdx, value){
+            var fr = freshRows();
+            var n = fr.slice();
+            if (i >= n.length) return;
+            var r = Object.assign({}, n[i]);
+            r.reps = ensureReps(r.reps, repIdx+1);
+            r.reps[repIdx] = value;
+            n[i] = r;
+            setRows(n);
+          };
+          var clearAll = function(){
+            // Clear ALL user-entered data: sample names AND rep values. Keep the row scaffold:
+            // sampleType (Standard/Unknown/SST/Blank) and levelOrDilution (for Standards).
+            // No confirm dialog — some sandboxed browsers suppress confirm.
+            var fresh = (function(){try{var x=JSON.parse(cfg.msInjections||"[]");return Array.isArray(x)?x:[];}catch(_){return[];}})();
+            if (fresh.length === 0) return;
+            var freshMax = Math.max(parseInt(cfg.sr) || 3, parseInt(cfg.xr) || 3, 1);
+            var n = fresh.map(function(r){
+              return Object.assign({}, r, {
+                sampleName: "",
+                reps: ensureReps([], freshMax)
+              });
+            });
+            setRows(n);
+          };
+
+          // Type changer — when user clicks the type cell, swap to a select. Done with a parallel
+          // state of "edit mode for which row's type" via React state. Since we don't have local
+          // state in this functional block, we use a simple inline approach: render the type as
+          // both a hidden select (always present, click-through-able) and visible text. The native
+          // <select> sits on top transparent so clicks open the dropdown; the rendered text shows
+          // the current value with the dotted underline.
+          var TYPE_OPTIONS = ["Standard", "Unknown", "SST", "Blank"];
+
+          // Inline cell-paste — handles three formats from clipboard:
+          //   (a) Tab-separated worklist with Type col: Type | Name | Level | Rep1 [Rep2 ...]   (4+ cols)
+          //   (b) Tab-separated worklist without Type col: Name | Level | Rep1 [Rep2 ...]      (3+ cols)
+          //   (c) Plain names list (one per line, no tabs) → handled by the dedicated names textarea
+          //
+          // PASTE MAPS ONTO EXISTING ROWS IN ORDER.
+          //   - For row N in clipboard ↔ row N in table (1:1).
+          //   - sampleType is PRESERVED from the existing row (never overwritten by paste)
+          //     UNLESS the clipboard explicitly has a Type column. Rationale: if the user defined
+          //     "5 standards then 9 unknowns" on landing page, the paste should respect that scaffold
+          //     even if the paste's data shape might suggest otherwise.
+          //   - levelOrDilution: take from paste if it's non-empty AND the existing row is a Standard;
+          //     else keep existing (auto-derived for non-Standard).
+          //   - sampleName: always take from paste.
+          //   - reps: always take from paste.
+          //   - If clipboard has MORE rows than the table, append extras with inferred type.
+          //   - If clipboard has FEWER rows, leave trailing existing rows untouched.
+          //
+          // Header row detection: if the first row's cells contain words like "sample"/"name"/"type"/"rep"/"level"/"dilution"
+          // and no numeric cells, treat it as a header and skip.
+          var inlinePaste = function(e){
+            var clip = (e.clipboardData || window.clipboardData);
+            if (!clip) return;
+            var text = clip.getData("text");
+            if (!text) return;
+            // No tab → not a worklist; let normal paste flow into the cell
+            if (text.indexOf("\t") < 0) return;
+            var lines = text.split(/\r?\n/).filter(function(s){return s.trim().length>0;});
+            if (lines.length < 1) return;
+
+            // Header detection
+            var firstParts = lines[0].split(/\t/);
+            var looksHeaderish = firstParts.some(function(p){
+              return /sample|name|type|rep|level|dilution/i.test(p) && !/\d/.test(p.replace(/(\s|sample|name|type|rep|level|dilution|if|std|standard)/gi,""));
+            });
+            if (looksHeaderish) lines = lines.slice(1);
+            if (lines.length < 1) return;
+
+            // Detect column format from first data line
+            var detect = lines[0].split(/\t/);
+            var col0 = (detect[0]||"").trim().toLowerCase();
+            var hasTypeCol = (col0 === "standard" || col0 === "std" || col0 === "unknown" || col0 === "unk" || col0 === "sst" || col0 === "blank");
+
+            e.preventDefault();
+            // Read fresh existing rows (not closure copy) so this handler always sees the latest scaffold
+            var existing = (function(){try{var x=JSON.parse(cfg.msInjections||"[]");return Array.isArray(x)?x:[];}catch(_){return[];}})();
+
+            // Build a list of "paste rows" — parsed clipboard data, each with optional explicit type
+            var pasteRows = [];
+            lines.forEach(function(line){
+              var parts = line.split(/\t/);
+              if (parts.length < 3) return;
+              var typeRaw, name, ld, repCells;
+              if (hasTypeCol) {
+                if (parts.length < 4) return;
+                typeRaw = (parts[0]||"").trim().toLowerCase();
+                name = (parts[1]||"").trim();
+                ld = (parts[2]||"").trim();
+                repCells = parts.slice(3);
+              } else {
+                name = (parts[0]||"").trim();
+                ld = (parts[1]||"").trim();
+                repCells = parts.slice(2);
+                typeRaw = "";
+              }
+              if (!name) return;
+              repCells = repCells.map(function(s){
+                var t = (s||"").trim();
+                if (t === "-" || t === "−" || t === "") return "";
+                return t;
+              });
+              while (repCells.length > 0 && repCells[repCells.length-1] === "") repCells.pop();
+              if (repCells.length === 0) return;
+              // Determine explicit type only if hasTypeCol; else mark for inference (used only when appending new rows)
+              var explicitType = null;
+              if (hasTypeCol) {
+                if (/^std/i.test(typeRaw) || /standard/i.test(typeRaw)) explicitType = "Standard";
+                else if (/^sst$/i.test(typeRaw) || /suit/i.test(typeRaw)) explicitType = "SST";
+                else if (/^blank$/i.test(typeRaw)) explicitType = "Blank";
+                else explicitType = "Unknown";
+              }
+              pasteRows.push({name: name, levelOrDilution: ld, reps: repCells, explicitType: explicitType});
+            });
+            if (pasteRows.length === 0) return;
+
+            // Map paste rows onto existing rows in order; preserve types beyond clipboard's explicit override
+            var merged = existing.slice();
+            for (var i = 0; i < pasteRows.length; i++) {
+              var pr = pasteRows[i];
+              if (i < merged.length) {
+                // Update existing row: PRESERVE sampleType (unless clipboard had explicit Type col)
+                var existingRow = merged[i];
+                var newRow = Object.assign({}, existingRow);
+                if (pr.explicitType) {
+                  newRow.sampleType = pr.explicitType;
+                }
+                // Sample name: always update from paste
+                newRow.sampleName = pr.name;
+                // Level / Dilution handling per row type:
+                //   - Standard: the paste's level column is an integer level number → store as-is
+                //   - Unknown / SST: the paste's level column might be a dilution override (1/10,
+                //     1:20, 0.05). If it parses as a valid dilution AND row is Unknown/SST, store
+                //     it as a per-row override. Otherwise leave empty (use auto-derived).
+                //   - Blank: always empty.
+                if (pr.levelOrDilution && newRow.sampleType === "Standard") {
+                  newRow.levelOrDilution = pr.levelOrDilution;
+                } else if (pr.levelOrDilution && (newRow.sampleType === "Unknown" || newRow.sampleType === "SST")) {
+                  // Try to parse as a dilution. If it works, store as override.
+                  var pasteAsDF = pDil(pr.levelOrDilution);
+                  if (isFinite(pasteAsDF) && pasteAsDF > 0 && pasteAsDF <= 1) {
+                    newRow.levelOrDilution = pr.levelOrDilution;  // keep original string format
+                  } else {
+                    newRow.levelOrDilution = "";  // unparseable → use auto
+                  }
+                } else if (newRow.sampleType !== "Standard") {
+                  newRow.levelOrDilution = "";
+                }
+                // Reps: always update
+                newRow.reps = pr.reps;
+                merged[i] = newRow;
+              } else {
+                // Append: new row doesn't exist in scaffold, so infer type from data
+                var inferredType;
+                if (pr.explicitType) {
+                  inferredType = pr.explicitType;
+                } else if (/^blank$/i.test(pr.name)) {
+                  inferredType = "Blank";
+                } else if (/(^|[^a-z])sst([^a-z]|$)/i.test(pr.name) || /sys[\s_-]*suit/i.test(pr.name) || /system[\s_-]*suit/i.test(pr.name) || /suitab/i.test(pr.name)) {
+                  inferredType = "SST";
+                } else if (/^\d+$/.test(pr.levelOrDilution) && parseInt(pr.levelOrDilution) >= 1 && parseInt(pr.levelOrDilution) <= 30) {
+                  inferredType = "Standard";
+                } else {
+                  inferredType = "Unknown";
+                }
+                // For non-Standard appended rows, store paste's level column as override if it parses as a dilution.
+                var appendedLD = "";
+                if (inferredType === "Standard") {
+                  appendedLD = pr.levelOrDilution;
+                } else if (inferredType === "Unknown" || inferredType === "SST") {
+                  if (pr.levelOrDilution) {
+                    var df = pDil(pr.levelOrDilution);
+                    if (isFinite(df) && df > 0 && df <= 1) {
+                      appendedLD = pr.levelOrDilution;
+                    }
+                  }
+                }
+                merged.push({
+                  sampleName: pr.name,
+                  sampleType: inferredType,
+                  levelOrDilution: appendedLD,
+                  reps: pr.reps
+                });
+              }
+            }
+            // Ensure all rep arrays are padded to the table's column count (max of cfg.sr / cfg.xr)
+            var newMax = Math.max(parseInt(cfg.sr) || 3, parseInt(cfg.xr) || 3, merged.reduce(function(m,r){return Math.max(m,(r.reps||[]).length);}, 0));
+            merged = merged.map(function(r){return Object.assign({}, r, {reps: ensureReps(r.reps, newMax)});});
+            setRows(merged);
+          };
+
+          // Paste sample names list → fills Unknown/SST rows in order.
+          // Reads rows fresh from cfg.msInjections at apply time (not the closure-captured `rows`)
+          // so multiple pastes in quick succession don't clobber each other.
+          var applyPastedNames = function(text){
+            var names = text.split(/[,\n]/).map(function(s){return s.trim();}).filter(Boolean);
+            if (names.length === 0) return;
+            var fresh = (function(){try{var x=JSON.parse(cfg.msInjections||"[]");return Array.isArray(x)?x:[];}catch(_){return[];}})();
+            var n = fresh.slice();
+            var ni = 0;
+            for (var i = 0; i < n.length && ni < names.length; i++) {
+              if (n[i].sampleType === "Unknown" || n[i].sampleType === "SST") {
+                n[i] = Object.assign({}, n[i], {sampleName: names[ni++]});
+              }
+            }
+            // If we ran out of rows, append remaining names as new Unknown rows.
+            var freshMaxReps = n.reduce(function(m,r){return Math.max(m, (r.reps||[]).length);}, 0) || 2;
+            while (ni < names.length) {
+              n.push({sampleName: names[ni++], sampleType: "Unknown", levelOrDilution: "", reps: ensureReps([], freshMaxReps)});
+            }
+            setRows(n);
+          };
+
+          // Match plate-grid table style: light grey grid lines, transparent input cells, neutral
+          // header bg, navy text. All values pulled from the plate workflow at lines 5297, 5275 etc.
+          var tdBase = {padding:0,border:"1px solid #d1d1d6",verticalAlign:"middle"};
+          var thBase = {padding:"8px 8px",fontFamily:"monospace",fontWeight:700,fontSize:11,background:"#f4f4f6",color:"#30437a",border:"1px solid #d1d1d6",textAlign:"center"};
+          var inputCellStyle = {width:"100%",boxSizing:"border-box",border:"none",padding:"6px 6px",fontSize:11,fontFamily:"monospace",textAlign:"right",background:"transparent",outline:"none",color:"#1d1d1f"};
+          var hatchedStyle = function(rowBg){
+            return {
+              backgroundColor: rowBg,
+              backgroundImage: "repeating-linear-gradient(45deg,transparent 0 4px,rgba(0,0,0,0.07) 4px 5px)",
+              color:"#a8a8a8",
+              padding:"6px 6px",
+              textAlign:"center",
+              fontFamily:"monospace",
+              fontSize:11
+            };
+          };
+
+          return <div>
+            {/* Compact toolbar: just the Clear data button on the right (no instructions banner —
+                the table is intuitive enough). Matches plate-mode placement of Clear data. */}
+            <div style={{display:"flex",justifyContent:"flex-end",marginBottom:"0.6rem"}}>
+              <button onClick={clearAll} title="Clear all peak-area values (keeps sample names, types, levels)" style={{background:"#fff",border:"1px solid #d8dfeb",color:"#6e6e73",padding:"5px 11px",borderRadius:8,fontSize:11,fontWeight:600,cursor:"pointer",display:"inline-flex",alignItems:"center",gap:5,whiteSpace:"nowrap"}}>
+                <span style={{fontSize:13,lineHeight:1}}>×</span>
+                Clear data
+              </button>
+            </div>
+
+            {/* Main injection table */}
+            <div style={{background:"#fff",borderRadius:8,border:"0.5px solid #d1d1d6",padding:0,marginBottom:"0.85rem",overflow:"hidden"}}>
+              <div style={{overflowX:"auto"}}>
+                <table style={{borderCollapse:"collapse",width:"100%",fontSize:11}}>
+                  <thead>
+                    <tr>
+                      <th style={Object.assign({},thBase,{textAlign:"left",width:110})}>Sample Type</th>
+                      <th style={Object.assign({},thBase,{textAlign:"left",minWidth:140})}>Sample name</th>
+                      <th style={Object.assign({},thBase,{lineHeight:1.3,width:120})}>
+                        <div>Dilution Level</div>
+                        <div style={{fontFamily:"monospace",fontWeight:500,fontSize:9,color:"#8e9bb5"}}>(if Std)</div>
+                      </th>
+                      {Array.from({length:maxReps}, function(_,i){
+                        return <th key={i} style={Object.assign({},thBase,{minWidth:90})}>Rep {i+1}</th>;
+                      })}
+                      <th style={Object.assign({},thBase,{padding:"8px 4px",width:24,border:"1px solid #d1d1d6"})}></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.length === 0 && <tr>
+                      <td colSpan={4+maxReps} style={{padding:"30px 16px",textAlign:"center",fontSize:12,color:"#8e9bb5",fontStyle:"italic",background:"#f9fbfd",border:"1px solid #d1d1d6"}}>
+                        No injections yet. Click <strong>+ Add row</strong> below to start.
+                        <div style={{marginTop:6,fontSize:11,color:"#aeaeb2"}}>Define your standard concentrations in <strong>General Information</strong> below first.</div>
+                      </td>
+                    </tr>}
+                    {rows.map(function(r, i){
+                      var isStd = r.sampleType === "Standard";
+                      var isBlank = r.sampleType === "Blank";
+                      var col = rowColor(r);
+                      var typeColor = typeTextColor(r);
+
+                      // Level cell content
+                      var ldContent = null;
+                      if (isStd) {
+                        // Always show the computed concentration below the level number — the analyst
+                        // needs to know what each level represents (not just instructors). If the
+                        // conc can't be computed (top conc / DF not yet set), show nothing rather
+                        // than a noisy fallback message.
+                        var preview = null;
+                        var lv = parseInt(r.levelOrDilution);
+                        if (isFinite(lv) && lv >= 1) {
+                          var c = asStandardConcForLevel(lv, cfg);
+                          if (c != null) preview = sig3(c)+" "+cfg.unit;
+                        }
+                        ldContent = <div style={{padding:"4px 6px",textAlign:"center"}}>
+                          <input
+                            type="text"
+                            value={r.levelOrDilution || ""}
+                            onChange={function(e){setField(i,"levelOrDilution",e.target.value);}}
+                            placeholder="1"
+                            style={{width:"100%",boxSizing:"border-box",padding:"4px 6px",border:"none",fontSize:11,textAlign:"center",fontFamily:"monospace",background:"transparent",outline:"none",color:col.text,fontWeight:700}}
+                            title="Integer level number — concentration computed from General Information"
+                          />
+                          {preview && <div style={{fontFamily:"monospace",fontSize:9,color:col.text,marginTop:2,fontStyle:"italic",opacity:0.85}}>{preview}</div>}
+                        </div>;
+                      } else if (isBlank) {
+                        ldContent = <div style={{padding:"6px",textAlign:"center",color:"#aeaeb2",fontSize:11}}>—</div>;
+                      } else {
+                        // Unknown / SST: hybrid — global default (cfg.xdf + cfg.xds + row order)
+                        // OR per-row override (user types into the cell).
+                        // If r.levelOrDilution is non-empty AND parses as a valid dilution,
+                        // it's the override. Otherwise fall back to the auto-derived value.
+                        var rawOverride = (r.levelOrDilution || "").trim();
+                        var overrideDF = null;
+                        if (rawOverride !== "") {
+                          var parsedDF = pDil(rawOverride);
+                          if (isFinite(parsedDF) && parsedDF > 0 && parsedDF <= 1) overrideDF = parsedDF;
+                        }
+                        var autoDF = rowAutoDF[i];
+                        var effectiveDF = overrideDF != null ? overrideDF : autoDF;
+                        var isOverride = overrideDF != null;
+                        // Format the auto DF for placeholder display when nothing is typed
+                        var autoPlaceholder = autoDF != null ? fmtDF(autoDF) : "1/10";
+                        ldContent = <div style={{padding:"4px 6px",textAlign:"center"}}>
+                          <input
+                            type="text"
+                            value={r.levelOrDilution || ""}
+                            onChange={function(e){setField(i,"levelOrDilution",e.target.value);}}
+                            placeholder={autoPlaceholder}
+                            style={{
+                              width:"100%",boxSizing:"border-box",padding:"4px 6px",
+                              border:"none",fontSize:11,textAlign:"center",fontFamily:"monospace",
+                              background:"transparent",outline:"none",
+                              color: isOverride ? col.text : "#aeaeb2",
+                              fontWeight: isOverride ? 700 : 400,
+                              fontStyle: isOverride ? "normal" : "italic"
+                            }}
+                            title={"Per-row dilution factor. Type 1/10, 1:10, or 0.1. Leave blank to use the auto-derived value from General Info (Sample first DF + serial DF)."}
+                          />
+                          {effectiveDF != null && <div style={{fontFamily:"monospace",fontSize:9,color:col.text,marginTop:2,fontStyle:"italic",opacity:0.85}}>
+                            {isOverride ? "= "+fmtDF(effectiveDF) : "auto"}
+                          </div>}
+                        </div>;
+                      }
+
+                      // Hatching: declarative by row type, not based on what the user has filled.
+                      // Each row's expected rep count comes from its type:
+                      //   Standard → cfg.sr (standard replicates)
+                      //   Unknown / SST / Blank → cfg.xr (sample replicates)
+                      // Cells past that count are permanently hatched and read-only — "no data
+                      // expected here" — independent of what the user's typed.
+                      var rowExpectedReps = isStd ? nStdReps : nSmpReps;
+
+                      return <tr key={i} style={{background:col.bg}}>
+                        {/* Sample Type cell — text in row-accent color, dotted underline, click to dropdown */}
+                        <td style={Object.assign({},tdBase,{textAlign:"left"})}>
+                          <div style={{position:"relative",display:"inline-block",padding:"6px 12px"}}>
+                            <span style={{fontFamily:"monospace",fontSize:11,fontWeight:700,color:typeColor,borderBottom:"1px dotted "+typeColor,opacity:0.95,cursor:"pointer",pointerEvents:"none"}}>{r.sampleType||"Unknown"}</span>
+                            <select
+                              value={r.sampleType||"Unknown"}
+                              onChange={function(e){
+                                var newType = e.target.value;
+                                // Read fresh and combine type+level update in one setRows call.
+                                var fr = freshRows();
+                                var n = fr.slice();
+                                if (i >= n.length) return;
+                                var rowCopy = Object.assign({}, n[i], {sampleType: newType});
+                                if (newType === "Standard") {
+                                  if (!/^\d+$/.test(String(rowCopy.levelOrDilution||""))) {
+                                    rowCopy.levelOrDilution = String(fr.filter(function(rr){return rr.sampleType==="Standard";}).length + 1);
+                                  }
+                                } else {
+                                  rowCopy.levelOrDilution = "";
+                                }
+                                n[i] = rowCopy;
+                                setRows(n);
+                              }}
+                              style={{position:"absolute",inset:0,opacity:0,cursor:"pointer",fontSize:11,fontFamily:"inherit",border:"none",background:"transparent",appearance:"none",WebkitAppearance:"none"}}
+                              title="Change sample type"
+                            >
+                              {TYPE_OPTIONS.map(function(t){return <option key={t} value={t}>{t}</option>;})}
+                            </select>
+                          </div>
+                        </td>
+                        {/* Sample name — borderless input that takes the row-accent color.
+                            First row's placeholder shows just "paste" (italic) when no name has
+                            been typed yet — matches plate workflow's paste-cell convention. */}
+                        <td style={Object.assign({},tdBase,{padding:"4px 8px"})}>
+                          <input
+                            type="text"
+                            value={r.sampleName||""}
+                            onChange={function(e){setField(i,"sampleName",e.target.value);}}
+                            onPaste={inlinePaste}
+                            placeholder={i===0 && rows.every(function(rr){return !(rr.sampleName||"").trim();}) ? "paste" : ""}
+                            style={{width:"100%",boxSizing:"border-box",padding:"4px 6px",border:"none",fontSize:11,fontFamily:"monospace",background:"transparent",color:col.text,fontWeight:700,outline:"none",fontStyle:i===0 && rows.every(function(rr){return !(rr.sampleName||"").trim();}) && !(r.sampleName||"").trim() ? "italic" : "normal"}}
+                          />
+                        </td>
+                        {/* Dilution Level cell */}
+                        <td style={Object.assign({},tdBase)}>{ldContent}</td>
+                        {/* Rep cells — white input for cells within the row's expected reps,
+                            hatched (read-only) for cells past the row type's rep count */}
+                        {Array.from({length:maxReps}, function(_,rep){
+                          var v = (r.reps||[])[rep] || "";
+                          // Declarative: hatch any cell whose index is past the row type's expected rep count
+                          if (rep >= rowExpectedReps) {
+                            return <td key={rep} style={Object.assign({},tdBase,hatchedStyle(col.bg))} title={"No data expected — "+(isStd?"Standard reps = "+nStdReps:"Sample reps = "+nSmpReps)}>−</td>;
+                          }
+                          return <td key={rep} style={tdBase}>
+                            <input
+                              type="text"
+                              inputMode="decimal"
+                              value={v}
+                              onChange={function(e){setRep(i,rep,e.target.value);}}
+                              placeholder="−"
+                              title={(r.sampleName||("Sample "+(i+1)))+" — Rep "+(rep+1)}
+                              style={inputCellStyle}
+                            />
+                          </td>;
+                        })}
+                        {/* Delete row */}
+                        <td style={Object.assign({},tdBase,{padding:"4px 4px",textAlign:"center"})}>
+                          <button onClick={function(){rmRow(i);}} title="Remove row" style={{padding:"0 6px",fontSize:14,fontWeight:700,color:"#b4332e",background:"transparent",border:"none",cursor:"pointer",lineHeight:1}}>×</button>
+                        </td>
+                      </tr>;
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Action buttons — single Add row. Rep count is set on landing page / General Info.
+                Status line shows whether the analyst's data is in a state where Analyze will succeed. */}
+            {(function(){
+              // Compute live data readiness
+              var stdLevelsWithData = {};
+              var unkRowsWithData = 0;
+              rows.forEach(function(r){
+                var hasRep = (r.reps||[]).some(function(v){return isFinite(parseFloat(v)) && parseFloat(v) > 0;});
+                if (!hasRep) return;
+                if (r.sampleType === "Standard") {
+                  var lv = parseInt(r.levelOrDilution);
+                  if (isFinite(lv) && lv >= 1) stdLevelsWithData[lv] = true;
+                } else if (r.sampleType === "Unknown" || r.sampleType === "SST") {
+                  unkRowsWithData++;
+                }
+              });
+              var nStdLevelsFilled = Object.keys(stdLevelsWithData).length;
+              var hasStdDef = false;
+              if (cfg.asStdMode === "discrete") {
+                var lvls = (function(){try{var x=JSON.parse(cfg.asDiscreteLevels||"[]");return Array.isArray(x)?x:[];}catch(_){return[];}})();
+                hasStdDef = lvls.filter(function(v){return parseFloat(v) > 0;}).length >= 2;
+              } else {
+                hasStdDef = parseFloat(cfg.asTopConc) > 0 && pDil(cfg.asSerialDF) > 0 && pDil(cfg.asSerialDF) < 1;
+              }
+              var ready = nStdLevelsFilled >= 2 && hasStdDef;
+              return <div style={{display:"flex",gap:8,marginBottom:"1rem",flexWrap:"wrap",alignItems:"center"}}>
+                <button onClick={addRow} style={{padding:"7px 14px",background:"#fff",border:"1px solid #d8dfeb",borderRadius:8,fontSize:11,fontWeight:600,color:"#30437a",cursor:"pointer"}}>+ Add row</button>
+                <span style={{flex:1,minWidth:20}}></span>
+                <span style={{fontSize:10,color:ready?"#1b7f6a":"#8e9bb5",fontStyle:"italic",fontFamily:"monospace"}}>
+                  {ready ? "✓ ready to analyze: " : "needs more: "}
+                  {nStdLevelsFilled} std level{nStdLevelsFilled===1?"":"s"} with data · {unkRowsWithData} sample row{unkRowsWithData===1?"":"s"} with data{!hasStdDef ? " · curve def missing in General Info" : ""}
+                </span>
+              </div>;
+            })()}
+
+            {/* Sample labels paste textarea — collapsible, mirrors plate workflow.
+                User types or pastes names, then clicks "Apply names" to push them into the rows.
+                The textarea content is intentionally persistent — no auto-apply, no auto-clear —
+                so the user has a clear record of what they entered and can re-apply if needed.
+                A ref is used to read the textarea content at apply time (no React state needed). */}
+            <details style={{marginBottom:"1.25rem",background:"#fff",borderRadius:14,border:"1px solid "+BORDER,padding:"0.85rem 1rem",boxShadow:"0 6px 18px rgba(11,42,111,0.03)"}}>
+              <summary style={{fontSize:13,fontWeight:700,cursor:"pointer",color:"#30437a"}}>Sample labels (optional)</summary>
+              <p style={{fontSize:12,color:"#6e6e73",margin:"10px 0 8px",lineHeight:1.5}}>
+                Paste or type one sample name per line (or comma-separated), then click <strong>Apply names</strong>. Names auto-fill the Unknown / SST rows in order, skipping Standards and Blanks.
+                <span style={{display:"block",marginTop:6,fontStyle:"italic",color:"#8e9bb5"}}>If there are more names than existing rows, the extras are added as new Unknown rows.</span>
+              </p>
+              {(function(){
+                // Use a closure-captured DOM ref (assigned via ref callback) so we read the textarea
+                // value at click time, not from React state. This avoids a re-render when the user types.
+                var taRef = {current: null};
+                return <div>
+                  <textarea
+                    ref={function(el){taRef.current = el;}}
+                    rows={4}
+                    placeholder={"2026GFP\n2025GFP\nSST mid"}
+                    style={{width:"100%",boxSizing:"border-box",padding:"8px 12px",borderRadius:8,border:"1px solid #e5e5ea",fontSize:13,fontFamily:"monospace",outline:"none",resize:"vertical"}}
+                  />
+                  <div style={{display:"flex",gap:8,marginTop:8,alignItems:"center"}}>
+                    <button onClick={function(){
+                      var v = (taRef.current && taRef.current.value) || "";
+                      if (v.trim().length === 0) return;
+                      applyPastedNames(v);
+                    }} style={{padding:"6px 14px",background:"linear-gradient(135deg,"+TEAL_DARK+","+NAVY+")",color:"#fff",border:"none",borderRadius:8,fontSize:12,fontWeight:700,cursor:"pointer"}}>Apply names</button>
+                    <button onClick={function(){
+                      if (taRef.current) taRef.current.value = "";
+                    }} style={{padding:"6px 12px",background:"#fff",border:"1px solid #d8dfeb",color:"#6e6e73",borderRadius:8,fontSize:11,fontWeight:600,cursor:"pointer"}}>Clear textbox</button>
+                  </div>
+                </div>;
+              })()}
+            </details>
+          </div>;
+        })()}
+
+        {/* Sample names text input — plate modes only. In autosampler mode, names come from per-sample blocks. */}
+        {cfg.layout!=="autosampler" && <details style={{marginBottom:"1rem",background:SURFACE,borderRadius:14,border:"1px solid "+BORDER,padding:"0.85rem 1rem",boxShadow:"0 6px 18px rgba(11,42,111,0.03)"}}>
+          <summary style={{fontSize:13,fontWeight:700,cursor:"pointer",color:"#30437a"}}>Sample labels (optional)</summary>
           <p style={{fontSize:12,color:"#6e6e73",margin:"10px 0 8px",lineHeight:1.5}}>
             Paste one sample name per line, in the order they appear on the plate. The app assigns them automatically.
+            <span style={{display:"block",marginTop:6,fontStyle:"italic",color:"#8e9bb5"}}>The standard is added automatically — don't include it here. Only enter your unknowns.</span>
             {layout.axis==="row" && <span style={{display:"block",marginTop:6,padding:"6px 10px",background:"#f7f1ff",borderRadius:6,border:"1px solid #e2d7fb",color:"#5a6984"}}>
               <strong>Transposed order:</strong> down the left half first (top to bottom, skipping the standard's slot{(parseInt(cfg.sr)||2)>1?"s":""}), then down the right half. With your current setup, you can name up to <strong>{smpGroups.length} samples</strong>.
             </span>}
           </p>
           <textarea value={cfg.names} onChange={function(e){u("names",e.target.value);}} rows={4} placeholder={"Sample A\nSample B\nSample C\nSample D"} style={{width:"100%",boxSizing:"border-box",padding:"8px 12px",borderRadius:8,border:"1px solid #e5e5ea",fontSize:13,fontFamily:"monospace",outline:"none",resize:"vertical"}} />
-        </details>
+        </details>}
         <div style={{background:SURFACE,borderRadius:18,border:"1px solid "+BORDER,padding:"1.25rem",marginBottom:"1.25rem",boxShadow:"0 8px 22px rgba(11,42,111,0.04)"}}>
         <div style={{background:"linear-gradient(135deg,"+NAVY+", "+TEAL_DARK+")",color:"#fff",padding:"10px 16px",borderRadius:12,fontSize:14,fontWeight:800,marginBottom:"1rem",boxShadow:"0 10px 22px rgba(11,42,111,0.16)"}}>General information</div>
         {[
-          ["Assay type",<select value={assayKind} onChange={function(e){var v=e.target.value;if(v==="total"){u("tp","yes");u("at","direct");}else if(v==="elisa"){u("tp","no");u("at","elisa");}else{u("tp","no");u("at","direct");}}} style={{padding:"8px 12px",borderRadius:8,border:"1px solid #e5e5ea",fontSize:13}}><option value="direct">GFP direct fluorescence</option><option value="elisa">ELISA</option><option value="total">Total protein assay</option></select>],
-          ["Standard protein",<input value={cfg.sn} onChange={function(e){u("sn",e.target.value);}} style={{width:"100%",boxSizing:"border-box",padding:"8px 12px",borderRadius:8,border:"1px solid #e5e5ea",fontSize:13,outline:"none"}} />],
-          ...(cfg.tp==="no"?[["Target protein",<input value={cfg.target} onChange={function(e){u("target",e.target.value);}} placeholder="e.g. IL-6" style={{width:"100%",boxSizing:"border-box",padding:"8px 12px",borderRadius:8,border:"1px solid #e5e5ea",fontSize:13,outline:"none"}} />]]:[]),
-          ["Stock concentration",<div style={{display:"flex",alignItems:"center",gap:8}}><input type="number" step="any" value={cfg.sc} onChange={function(e){u("sc",e.target.value);}} style={{width:120,padding:"8px 12px",borderRadius:8,border:"1px solid #e5e5ea",fontSize:13,outline:"none"}} /><select value={cfg.unit} onChange={function(e){u("unit",e.target.value);}} style={{padding:"8px 12px",borderRadius:8,border:"1px solid #e5e5ea",fontSize:13}}><option value="mg/mL">mg/mL</option><option value="ug/mL">ug/mL</option><option value="ng/mL">ng/mL</option></select></div>],
-          ...(function(){
-            // Compute preview dilution count based on layout (rows-1 for classical, 5 for transposed)
-            var nDils = cfg.layout === "transposed" ? 5 : 7;
-            var sdfV = pDil(cfg.sdf), sdsV = pDil(cfg.sds);
-            var xdfV = pDil(cfg.xdf), xdsV = pDil(cfg.xds);
-            // Series rendered in the user's chosen format (ratio "1:N" or factor "N×").
-            // Sci notation kicks in for big numbers so the caption doesn't overflow.
-            var stdSeries = buildDilutionPreview(sdfV, sdsV, nDils, dilFormat);
-            var smpSeries = buildDilutionPreview(xdfV, xdsV, nDils, dilFormat);
-            // Helper renders a series preview beneath the input. labelColor is the highlight color.
-            // The first invocation also renders the format toggle pill (subtle, dotted-underline).
-            var seriesCaption = function(series, labelColor, showToggle){
-              if (!series) return <div style={{fontSize:11,color:"#aeaeb2",fontStyle:"italic",marginTop:4}}>Enter values above to preview your series</div>;
-              return <div style={{fontSize:11,color:"#5a6984",marginTop:6,lineHeight:1.5,display:"flex",alignItems:"baseline",gap:6,flexWrap:"wrap"}}>
-                <span style={{color:"#aeaeb2"}}>{nDils}-row series (as <FormatPill
-                  value={dilFormat}
-                  onChange={setDilFormat}
-                  labelOf={function(f){return f === "ratio" ? "ratio" : "factor";}}
-                  toggleOf={function(f){return f === "ratio" ? "factor" : "ratio";}}
-                  size={11}
-                  color="#aeaeb2"
-                  hoverColor="#0b2a6f"
-                />):</span>{" "}
-                <span style={{color:labelColor,fontFamily:"monospace",fontWeight:700,wordBreak:"break-word"}}>{series.join(", ")}</span>
-              </div>;
-            };
-            // Helper renders a labelled input with a tiny helper-text caption inline
-            var dilLabel = function(rowKind, isFirst, color){
-              return <div>
-                <div style={{fontWeight:700,color:"#1d1d1f"}}>{rowKind} <span style={{color:color}}>{isFirst?"first row":"subsequent rows"}</span></div>
-                <div style={{fontSize:11,color:"#8e9bb5",marginTop:2,fontStyle:"italic",lineHeight:1.4}}>
-                  {isFirst ? "Dilution applied to the most concentrated (top) row" : "Further dilution between each row and the one above"}
+          ...(cfg.layout!=="autosampler" ? [
+          ["Is this a total protein assay?",<select value={cfg.tp} onChange={function(e){var v=e.target.value;if(v==="yes"){u("tp","yes");u("at","direct");u("fm","linear");}else{u("tp","no");}}} style={{padding:"8px 12px",borderRadius:8,border:"1px solid #e5e5ea",fontSize:13}}><option value="no">No</option><option value="yes">Yes</option></select>],
+          ...(cfg.tp==="no"?[["Is this an ELISA?",<select value={cfg.at==="elisa"?"yes":"no"} onChange={function(e){var v=e.target.value;if(v==="yes"){u("at","elisa");u("fm",cfg.fm==="5pl"?"5pl":"4pl");}else{u("at","direct");u("fm","linear");}}} style={{padding:"8px 12px",borderRadius:8,border:"1px solid #e5e5ea",fontSize:13}}><option value="no">No</option><option value="yes">Yes</option></select>]]:[])
+          ] : []),
+          ["Standard Protein Used",<input value={cfg.sn} onChange={function(e){u("sn",e.target.value);}} style={{width:"100%",boxSizing:"border-box",padding:"8px 12px",borderRadius:8,border:"1px solid #e5e5ea",fontSize:13,outline:"none"}} />],
+          ...((cfg.layout!=="autosampler" && cfg.tp==="no") || cfg.layout==="autosampler"?[["Target protein",<input value={cfg.target} onChange={function(e){u("target",e.target.value);}} placeholder="e.g. GFP, IL-6" style={{width:"100%",boxSizing:"border-box",padding:"8px 12px",borderRadius:8,border:"1px solid #e5e5ea",fontSize:13,outline:"none"}} />]]:[]),
+          ...(cfg.layout==="autosampler"
+            ? [
+                // Standard curve config: how the analyst defines per-level concentrations.
+                // Serial mode = top conc + DF; the app computes Level 1 = top, Level 2 = top×DF, ...
+                // Discrete mode = analyst types each level's concentration directly into a small list.
+                // The mode toggle lives on the landing page; here we just show the value editor.
+                // Concentration unit is merged inline (next to the top conc input or per-level header).
+                [<div><span style={{color:"#d70015",fontWeight:700}}>Standard</span> curve definition</div>,<div>
+                  {/* Level numbering toggle — lets the analyst decide whether Level 1 is the top
+                      (highest concentration) or the bottom (lowest concentration). Some labs label
+                      their standards starting from the lowest, others from the highest. */}
+                  <div style={{display:"flex",gap:14,alignItems:"center",marginBottom:10,fontSize:11,color:"#5a6984"}}>
+                    <span style={{fontWeight:600}}>Level numbering:</span>
+                    <label style={{display:"inline-flex",alignItems:"center",gap:5,cursor:"pointer"}}>
+                      <input type="radio" name="asLevelOrder" value="highest" checked={(cfg.asLevelOrder||"highest")!=="lowest"} onChange={function(){u("asLevelOrder","highest");}} />
+                      Level 1 = highest
+                    </label>
+                    <label style={{display:"inline-flex",alignItems:"center",gap:5,cursor:"pointer"}}>
+                      <input type="radio" name="asLevelOrder" value="lowest" checked={(cfg.asLevelOrder||"highest")==="lowest"} onChange={function(){u("asLevelOrder","lowest");}} />
+                      Level 1 = lowest
+                    </label>
+                  </div>
+                  {cfg.asStdMode!=="discrete" ? <div style={{display:"flex",gap:14,alignItems:"flex-start",flexWrap:"wrap"}}>
+                    <div>
+                      <div style={{fontSize:10,color:"#5a6984",marginBottom:3,fontWeight:600}}>Top concentration ({(cfg.asLevelOrder||"highest")==="lowest" ? "Level "+(parseInt(cfg.asNStdLevels)||6) : "Level 1"})</div>
+                      <div style={{display:"flex",alignItems:"center",gap:6}}>
+                        <input type="number" step="any" value={cfg.asTopConc} onChange={function(e){u("asTopConc",e.target.value);}} placeholder="e.g. 100" style={{width:110,padding:"7px 10px",borderRadius:8,border:"1px solid #e5e5ea",fontSize:13,outline:"none"}} />
+                        <select value={cfg.unit} onChange={function(e){u("unit",e.target.value);}} style={{padding:"7px 10px",borderRadius:8,border:"1px solid #e5e5ea",fontSize:13}}>{CONC_UNITS.map(function(u){return <option key={u} value={u}>{u}</option>;})}</select>
+                      </div>
+                    </div>
+                    <div>
+                      <div style={{fontSize:10,color:"#5a6984",marginBottom:3,fontWeight:600}}>Serial dilution factor</div>
+                      <input value={cfg.asSerialDF} onChange={function(e){u("asSerialDF",e.target.value);}} placeholder="1/2" style={{width:90,padding:"7px 10px",borderRadius:8,border:"1px solid #e5e5ea",fontSize:13,fontFamily:"monospace"}} title="Each level is the previous one × this factor. Accepts '1/2', '1:2', or '0.5'." />
+                    </div>
+                  </div> : (function(){
+                    // Discrete mode: editable list. User adds/removes rows manually; default shows 5 rows.
+                    var list = (function(){try{var x=JSON.parse(cfg.asDiscreteLevels||"[]");return Array.isArray(x)?x:[];}catch(_){return[];}})();
+                    var displayLen = Math.max(list.length, 5);
+                    var setList = function(next){u("asDiscreteLevels",JSON.stringify(next));};
+                    var setLevel = function(idx, val){var n=list.slice();while(n.length<=idx)n.push("");n[idx]=val;setList(n);};
+                    var addLevel = function(){setList(list.concat([""]));};
+                    var rmLevel = function(idx){var n=list.slice();n.splice(idx,1);setList(n);};
+                    return <div>
+                      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
+                        <span style={{fontSize:10,color:"#5a6984",fontWeight:600}}>Per-level concentration in</span>
+                        <select value={cfg.unit} onChange={function(e){u("unit",e.target.value);}} style={{padding:"5px 8px",borderRadius:6,border:"1px solid #e5e5ea",fontSize:11}}>{CONC_UNITS.map(function(u){return <option key={u} value={u}>{u}</option>;})}</select>
+                      </div>
+                      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(140px,1fr))",gap:6,marginBottom:6}}>
+                        {Array.from({length:displayLen}, function(_,i){
+                          return <div key={i} style={{display:"flex",alignItems:"center",gap:5,padding:"4px 8px",background:"#fff",border:"1px solid #e5e5ea",borderRadius:6}}>
+                            <span style={{fontSize:10,color:"#5a6984",fontWeight:700,minWidth:24}}>L{i+1}</span>
+                            <input type="number" step="any" value={list[i]||""} onChange={function(e){setLevel(i,e.target.value);}} placeholder="0.0" style={{flex:1,minWidth:0,padding:"3px 6px",borderRadius:4,border:"1px solid #e5e5ea",fontSize:11,fontFamily:"monospace",textAlign:"right"}} />
+                            {i>=5 && <button onClick={function(){rmLevel(i);}} title="Remove" style={{padding:"0 4px",fontSize:11,color:"#b4332e",background:"transparent",border:"none",cursor:"pointer"}}>×</button>}
+                          </div>;
+                        })}
+                      </div>
+                      <button onClick={addLevel} style={{padding:"4px 10px",background:"#fff",border:"1px solid #d0d8ea",borderRadius:6,fontSize:10,fontWeight:600,color:"#30437a",cursor:"pointer"}}>+ Add level</button>
+                    </div>;
+                  })()}
+                </div>],
+                // Sample-block dilution count is no longer relevant in flat-list workflow.
+                // Each row in the data-entry table IS one dilution. Standard / sample level counts
+                // are set on the landing page as defaults; analyst adds/removes rows as needed.
+                // Blanks are also added as rows (with sample type "Blank") rather than via toggle.
+              ]
+            : [[<div>Concentration of the <span style={{color:"#d70015",fontWeight:700}}>Standard</span> <span style={{color:"#d70015",fontStyle:"italic",fontWeight:700}}>stock</span></div>,<div style={{display:"flex",alignItems:"center",gap:8}}><input type="number" step="any" value={cfg.sc} onChange={function(e){u("sc",e.target.value);}} style={{width:120,padding:"8px 12px",borderRadius:8,border:"1px solid #e5e5ea",fontSize:13,outline:"none"}} /><select value={cfg.unit} onChange={function(e){u("unit",e.target.value);}} style={{padding:"8px 12px",borderRadius:8,border:"1px solid #e5e5ea",fontSize:13}}>{CONC_UNITS.map(function(u){return <option key={u} value={u}>{u}</option>;})}</select></div>]]
+          ),
+          ...(cfg.layout!=="autosampler" ? [
+          [<div><div>Dilution Factor</div><div>used on first</div><div>row of <span style={{color:"#d70015",fontWeight:700}}>Standard</span></div></div>,<div>
+            {(function(){
+              var locked = cfg.stdPredil && !isNaN(pDil(cfg.stdPredil)) && pOptionalDil(cfg.stdPredil)!==1;
+              var combined = locked ? pDil(cfg.sdf)*pOptionalDil(cfg.stdPredil) : null;
+              var showPanel = cfg.showStdPredilPanel;
+              if(locked) return <div>
+                <div style={{display:"flex",alignItems:"center",gap:8,padding:"8px 12px",borderRadius:8,border:"1px solid #d0dff0",background:"#f5f8fc",fontFamily:"monospace",fontSize:13,color:"#0b2a6f"}}>
+                  {fmtDilution(combined,dilFormat,100000)}
+                  <span style={{fontSize:10,fontWeight:700,color:"#8a5a00",background:"#fff7e0",border:"1px solid #e8c77d",borderRadius:5,padding:"2px 7px"}}>adjusted</span>
                 </div>
+                <div style={{fontSize:10,color:"#8a5a00",marginTop:4,lineHeight:1.4}}>= {fmtDilution(pDil(cfg.sdf),dilFormat,100000)} first-row × {fmtDilution(pOptionalDil(cfg.stdPredil),dilFormat,100000)} pre-plate. App uses {fmtDilution(combined,dilFormat,100000)} for back-calc.</div>
+                <button onClick={function(){u("stdPredil","");u("showStdPredilPanel",false);}} style={{background:"transparent",border:"none",fontSize:10,color:"#8e9bb5",cursor:"pointer",padding:"2px 0",marginTop:4,textDecoration:"underline",textDecorationStyle:"dotted"}}>Undo pre-plate adjustment</button>
               </div>;
-            };
-            // Helper renders the input + an inline format hint + preview line below
-            var dilInputCell = function(stateKey, color){
-              // The series preview is only attached to the SECOND row of each pair (sds, xds), since both values are needed.
-              var preview = null;
-              if (stateKey === "sds") preview = seriesCaption(stdSeries, "#d70015");
-              else if (stateKey === "xds") preview = seriesCaption(smpSeries, "#30437a");
               return <div>
-                <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
-                  <input value={cfg[stateKey]} onChange={function(e){u(stateKey,e.target.value);}} placeholder="1/2" style={{width:100,padding:"8px 12px",borderRadius:8,border:"1px solid #e5e5ea",fontSize:13,outline:"none",fontFamily:"monospace"}} />
-                  <span style={{fontSize:11,color:"#aeaeb2"}}>e.g. <code style={{background:"#f4f4f6",padding:"1px 5px",borderRadius:3,fontSize:11}}>1/10</code> (10× dilution), <code style={{background:"#f4f4f6",padding:"1px 5px",borderRadius:3,fontSize:11}}>1/2</code> (2× dilution), <code style={{background:"#f4f4f6",padding:"1px 5px",borderRadius:3,fontSize:11}}>1</code> (neat)</span>
-                </div>
-                {preview}
+                <input value={cfg.sdf} onChange={function(e){u("sdf",e.target.value);}} placeholder="1/2" style={{width:140,padding:"8px 12px",borderRadius:8,border:"1px solid #e5e5ea",fontSize:13,outline:"none",fontFamily:"monospace"}} />
+                {pDil(cfg.sdf)>0 && !showPanel && <button onClick={function(){u("showStdPredilPanel",true);}} style={{display:"block",background:"transparent",border:"none",fontSize:10,color:"#8e9bb5",cursor:"pointer",padding:"2px 0",marginTop:5,textDecoration:"underline",textDecorationStyle:"dotted",fontStyle:"italic"}}>I diluted my Standard STOCK before adding to the plate</button>}
+                {showPanel && <div style={{marginTop:8,padding:"10px 12px",background:"#f7fbff",border:"1px solid #c6d3e8",borderRadius:10}}>
+                  <div style={{fontSize:11,color:"#30437a",lineHeight:1.5,marginBottom:6}}>Enter the dilution you applied to your Standard STOCK (listed above) before it touched the plate — e.g. <code>1/10</code>. The app multiplies this into the first-row value so your dilution fields stay unchanged.</div>
+                  <input value={cfg.stdPredil||""} onChange={function(e){u("stdPredil",e.target.value);}} placeholder="e.g. 1/10" style={{width:130,padding:"7px 10px",borderRadius:8,border:"1px solid #e5e5ea",fontSize:12,fontFamily:"monospace",outline:"none"}} />
+                  {(function(){var f=pDil(cfg.sdf),p=pOptionalDil(cfg.stdPredil);if(!cfg.stdPredil||isNaN(f)||p===1)return null;return <div style={{marginTop:6,fontSize:11,color:"#7a4a00",lineHeight:1.45}}>✓ App will use <strong style={{fontFamily:"monospace"}}>{fmtDilution(f*p,dilFormat,100000)}</strong> for Standard row 1 ({fmtDilution(f,dilFormat,100000)} × {fmtDilution(p,dilFormat,100000)}). The field above stays as entered.</div>;})()}
+                  <button onClick={function(){u("showStdPredilPanel",false);}} style={{background:"transparent",border:"none",fontSize:10,color:"#8e9bb5",cursor:"pointer",padding:"2px 0",marginTop:6,textDecoration:"underline",textDecorationStyle:"dotted"}}>Cancel</button>
+                </div>}
               </div>;
-            };
-            return [
-              [dilLabel("Standard", true, "#d70015"), dilInputCell("sdf","#d70015")],
-              [dilLabel("Standard", false, "#d70015"), dilInputCell("sds","#d70015")],
-              [dilLabel("Sample", true, "#30437a"), dilInputCell("xdf","#30437a")],
-              [dilLabel("Sample", false, "#30437a"), dilInputCell("xds","#30437a")],
-            ];
-          })(),
+            })()}
+          </div>],
+          [<div><div>Dilution Factor</div><div>used on second</div><div>and remaining</div><div>rows of <span style={{color:"#d70015",fontWeight:700}}>Standard</span></div></div>,<input value={cfg.sds} onChange={function(e){u("sds",e.target.value);}} placeholder="1/2" style={{width:140,padding:"8px 12px",borderRadius:8,border:"1px solid #e5e5ea",fontSize:13,outline:"none",fontFamily:"monospace"}} />],
+          [<div><div>Dilution Factor</div><div>used on first</div><div>row of <span style={{color:"#30437a",fontWeight:700}}>Sample</span></div></div>,<div>
+            {(function(){
+              var locked = cfg.smpPredil && !isNaN(pDil(cfg.smpPredil)) && pOptionalDil(cfg.smpPredil)!==1;
+              var combined = locked ? pDil(cfg.xdf)*pOptionalDil(cfg.smpPredil) : null;
+              var showPanel = cfg.showSmpPredilPanel;
+              if(locked) return <div>
+                <div style={{display:"flex",alignItems:"center",gap:8,padding:"8px 12px",borderRadius:8,border:"1px solid #d0dff0",background:"#f5f8fc",fontFamily:"monospace",fontSize:13,color:"#0b2a6f"}}>
+                  {fmtDilution(combined,dilFormat,100000)}
+                  <span style={{fontSize:10,fontWeight:700,color:"#8a5a00",background:"#fff7e0",border:"1px solid #e8c77d",borderRadius:5,padding:"2px 7px"}}>adjusted</span>
+                </div>
+                <div style={{fontSize:10,color:"#8a5a00",marginTop:4,lineHeight:1.4}}>= {fmtDilution(pDil(cfg.xdf),dilFormat,100000)} first-row × {fmtDilution(pOptionalDil(cfg.smpPredil),dilFormat,100000)} pre-plate. App uses {fmtDilution(combined,dilFormat,100000)} for back-calc.</div>
+                <button onClick={function(){u("smpPredil","");u("showSmpPredilPanel",false);}} style={{background:"transparent",border:"none",fontSize:10,color:"#8e9bb5",cursor:"pointer",padding:"2px 0",marginTop:4,textDecoration:"underline",textDecorationStyle:"dotted"}}>Undo pre-plate adjustment</button>
+              </div>;
+              return <div>
+                <input value={cfg.xdf} onChange={function(e){u("xdf",e.target.value);}} placeholder="1/2" style={{width:140,padding:"8px 12px",borderRadius:8,border:"1px solid #e5e5ea",fontSize:13,outline:"none",fontFamily:"monospace"}} />
+                {pDil(cfg.xdf)>0 && !showPanel && <button onClick={function(){u("showSmpPredilPanel",true);}} style={{display:"block",background:"transparent",border:"none",fontSize:10,color:"#8e9bb5",cursor:"pointer",padding:"2px 0",marginTop:5,textDecoration:"underline",textDecorationStyle:"dotted",fontStyle:"italic"}}>I diluted my sample before adding to the plate</button>}
+                {showPanel && <div style={{marginTop:8,padding:"10px 12px",background:"#f7fbff",border:"1px solid #c6d3e8",borderRadius:10}}>
+                  <div style={{fontSize:11,color:"#30437a",lineHeight:1.5,marginBottom:6}}>Enter the dilution you applied to your sample before it touched the plate — e.g. <code>1/10</code>. The app multiplies this into the first-row value so your dilution fields stay unchanged.</div>
+                  <input value={cfg.smpPredil||""} onChange={function(e){u("smpPredil",e.target.value);}} placeholder="e.g. 1/10" style={{width:130,padding:"7px 10px",borderRadius:8,border:"1px solid #e5e5ea",fontSize:12,fontFamily:"monospace",outline:"none"}} />
+                  {(function(){var f=pDil(cfg.xdf),p=pOptionalDil(cfg.smpPredil);if(!cfg.smpPredil||isNaN(f)||p===1)return null;return <div style={{marginTop:6,fontSize:11,color:"#7a4a00",lineHeight:1.45}}>✓ App will use <strong style={{fontFamily:"monospace"}}>{fmtDilution(f*p,dilFormat,100000)}</strong> for Sample row 1 ({fmtDilution(f,dilFormat,100000)} × {fmtDilution(p,dilFormat,100000)}). The field above stays as entered.</div>;})()}
+                  <button onClick={function(){u("showSmpPredilPanel",false);}} style={{background:"transparent",border:"none",fontSize:10,color:"#8e9bb5",cursor:"pointer",padding:"2px 0",marginTop:6,textDecoration:"underline",textDecorationStyle:"dotted"}}>Cancel</button>
+                </div>}
+              </div>;
+            })()}
+          </div>],
+          [<div><div>Dilution Factor</div><div>used on second</div><div>and remaining</div><div>rows of <span style={{color:"#30437a",fontWeight:700}}>Sample</span></div></div>,<input value={cfg.xds} onChange={function(e){u("xds",e.target.value);}} placeholder="1/2" style={{width:140,padding:"8px 12px",borderRadius:8,border:"1px solid #e5e5ea",fontSize:13,outline:"none",fontFamily:"monospace"}} />],
+          ] : []),
+          // Autosampler-mode sample dilution factors. Plate workflow uses xdf/xds for the same purpose;
+          // we reuse those keys here so the math layer needs no special-casing. These define the dilution
+          // applied to each Sample dilution row: Dil 1 = xdf, Dil 2 = Dil1 × xds, Dil 3 = Dil2 × xds, etc.
+          // The serial DF row (xds) is hidden when only 1 sample dilution row is configured — there's
+          // nothing to apply "between rows" of when there's only one row.
+          ...(cfg.layout==="autosampler" ? [
+          [<div><div>Dilution Factor</div><div>used on first</div><div>row of <span style={{color:"#30437a",fontWeight:700}}>Sample</span></div></div>,<input value={cfg.xdf} onChange={function(e){u("xdf",e.target.value);}} placeholder="1/10" style={{width:140,padding:"8px 12px",borderRadius:8,border:"1px solid #e5e5ea",fontSize:13,outline:"none",fontFamily:"monospace"}} />],
+          ...((parseInt(cfg.asNDilutions)||3) > 1 ? [
+          [<div><div>Dilution Factor</div><div>between</div><div>sample dilution rows</div></div>,<input value={cfg.xds} onChange={function(e){u("xds",e.target.value);}} placeholder="1/2" style={{width:140,padding:"8px 12px",borderRadius:8,border:"1px solid #e5e5ea",fontSize:13,outline:"none",fontFamily:"monospace"}} />]
+          ] : [])
+          ] : []),
+
           ["Spike recovery used?",<select value={cfg.spikeUsed} onChange={function(e){u("spikeUsed",e.target.value);}} style={{padding:"8px 12px",borderRadius:8,border:"1px solid #e5e5ea",fontSize:13}}><option value="no">No</option><option value="yes">Yes</option></select>],
-          [<div><div>Standard curve method</div><div style={{fontSize:11,color:"#aeaeb2",fontStyle:"italic",marginTop:2}}>How to fit the line</div></div>,<select value={cfg.forceOriginInCurve} onChange={function(e){u("forceOriginInCurve",e.target.value);}} style={{padding:"8px 12px",borderRadius:8,border:"1px solid #e5e5ea",fontSize:13}}><option value="no">Standards only (ICH M10 — recommended)</option><option value="yes">Standards + blank as (0,0)</option></select>],
-        ].map(function(row,i){return <div key={i} style={{display:"flex",gap:16,alignItems:"flex-start",padding:"10px 0",borderBottom:i<8?"1px solid #f0f0f3":"none"}}><div style={{width:240,flexShrink:0,fontSize:13,color:"#6e6e73",lineHeight:1.4}}>{row[0]}</div><div style={{flex:1}}>{row[1]}</div></div>;})}
+
+        ].map(function(row,i){return <div key={i} style={{display:"flex",gap:16,alignItems:"center",padding:"10px 0",borderBottom:i<10?"1px solid #f0f0f3":"none"}}><div style={{width:200,flexShrink:0,fontSize:13,color:"#6e6e73",lineHeight:1.4}}>{row[0]}</div><div style={{flex:1}}>{row[1]}</div></div>;})}
         </div>
         {cfg.spikeUsed==="yes"&&<div style={{background:SURFACE,borderRadius:18,border:"1px solid "+BORDER,padding:"1.25rem",marginBottom:"1.25rem",boxShadow:"0 8px 22px rgba(11,42,111,0.04)"}}>
           <div style={{background:"linear-gradient(135deg,#8f3fdb,#3478F6)",color:"#fff",padding:"10px 16px",borderRadius:12,fontSize:14,fontWeight:800,marginBottom:"1rem",boxShadow:"0 10px 22px rgba(52,120,246,0.16)"}}>Accuracy / spike recovery</div>
+          {instructor && cfg.layout==="autosampler" && <div style={{padding:"8px 12px",background:"#f7f1ff",border:"1px solid #e2d7fb",borderRadius:8,fontSize:11,color:"#3a2470",lineHeight:1.55,marginBottom:"1rem"}}>
+            <strong>Note for LC-MS quant:</strong> the recovery math here is classical — (spiked − unspiked) / expected × 100, applied to back-calculated concentrations from the curve. In MS workflows you'll often see <em>internal-standard-based recovery</em> instead, where each injection is normalized by the IS area before comparing spiked vs unspiked. That's a separate quantitation paradigm (area-ratio quant) — not yet wired into eSSF. For now, the classical formula works on your back-calculated concentrations.
+          </div>}
           <div style={{display:"grid",gridTemplateColumns:"1.1fr 1fr",gap:"1rem",marginBottom:"1rem"}}>
             <SpikeGuide instructor={instructor} />
             <div style={{background:"linear-gradient(180deg,#fbfdff,#f6f9ff)",border:"1px solid #dfe7f2",borderRadius:16,padding:"14px 16px"}}>
@@ -3863,7 +9771,7 @@ export default function App() {
                 <div style={{fontSize:12,fontWeight:800,color:"#6337b9",marginBottom:8}}>Spike stock</div>
                 <div style={{display:"grid",gridTemplateColumns:"1fr",gap:"0.8rem"}}>
                   <div><label style={{display:"block",fontSize:11,fontWeight:700,marginBottom:6,color:"#18233f"}}>Spike protein used</label><input value={set.spikeProtein} onChange={function(e){updateSpike(idx,"spikeProtein",e.target.value);}} style={{width:"100%",padding:"8px 10px",borderRadius:10,border:"1px solid #d8dfeb",fontSize:13}} /></div>
-                  <div><label style={{display:"block",fontSize:11,fontWeight:700,marginBottom:6,color:"#18233f"}}>Stock concentration of the spike</label><div style={{display:"flex",gap:8,alignItems:"center"}}><input value={set.stockConc} onChange={function(e){updateSpike(idx,"stockConc",e.target.value);}} style={{width:"100%",padding:"8px 10px",borderRadius:10,border:"1px solid #d8dfeb",fontSize:13}} /><select value={set.stockUnit} onChange={function(e){updateSpike(idx,"stockUnit",e.target.value);}} style={{padding:"8px 10px",borderRadius:10,border:"1px solid #d8dfeb",fontSize:13}}><option value="ug/uL">ug/uL</option><option value="mg/mL">mg/mL</option><option value="ug/mL">ug/mL</option><option value="ng/mL">ng/mL</option></select></div></div>
+                  <div><label style={{display:"block",fontSize:11,fontWeight:700,marginBottom:6,color:"#18233f"}}>Stock concentration of the spike</label><div style={{display:"flex",gap:8,alignItems:"center"}}><input value={set.stockConc} onChange={function(e){updateSpike(idx,"stockConc",e.target.value);}} style={{width:"100%",padding:"8px 10px",borderRadius:10,border:"1px solid #d8dfeb",fontSize:13}} /><select value={set.stockUnit} onChange={function(e){updateSpike(idx,"stockUnit",e.target.value);}} style={{padding:"8px 10px",borderRadius:10,border:"1px solid #d8dfeb",fontSize:13}}>{SPIKE_STOCK_UNITS.map(function(u){return <option key={u} value={u}>{u}</option>;})}</select></div></div>
                   <div><label style={{display:"block",fontSize:11,fontWeight:700,marginBottom:6,color:"#18233f"}}>Volume of the stock spike added to the sample</label><div style={{display:"flex",gap:8,alignItems:"center"}}><input value={set.spikeVol} onChange={function(e){updateSpike(idx,"spikeVol",e.target.value);}} style={{width:"100%",padding:"8px 10px",borderRadius:10,border:"1px solid #d8dfeb",fontSize:13}} /><select value={set.spikeVolUnit||"uL"} onChange={function(e){updateSpike(idx,"spikeVolUnit",e.target.value);}} style={{padding:"8px 10px",borderRadius:10,border:"1px solid #d8dfeb",fontSize:13}}><option value="uL">uL</option><option value="mL">mL</option></select></div>{(function(){var svUL=volToUL(parseFloat(set.spikeVol),set.spikeVolUnit||"uL")||0;var smUL=volToUL(parseFloat(set.sampleVol),set.sampleVolUnit||"uL")||0;var tv=svUL+smUL;if(tv>0&&svUL/tv>0.10){return <div style={{marginTop:6,fontSize:10,color:"#bf4800",fontWeight:600}}>&#9888; Spike is {((svUL/tv)*100).toFixed(0)}% of final volume (ICH M10 recommends &le;10%)</div>;}return null;})()}</div>
                   {(function(){
                     var svUL=volToUL(parseFloat(set.spikeVol),set.spikeVolUnit||"uL")||0;
@@ -3889,19 +9797,170 @@ export default function App() {
           </div>;})}
           <button onClick={addSpike} style={{background:"transparent",border:"1px solid #d8dfeb",padding:"10px 14px",borderRadius:10,fontSize:12,color:"#30437a",cursor:"pointer",fontWeight:700}}>Add spike set</button>
         </div>}
+        {analyzeError && <div style={{background:"#fff3f3",border:"1px solid #f0b8b8",borderRadius:10,padding:"10px 14px",marginTop:"1rem",marginBottom:"-0.5rem",display:"flex",alignItems:"flex-start",gap:10}}>
+          <span style={{fontSize:14,color:"#b4332e",fontWeight:700,flexShrink:0}}>⚠</span>
+          <div style={{flex:1}}>
+            <div style={{fontSize:11,fontWeight:700,color:"#b4332e",marginBottom:3}}>Cannot analyze yet</div>
+            <div style={{fontSize:12,color:"#7a3e3a",lineHeight:1.5}}>{analyzeError}</div>
+          </div>
+          <button onClick={function(){setAnalyzeError("");}} style={{background:"transparent",border:"none",color:"#b4332e",fontSize:14,cursor:"pointer",padding:"0 4px",lineHeight:1}} title="Dismiss">×</button>
+        </div>}
         <div style={{display:"flex",gap:12}}><button onClick={confirmAnalyze} disabled={!dv} style={{background:"linear-gradient(135deg,#1b7f6a,#3478F6)",color:"#fff",border:"none",padding:"11px 24px",borderRadius:12,fontWeight:700,fontSize:13,cursor:dv?"pointer":"not-allowed",opacity:dv?1:.5,boxShadow:"0 10px 20px rgba(11,42,111,0.10)"}}>Analyze</button><button onClick={demo} style={{background:"transparent",border:"1px solid #e5e5ea",padding:"11px 20px",borderRadius:12,fontSize:12,color:"#6e6e73",cursor:"pointer",fontWeight:600}}>Load demo</button></div>
       </div>)}
 
       {/* ANALYSIS */}
-      {tab===1&&res&&(function(){var p=res[vp];if(!p)return null;return (<div>
-        <div style={{position:"relative",display:"flex",justifyContent:"center",marginBottom:"1.5rem",background:"linear-gradient(180deg,#ffffff,#f5f9fe)",borderRadius:18,padding:"1.25rem",border:"1px solid #dfe7f2",boxShadow:"0 16px 34px rgba(11,42,111,0.08), inset 0 1px 0 rgba(255,255,255,0.85)"}}>
-          <StdChart pts={p.sc.pts} fn={p.fFn} sn={cfg.sn} fl={p.fL} r2={p.sc.r2} unit={unit} displayUnit={displayUnitChart} onDisplayUnitChange={setDisplayUnitChart} slope={p.sc.slope} intercept={p.sc.intercept} instructor={instructor} />
+      {tab===1&&res&&(function(){var p=res[vp];if(!p)return null;
+        // Multi-plate overlay: build a series array from every plate's standard curve.
+        // Plate colors cycle through a curated subset of GC (skipping GC[0]=teal which is reserved for the focused/active curve).
+        // The currently-viewed plate (vp) is rendered "active" in the chart (full color, error bars, glow);
+        // the rest fade to ghost markers + thin lines. Click a plate chip to switch focus.
+        var PLATE_COLORS = ["#2d74ea","#bf7a1a","#6337b9","#1b7f6a","#b4332e","#0f8aa2","#8a4f10","#5a2a6a","#1a3a8a","#9a1f5a","#1a5a2a","#6a4f10","#5a4a10","#3a2e7a","#0f5c4d","#7a2620"];
+        var stdSeries = res.map(function(pp,pi){
+          return {
+            label: stdDisplayName(pi),
+            pts: pp.sc.pts,
+            fn: pp.fFn,
+            fL: pp.fL,
+            r2: pp.sc.r2,
+            slope: pp.sc.slope,
+            intercept: pp.sc.intercept,
+            params: pp.sc.params,
+            model: pp.sc.model,
+            color: PLATE_COLORS[pi % PLATE_COLORS.length]
+          };
+        });
+        return (<div>
+        {assayKind==="elisa"&&<div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,marginBottom:12,padding:"10px 14px",background:"#f7f1ff",border:"1px solid #e2d7fb",borderRadius:12,flexWrap:"wrap"}}>
+          <div>
+            <div style={{fontSize:12,fontWeight:800,color:"#6337b9"}}>ELISA standard curve fit</div>
+            <div style={{fontSize:11,color:"#6e6e73",marginTop:2}}>4PL is the usual default. Use 5PL when the curve is visibly asymmetric. ELISA reporting prefers the least-diluted in-range result that also agrees with a neighboring dilution.</div>
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            <select value={cfg.fm==="5pl"?"5pl":"4pl"} onChange={function(e){u("fm",e.target.value);}} style={{padding:"8px 12px",borderRadius:8,border:"1px solid #d8dfeb",fontSize:13,background:"#fff"}}><option value="4pl">4PL</option><option value="5pl">5PL</option></select>
+            <button onClick={confirmAnalyze} style={{background:"#6337b9",color:"#fff",border:"none",padding:"8px 12px",borderRadius:8,fontSize:12,fontWeight:800,cursor:"pointer"}}>Re-analyze</button>
+          </div>
+        </div>}
+        <div style={{position:"relative",display:"flex",justifyContent:"center",marginBottom:"1rem",background:"linear-gradient(180deg,#ffffff,#f5f9fe)",borderRadius:18,padding:"1.25rem",border:"1px solid #dfe7f2",boxShadow:"0 16px 34px rgba(11,42,111,0.08), inset 0 1px 0 rgba(255,255,255,0.85)"}}>
+          {(function(){
+            // Plate selector overlay — only built when multi-plate. Passed into StdChart's overlay prop so it
+            // positions inside the canvas plot rectangle (bottom-right) and tracks canvas scaling on narrow viewports.
+            // Label is "PLATE" (not "FOCUS") so the analyst sees explicit context. Options spell out "Plate N — R²=…"
+            // in full (the dropdown sits in empty plot-area space and has room).
+            var overlayNode = null;
+            if(res.length>1){
+              var col = PLATE_COLORS[vp % PLATE_COLORS.length];
+              overlayNode = <div style={{display:"flex",alignItems:"center",gap:5,background:"rgba(255,255,255,0.96)",border:"1px solid "+col,borderRadius:8,padding:"2px 4px 2px 8px",boxShadow:"0 2px 8px rgba(11,42,111,0.10)"}}>
+                <span style={{width:7,height:7,borderRadius:"50%",background:col,display:"inline-block"}}></span>
+                <select value={vp} onChange={function(e){setVp(parseInt(e.target.value));}} style={{
+                  border:"none",background:"transparent",fontSize:11,fontWeight:700,color:"#30437a",
+                  cursor:"pointer",outline:"none",padding:"2px 2px",fontFamily:"inherit"
+                }}>
+                  {res.map(function(pp,pi){return <option key={pi} value={pi}>Plate {pi+1} — R²={sig3(pp.sc.r2)}</option>;})}
+                </select>
+              </div>;
+            }
+            return res.length>1
+              ? <StdChart series={stdSeries} activeIdx={vp} sn={cfg.sn} unit={unit} displayUnit={displayUnitChart} onDisplayUnitChange={setDisplayUnitChart} instructor={instructor} overlay={overlayNode} onFitChange={changeFitAndReanalyze} autoMode={cfg.fm==="auto"} />
+              : <StdChart pts={p.sc.pts} fn={p.fFn} sn={cfg.sn} fl={p.fL} r2={p.sc.r2} unit={unit} displayUnit={displayUnitChart} onDisplayUnitChange={setDisplayUnitChart} slope={p.sc.slope} intercept={p.sc.intercept} params={p.sc.params} curveModel={p.sc.model} instructor={instructor} onFitChange={changeFitAndReanalyze} autoMode={cfg.fm==="auto"} />;
+          })()}
         </div>
-        <details style={{marginBottom:"1rem"}}><summary style={{fontSize:13,fontWeight:700,cursor:"pointer"}}>Standard curve data</summary><table style={{borderCollapse:"collapse",width:"100%",marginTop:8}}><thead><tr><th style={{...thS,textAlign:"left"}}>[{cfg.sn}] (<UnitPill unit={displayUnitChart} onChange={setDisplayUnitChart} size={11} color="#6e6e73" hoverColor="#0b2a6f" weight={700} />)</th><th style={{...thS,textAlign:"right"}}>Avg optical response</th><th style={{...thS,textAlign:"right"}}>SD</th><th style={{...thS,textAlign:"right"}}>CV (%)</th></tr></thead><tbody>{p.sc.pts.map(function(pt,i){var concDisp = convertConc(pt.conc, unit, displayUnitChart); return <tr key={i}><td style={tdS}>{sig3(concDisp)}</td><td style={{...tdS,textAlign:"right"}}>{fm4(pt.avg)}</td><td style={{...tdS,textAlign:"right"}}>{fm4(pt.sd)}</td><td style={{...tdS,textAlign:"right"}}><CVB val={pt.cv} /></td></tr>;})}</tbody></table></details>
+        {/* Focused-plate toolbar: jump-to-sample picker. Lists samples across ALL plates so the analyst can jump cross-plate without first switching focus.
+            When a sample on a different plate is picked, focus switches first, then the card opens and scrolls into view. */}
+        {res.some(function(pp){return pp.samps.length>0;}) && <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:10,padding:"8px 12px",background:"#f7fbff",border:"1px solid #dfe7f2",borderRadius:10,flexWrap:"wrap"}}>
+          <span style={{fontSize:11,fontWeight:700,color:"#6e6e73",textTransform:"uppercase",letterSpacing:1}}>Jump to sample:</span>
+          <select onChange={function(e){
+            var v = e.target.value;
+            if(!v) return;
+            var parts = v.split(":");
+            var pi = parseInt(parts[0]);
+            var si = parseInt(parts[1]);
+            if(isNaN(pi) || isNaN(si)) return;
+            var ek = pi+"-"+si;
+            // If the target is on a different plate, switch focus first.
+            if(pi !== vp) setVp(pi);
+            // Open the card if collapsed.
+            var n={};for(var k in expanded)n[k]=expanded[k];n[ek]=true;setExpanded(n);
+            // Scroll into view — give React a tick to mount the new plate's DOM if we just changed vp.
+            setTimeout(function(){
+              var el = document.getElementById("ana-sample-"+pi+"-"+si);
+              if(el) el.scrollIntoView({behavior:"smooth",block:"start"});
+            }, pi !== vp ? 120 : 50);
+            e.target.value="";
+          }} value="" style={{padding:"5px 9px",borderRadius:8,border:"1px solid #d8dfeb",fontSize:12,background:"#fff",fontWeight:600,color:"#30437a",minWidth:200,cursor:"pointer"}}>
+            <option value="">— select a sample —</option>
+            {res.length>1
+              ? res.map(function(pp,pi){
+                  return <optgroup key={pi} label={"Plate "+(pi+1)}>
+                    {pp.samps.map(function(s,si){return <option key={si} value={pi+":"+si}>{s.name}</option>;})}
+                  </optgroup>;
+                })
+              : (res[0]||{samps:[]}).samps.map(function(s,si){return <option key={si} value={"0:"+si}>{s.name}</option>;})
+            }
+          </select>
+          <span style={{flex:1}}></span>
+          <span style={{fontSize:10,color:"#8e9bb5",fontStyle:"italic"}}>{(function(){var t=0;res.forEach(function(pp){t+=pp.samps.length;});return t;})()} sample{(function(){var t=0;res.forEach(function(pp){t+=pp.samps.length;});return t===1?"":"s";})()} total{res.length>1?" across "+res.length+" plates":""}</span>
+        </div>}
+        <details style={{marginBottom:"1rem"}}><summary style={{fontSize:13,fontWeight:700,cursor:"pointer"}}>Standard curve data {res.length>1 ? "— "+stdDisplayName(vp) : ""}</summary><div style={{fontSize:11,color:"#6e6e73",marginTop:8}}>Optical responses shown here are <strong>blank/background-corrected</strong> before fitting.{res.length>1 ? " Showing focused plate only — change focus in the dropdown on the chart to see another plate's data." : ""}</div><table style={{borderCollapse:"collapse",width:"100%",marginTop:8}}><thead><tr><th style={{...thS,textAlign:"center"}}>[{cfg.sn}] (<UnitPill unit={displayUnitChart} onChange={setDisplayUnitChart} size={11} color="#6e6e73" hoverColor="#0b2a6f" weight={700} />)</th><th style={{...thS,textAlign:"center",lineHeight:1.3}}><div>Avg corrected</div><div>optical response</div></th><th style={{...thS,textAlign:"center"}}>SD</th><th style={{...thS,textAlign:"center"}}>CV (%)</th></tr></thead><tbody>{p.sc.pts.map(function(pt,i){var concDisp = convertConc(pt.conc, unit, displayUnitChart); return <tr key={i}><td style={tdS}>{sig3(concDisp)}</td><td style={{...tdS,textAlign:"center"}}>{fmtResponse(pt.avg)}</td><td style={{...tdS,textAlign:"center"}}>{fmtResponse(pt.sd)}</td><td style={{...tdS,textAlign:"center"}}><CVB val={pt.cv} /></td></tr>;})}</tbody></table>
+        {/* Regression parameters table — fitted-curve coefficients for the focused plate.
+            Shape depends on the fit model: linear shows slope/intercept/R²; 4PL adds A/B/C/D; 5PL adds G as well.
+            C (the half-maximal concentration) is shown in the active display unit so it's directly interpretable.
+            Other coefficients (A, B, D, G, slope, intercept) are unitless or in optical-response units, so they
+            don't change with unit selection. */}
+        <div style={{marginTop:14,padding:"10px 12px",background:"#f7fbff",border:"1px solid #d7e7fb",borderRadius:8}}>
+          <div style={{fontSize:12,fontWeight:700,color:"#30437a",marginBottom:6}}>Regression parameters {res.length>1 ? "— "+stdDisplayName(vp) : ""}</div>
+          {(function(){
+            var model = p.sc.model;
+            var rows = [];
+            if (model === "linear") {
+              // Display slope in the active display unit. y = slope*x + intercept; if x changes by factor k, slope divides by k.
+              var displaySlope = p.sc.slope!=null ? p.sc.slope / convertConc(1, unit, displayUnitChart) : null;
+              rows.push({ k: "Slope", v: displaySlope!=null?sig3(displaySlope):"—", help: "(response per "+displayUnitChart+")" });
+              rows.push({ k: "Intercept", v: sig3(p.sc.intercept), help: "(response at zero concentration; theoretically zero on a blank-corrected curve)" });
+            } else if (model === "loglog") {
+              // log10(y) = slope * log10(x) + intercept. Slope/intercept are dimensionless on the log axes.
+              // Equivalent power-law form: y = (10^intercept) * x^slope. Note: this means the prefactor changes
+              // with the unit of x (since the prefactor absorbs unit scaling). We don't auto-rescale the displayed
+              // slope/intercept by displayUnit because they're not in any concentration unit — they're log10-scale.
+              rows.push({ k: "Slope (log–log)", v: sig3(p.sc.slope), help: "(power-law exponent; 1 = exact linear; >1 = response grows faster than concentration)" });
+              rows.push({ k: "Intercept (log–log)", v: sig3(p.sc.intercept), help: "(log\u2081\u2080 of the response at concentration = 1 in the base unit, "+unit+")" });
+              rows.push({ k: "Prefactor (10^intercept)", v: sig3(Math.pow(10, p.sc.intercept)), help: "(the response value at concentration = 1 in the base unit; equivalent power-law form: y = prefactor \u00d7 x^slope)" });
+            } else {
+              var P = p.sc.params || {};
+              rows.push({ k: "A", v: sig3(P.A), help: "(asymptote at high concentration)" });
+              rows.push({ k: "D", v: sig3(P.D), help: "(asymptote at low concentration)" });
+              rows.push({ k: "C", v: P.C!=null?sig3(convertConc(P.C, unit, displayUnitChart))+" "+displayUnitChart:"—", help: "(midpoint / EC50 — concentration at half-maximal response)" });
+              rows.push({ k: "B", v: sig3(P.B), help: "(slope factor / Hill coefficient)" });
+              if (model === "5pl") rows.push({ k: "G", v: sig3(P.G), help: "(asymmetry factor; 1 reduces to 4PL)" });
+            }
+            rows.push({ k: "R²", v: sig3(p.sc.r2), help: model==="loglog" ? "(coefficient of determination on log\u2013log axes; closer to 1 = better fit on the log scale)" : "(coefficient of determination; closer to 1 = better fit)" });
+            return <table style={{borderCollapse:"collapse",width:"100%"}}>
+              <thead><tr>
+                <th style={{...thS,textAlign:"center",fontSize:10}}>Parameter</th>
+                <th style={{...thS,textAlign:"center",fontSize:10}}>Value</th>
+                {instructor && <th style={{...thS,textAlign:"center",fontSize:10}}>Notes</th>}
+              </tr></thead>
+              <tbody>
+                {rows.map(function(r,i){return <tr key={i}>
+                  <td style={{...tdS,fontWeight:700,fontSize:12}}>{r.k}</td>
+                  <td style={{...tdS,fontFamily:"monospace",fontSize:12,fontWeight:700,color:"#0b2a6f"}}>{r.v}</td>
+                  {instructor && <td style={{...tdS,fontSize:11,color:"#6e6e73",fontStyle:"italic"}}>{r.help}</td>}
+                </tr>;})}
+              </tbody>
+            </table>;
+          })()}
+          {instructor && <div style={{marginTop:8,fontSize:10,color:"#8e9bb5",fontStyle:"italic"}}>
+            {p.sc.model === "linear"
+              ? "Equation: y = slope × x + intercept"
+              : (p.sc.model === "loglog"
+                  ? "Equation: log\u2081\u2080(y) = slope \u00d7 log\u2081\u2080(x) + intercept   \u2261   y = (10^intercept) \u00d7 x^slope"
+                  : (p.sc.model === "5pl" ? "Equation: y = D + (A − D) / (1 + (x/C)^B)^G" : "Equation: y = D + (A − D) / (1 + (x/C)^B)"))}
+          </div>}
+        </div>
+        </details>
         {/* Expand/collapse all */}
         <div style={{display:"flex",gap:12,marginBottom:12}}><button onClick={function(){toggleAll(true);}} style={{fontSize:12,color:"#3478F6",background:"transparent",border:"none",cursor:"pointer",fontWeight:600}}>Expand all samples</button><button onClick={function(){toggleAll(false);}} style={{fontSize:12,color:"#6e6e73",background:"transparent",border:"none",cursor:"pointer",fontWeight:600}}>Collapse all</button></div>
         {p.samps.map(function(s,si){var sel=gsc(vp,si);var gc=GC[(si+1)%GC.length];var ek=vp+"-"+si;var isOpen=expanded[ek];return (
-          <div key={si} style={{marginBottom:8,background:"#fff",borderRadius:14,border:"1px solid #e5e5ea",overflow:"hidden",boxShadow:"0 10px 22px rgba(11,42,111,0.05)"}}>
+          <div key={si} id={"ana-sample-"+vp+"-"+si} style={{marginBottom:8,background:"#fff",borderRadius:14,border:"1px solid #e5e5ea",overflow:"hidden",boxShadow:"0 10px 22px rgba(11,42,111,0.05)",scrollMarginTop:80}}>
             <div onClick={function(){var n={};for(var k in expanded)n[k]=expanded[k];n[ek]=!isOpen;setExpanded(n);}} style={{background:"linear-gradient(180deg,"+gc.hd+", "+gc.bg+")",padding:"11px 16px",display:"flex",alignItems:"center",gap:10,cursor:"pointer",userSelect:"none",borderBottom:"1px solid rgba(255,255,255,0.35)",boxShadow:glow(gc)}}>
               <span style={{fontSize:14,fontWeight:700,color:gc.tx,transition:"transform 0.2s",transform:isOpen?"rotate(90deg)":"rotate(0deg)"}}>&#9654;</span>
               <span style={{fontSize:11,fontWeight:700,color:gc.tx,textTransform:"uppercase",letterSpacing:1}}>Sample</span>
@@ -3911,11 +9970,11 @@ export default function App() {
             {isOpen&&(<div style={{padding:"1rem 1.25rem",overflowX:"auto"}}>
               {instructor&&<div style={{fontSize:11,color:"#3478F6",marginBottom:8,fontWeight:600}}>Click any row for step-by-step math</div>}
               <table style={{borderCollapse:"collapse",width:"100%"}}><thead><tr>
-                <th style={{...thS,textAlign:"left"}}>Dilution</th>
-                <th style={{...thS,textAlign:"right"}}>Average corrected response</th>
-                <th style={{...thS,textAlign:"right"}}>CV (%)</th>
-                <th style={{...thS,textAlign:"right"}}>[{cfg.sn}] in well (<UnitPill unit={displayUnitChart} onChange={setDisplayUnitChart} size={11} color="#6e6e73" hoverColor="#0b2a6f" weight={700} />)</th>
-                <th style={{...thS,textAlign:"right"}}>[{targetP}] in sample (<UnitPill unit={displayUnitChart} onChange={setDisplayUnitChart} size={11} color="#6e6e73" hoverColor="#0b2a6f" weight={700} />)</th>
+                <th style={{...thS,textAlign:"center"}}>Dilution</th>
+                <th style={{...thS,textAlign:"center",lineHeight:1.3}}><div>Average corrected</div><div>response</div></th>
+                <th style={{...thS,textAlign:"center"}}>CV (%)</th>
+                <th style={{...thS,textAlign:"center",lineHeight:1.3}}><div>[{targetP}]</div><div style={{fontWeight:500,fontSize:10,color:"#8e9bb5",textAlign:"center"}}>in well (<UnitPill unit={displayUnitChart} onChange={setDisplayUnitChart} size={10} color="#8e9bb5" hoverColor="#0b2a6f" weight={500} />)</div></th>
+                <th style={{...thS,textAlign:"center",lineHeight:1.3}}><div>[{targetP}]</div><div style={{fontWeight:500,fontSize:10,color:"#8e9bb5",textAlign:"center"}}>in sample (<UnitPill unit={displayUnitChart} onChange={setDisplayUnitChart} size={10} color="#8e9bb5" hoverColor="#0b2a6f" weight={500} />)</div></th>
                 <th style={{...thS,textAlign:"center"}}>In range?</th>
               </tr></thead><tbody>{s.dils.map(function(d,di){
                 var isRec=sel&&sel.dil===d.di&&!picks[ek];
@@ -3926,17 +9985,64 @@ export default function App() {
                 return [
                   <tr key={di} style={{background:bg,cursor:instructor?"pointer":"default"}} onClick={function(){if(!instructor)return;if(isMO)setMathRow(null);else setMathRow({pi:vp,si:si,di:d.di});}} title={!d.ir&&instructor?"OOR — back-calculated value shown for teaching only. Do not report (extrapolated outside the standard curve range).":""}>
                     <td style={{...tdS,fontWeight:isRec||isPk?700:400}}>{d.di}{isRec?" *":""}</td>
-                    <td style={{...tdS,textAlign:"right"}}>{fm4(d.avgA)}</td>
-                    <td style={{...tdS,textAlign:"right"}}><CVB val={d.cv} /></td>
-                    <td style={{...tdS,textAlign:"right",color:!d.ir&&instructor?"#a05a00":"inherit",fontStyle:!d.ir&&instructor?"italic":"normal"}}>{d.cW!=null?(d.ir?sig3(convertConc(d.cW, unit, displayUnitChart)):(instructor?sig3(convertConc(d.cW, unit, displayUnitChart)):"---")):"---"}</td>
-                    <td style={{...tdS,textAlign:"right",fontWeight:isRec||isPk?700:400,color:!d.ir&&instructor?"#a05a00":"inherit",fontStyle:!d.ir&&instructor?"italic":"normal"}}>{d.cS!=null?(d.ir?sig3(convertConc(d.cS, unit, displayUnitChart)):(instructor?sig3(convertConc(d.cS, unit, displayUnitChart)):"---")):"---"}</td>
+                    <td style={{...tdS,textAlign:"center"}}>{fmtResponse(d.avgA)}</td>
+                    <td style={{...tdS,textAlign:"center"}}><CVB val={d.cv} /></td>
+                    <td style={{...tdS,textAlign:"center",color:!d.ir&&instructor?"#a05a00":"inherit",fontStyle:!d.ir&&instructor?"italic":"normal"}}>{d.cW!=null?(d.ir?sig3(convertConc(d.cW, unit, displayUnitChart)):(instructor?sig3(convertConc(d.cW, unit, displayUnitChart)):"---")):"---"}</td>
+                    <td style={{...tdS,textAlign:"center",fontWeight:isRec||isPk?700:400,color:!d.ir&&instructor?"#a05a00":"inherit",fontStyle:!d.ir&&instructor?"italic":"normal"}}>{d.cS!=null?(d.ir?sig3(convertConc(d.cS, unit, displayUnitChart)):(instructor?sig3(convertConc(d.cS, unit, displayUnitChart)):"---")):"---"}</td>
                     <td style={{...tdS,textAlign:"center"}}>{d.ir?<span style={{color:"#1b7f6a",fontWeight:700}}>IR</span>:<span style={{color:"#d70015"}}>OOR</span>}</td>
                   </tr>,
-                  isMO&&dbD2?<tr key={di+"m"}><td colSpan={6} style={{padding:0,border:"none"}}><MathWalk d={dbD2} slope={p.sc.slope} intercept={p.sc.intercept} sn={cfg.sn} target={targetP} unit={unit} displayUnit={displayUnitChart} instructor={instructor} /></td></tr>:null
+                  isMO&&dbD2?<tr key={di+"m"}><td colSpan={6} style={{padding:0,border:"none"}}><MathWalk d={dbD2} slope={p.sc.slope} intercept={p.sc.intercept} params={p.sc.params} curveModel={p.sc.model} sn={cfg.sn} target={targetP} unit={unit} displayUnit={displayUnitChart} instructor={instructor} /></td></tr>:null
                 ];})}</tbody></table>
             </div>)}
           </div>
         );})}
+        {/* Plate pager — only when multi-plate. Lets the analyst advance to the next plate without scrolling back up to the chart dropdown.
+            Does NOT scroll to top of page on click — the user is reading near the bottom and likely wants to keep flipping.
+            After click, scrolls the pager itself into view (since plates have different sample counts and the pager's vertical
+            position can shift), keeping the buttons under the user's cursor. */}
+        {res.length>1 && <div id="ana-plate-pager" style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,padding:"14px 18px",marginTop:"1rem",background:"linear-gradient(180deg,#f7fbff,#ffffff)",border:"1px solid #dfe7f2",borderRadius:14,boxShadow:"0 6px 16px rgba(11,42,111,0.04)",scrollMarginBottom:20}}>
+          <button onClick={function(){
+            var prev = vp===0 ? res.length-1 : vp-1;
+            setVp(prev);
+            setTimeout(function(){
+              var el = document.getElementById("ana-plate-pager");
+              if(el) el.scrollIntoView({behavior:"smooth",block:"end"});
+            }, 30);
+          }} style={{
+            display:"inline-flex",alignItems:"center",gap:8,
+            padding:"9px 16px",borderRadius:10,
+            border:"1px solid #c6d3e8",background:"#fff",color:"#30437a",
+            fontSize:13,fontWeight:700,cursor:"pointer",
+            boxShadow:"0 2px 6px rgba(11,42,111,0.06)"
+          }}>
+            <span style={{fontSize:14}}>←</span>
+            <span>Previous plate</span>
+            <span style={{fontSize:11,color:"#8e9bb5",fontWeight:500}}>(Plate {vp===0 ? res.length : vp})</span>
+          </button>
+          <div style={{fontSize:12,color:"#6e6e73",fontWeight:600,textAlign:"center"}}>
+            <div style={{fontSize:10,textTransform:"uppercase",letterSpacing:1,color:"#8e9bb5",fontWeight:700}}>Now viewing</div>
+            <div style={{fontSize:14,fontWeight:800,color:"#0b2a6f"}}>Plate {vp+1} of {res.length}</div>
+          </div>
+          <button onClick={function(){
+            var next = (vp+1) % res.length;
+            setVp(next);
+            setTimeout(function(){
+              var el = document.getElementById("ana-plate-pager");
+              if(el) el.scrollIntoView({behavior:"smooth",block:"end"});
+            }, 30);
+          }} style={{
+            display:"inline-flex",alignItems:"center",gap:8,
+            padding:"9px 16px",borderRadius:10,
+            border:"1px solid "+PLATE_COLORS[((vp+1)%res.length) % PLATE_COLORS.length],
+            background:PLATE_COLORS[((vp+1)%res.length) % PLATE_COLORS.length],color:"#fff",
+            fontSize:13,fontWeight:700,cursor:"pointer",
+            boxShadow:"0 4px 10px rgba(11,42,111,0.15)"
+          }}>
+            <span style={{fontSize:11,opacity:0.85,fontWeight:500}}>(Plate {((vp+1)%res.length)+1})</span>
+            <span>Next plate</span>
+            <span style={{fontSize:14}}>→</span>
+          </button>
+        </div>}
       </div>);})()}
       {tab===1&&!res&&<div style={{padding:"3rem",textAlign:"center",color:"#aeaeb2"}}>Paste data and click Analyze.</div>}
 
@@ -3944,7 +10050,7 @@ export default function App() {
       {tab===2&&res&&(function(){
         var qc=runQC();
         return (<div>
-        {/* Run-level QC banner (if spike recovery was performed) */}
+        {/* Run-level QC banner (if spike recovery was performed). Detailed validation moved to Method Review tab. */}
         {qc && <div style={{marginBottom:"1.25rem",padding:"16px 18px",borderRadius:14,background:qc.status==="pass"?"linear-gradient(180deg,#e8f5ea,#d6eedf)":qc.status==="fail"?"linear-gradient(180deg,#ffeaed,#fcdce0)":"linear-gradient(180deg,#fff6e8,#fbe9cd)",border:"1px solid "+(qc.status==="pass"?"#8fc4a1":qc.status==="fail"?"#d98a8f":"#d4a76a")}}>
           <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
             <span style={{fontSize:22,fontWeight:800,color:qc.status==="pass"?"#1b7f6a":qc.status==="fail"?"#b4332e":"#9a6a00"}}>{qc.status==="pass"?"✓":qc.status==="fail"?"✗":"⚠"}</span>
@@ -3954,23 +10060,93 @@ export default function App() {
               {qc.nWithRec===0 && <div style={{fontSize:12,color:"#5a6984"}}>Spike sets are configured but recovery could not be computed (may be missing measured concentrations).</div>}
             </div>
           </div>
-          <div style={{fontSize:11,color:"#5a6984",lineHeight:1.6,paddingLeft:32}}>
+          {instructor && <div style={{fontSize:11,color:"#5a6984",lineHeight:1.6,paddingLeft:32}}>
             {qc.status==="pass" && <span><strong>Interpretation:</strong> the assay is measuring accurately for the spiked sample(s). Report concentrations as-measured.</span>}
             {qc.status==="fail" && <span><strong>Interpretation:</strong> all spike recoveries are outside the 80–120% window. The run fails QC by ICH M10. Investigate matrix effects, stock accuracy, or assay drift before reporting. Do <em>not</em> apply recovery as a per-sample correction factor.</span>}
             {qc.status==="mixed" && <span><strong>Interpretation:</strong> recoveries vary across spike sets — some pass, some fail. The assay may be sensitive to matrix differences between samples. Review each spike set individually before deciding what to report.</span>}
             {qc.anyOverride && <span><br/><span style={{color:"#7a4a00"}}><strong>Note:</strong> {qc.nOverride} spike set{qc.nOverride===1?"":"s"} used the endogenous=0 override. Recovery on those sets is only valid if the matrix is truly analyte-free.</span></span>}
-          </div>
+          </div>}
         </div>}
 
-        {/* Strategy selector (simple, at top) */}
-        <div style={{background:"#fff",borderRadius:14,border:"1px solid #e5e5ea",padding:"1rem 1.25rem",marginBottom:"1rem"}}>
-          <div style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
-            <label style={{fontSize:13,fontWeight:700}}>Dilution selection strategy</label>
-            <select value={sm} onChange={function(e){setSm(e.target.value);}} style={{padding:"8px 12px",borderRadius:8,border:"1px solid #e5e5ea",fontSize:13,fontWeight:600}}>{SM.map(function(m){return <option key={m.id} value={m.id}>{m.name}</option>;})}</select>
-            <span style={{fontSize:11,color:"#6e6e73",fontStyle:"italic"}}>{SM.find(function(m){return m.id===sm;}).desc}</span>
+        {/* Picks summary — subtle dotted-link disclosure. Mirrors the Recommendations summary table format
+            but reflects the analyst's ACTUAL picks (live as they toggle radio buttons in the cards below).
+            Uses <details> for native disclosure. Auto-expands if any pick has a QC failure. */}
+        {(function(){
+          // Check for QC issues — only flag genuine problems (CV >20%). Missing picks are
+          // legitimate "no qualified concentration" outcomes, not QC issues.
+          var summaryRowsCheck = buildSummaryRows(sm);
+          var issues = [];
+          summaryRowsCheck.forEach(function(r){
+            var name = r.name || "(unnamed)";
+            if (r.analystConc != null && r.analystCv != null && r.analystCv > 0.20) {
+              issues.push(name + " (CV " + (r.analystCv*100).toFixed(0) + "%)");
+            }
+          });
+          var anyIssue = issues.length > 0;
+          var issueMsg = anyIssue ? ("⚠ Issues: " + issues.slice(0,3).join(", ") + (issues.length > 3 ? " and " + (issues.length-3) + " more" : "") + " — click to review") : "Show summary of my picks";
+          return <details open={anyIssue} style={{marginBottom:"1rem"}}>
+          <summary style={{display:"inline-block",cursor:"pointer",fontSize:12,color:anyIssue?"#b4332e":"#3478F6",fontWeight:600,fontStyle:"italic",textDecoration:"underline",textDecorationStyle:"dotted",userSelect:"none",padding:"4px 0"}}>
+            {issueMsg}
+          </summary>
+          <div style={{marginTop:8,background:"#fff",borderRadius:14,border:"1px solid #e5e5ea",padding:"1rem 1.25rem"}}>
+            <div style={{display:"flex",alignItems:"baseline",justifyContent:"space-between",gap:12,marginBottom:10,flexWrap:"wrap"}}>
+              <h4 style={{fontSize:13,fontWeight:700,margin:0,color:"#30437a"}}>Your picks summary</h4>
+              <div style={{display:"flex",alignItems:"baseline",gap:14}}>
+                {res.length>1 && <span onClick={function(){setShowPlateSeparators(!showPlateSeparators);}} style={{fontSize:11,color:"#3478F6",cursor:"pointer",fontStyle:"italic",fontWeight:600,textDecoration:"underline",textDecorationStyle:"dotted",userSelect:"none"}}>{showPlateSeparators?"Hide plate separators":"Show plate separators"}</span>}
+                <span onClick={function(){setShowDilutions(!showDilutions);}} style={{fontSize:11,color:"#3478F6",cursor:"pointer",fontStyle:"italic",fontWeight:600,textDecoration:"underline",textDecorationStyle:"dotted",userSelect:"none"}}>{showDilutions?"Hide dilution":"Show dilution"}</span>
+              </div>
+            </div>
+            {(function(){
+              var rows = buildSummaryRows(sm);
+              var anyOverride = rows.some(function(r){return r.hasOverride;});
+              return <div>
+                <div style={{overflowX:"auto"}}>
+                  <table style={{borderCollapse:"collapse",width:"100%"}}>
+                    <thead><tr>
+                      {res.length>1 && <th style={{...thS,textAlign:"center"}}>Plate</th>}
+                      <th style={{...thS,textAlign:"center"}}>Sample</th>
+                      <th style={{...thS,textAlign:"center",lineHeight:1.3}}><div>Algorithm pick</div><div style={{fontWeight:500,fontSize:10,color:"#8e9bb5",textAlign:"center"}}>[{targetP}] (<UnitPill unit={displayUnitResults} onChange={setDisplayUnitResults} size={10} color="#8e9bb5" hoverColor="#0b2a6f" weight={500} />)</div></th>
+                      <th style={{...thS,textAlign:"center",lineHeight:1.3,background:"#f6fbff"}}><div>Analyst pick</div><div style={{fontWeight:500,fontSize:10,color:"#8e9bb5",textAlign:"center"}}>[{targetP}] (<UnitPill unit={displayUnitResults} onChange={setDisplayUnitResults} size={10} color="#8e9bb5" hoverColor="#0b2a6f" weight={500} />)</div></th>
+                      <th style={{...thS,textAlign:"center"}}>CV (%)</th>
+                      <th style={{...thS,textAlign:"center"}}>Recovery</th>
+                    </tr></thead>
+                    <tbody>
+                      {rows.map(function(r,i){
+                        var rowBg = r.disagrees ? "rgba(180,51,46,0.07)" : (r.hasOverride ? "#fff8e1" : "transparent");
+                        var analystColor = r.disagrees ? "#b4332e" : "#0b2a6f";
+                        // Plate separator: solid line on top of row when previous row was a different plate
+                        var prevPi = i>0 ? rows[i-1].pi : null;
+                        var isPlateBoundary = res.length>1 && showPlateSeparators && prevPi != null && prevPi !== r.pi;
+                        var rowStyle = {background:rowBg};
+                        if (isPlateBoundary) rowStyle.borderTop = "2px solid #6f7fa0";
+                        return <tr key={i} style={rowStyle}>
+                          {res.length>1 && <td style={tdS}>{r.pi}</td>}
+                          <td style={{...tdS,fontWeight:700}}>{r.name}</td>
+                          <td style={{...tdS,textAlign:"center",color:"#5a6984"}}>
+                            <div style={{fontWeight:700}}>{r.algoConc!=null?sig3(convertConc(r.algoConc, unit, displayUnitResults)):"—"}</div>
+                            {showDilutions && <div style={{fontSize:9,color:"#aeaeb2",fontStyle:"italic",fontWeight:500}}>{r.algoDilDf!=null?"at "+fmtDilution(r.algoDilDf,dilFormat,100000):""}</div>}
+                          </td>
+                          <td style={{...tdS,textAlign:"center",background:r.disagrees?"rgba(180,51,46,0.04)":"#f6fbff",color:analystColor}}>
+                            <div style={{fontWeight:800}}>{r.analystConc!=null?sig3(convertConc(r.analystConc, unit, displayUnitResults)):"—"}</div>
+                            {showDilutions && <div style={{fontSize:9,fontStyle:"italic",fontWeight:500,color:r.disagrees?"#b4332e":"#aeaeb2"}}>{r.analystDilDf!=null?"at "+fmtDilution(r.analystDilDf,dilFormat,100000):""}</div>}
+                          </td>
+                          <td style={{...tdS,textAlign:"center"}}>{r.analystCv!=null?<CVB val={r.analystCv} />:"—"}</td>
+                          <td style={{...tdS,textAlign:"center",fontWeight:700,color:r.recovery==null?"#aeaeb2":(r.recovery>=80&&r.recovery<=120?"#1b7f6a":"#b4332e")}}>{r.recovery!=null?r.recovery.toFixed(0)+"%":"—"}</td>
+                        </tr>;
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                <div style={{marginTop:10,fontSize:11,color:"#5a6984",fontStyle:"italic"}}>
+                  {anyOverride
+                    ? <span>Rows tinted red are samples where your pick differs from the algorithm.{instructor && <span> The analyst-pick column shows your reported concentration in red. Reasonable when the data justifies it (e.g. <span title={DILUTIONAL_LINEARITY_TIP} style={{cursor:"help",borderBottom:"1px dotted #5a6984"}}>dilutional linearity</span> agreement, hook-effect avoidance) — be ready to defend the choice in your method record.</span>}</span>
+                    : <span>No overrides — your reported concentrations match the algorithm.</span>}
+                </div>
+              </div>;
+            })()}
           </div>
-          <div style={{fontSize:11,color:"#8e9bb5",marginTop:8,fontStyle:"italic"}}>Want to see how strategies compare? Open the <strong>Recommendations</strong> tab.</div>
-        </div>
+        </details>;
+        })()}
 
         {/* Per-sample cards */}
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,marginBottom:10,flexWrap:"wrap"}}>
@@ -3984,24 +10160,22 @@ export default function App() {
             <button onClick={function(){toggleResultsAll(false);}} style={{fontSize:12,color:"#6e6e73",background:"transparent",border:"none",cursor:"pointer",fontWeight:600}}>Collapse all</button>
           </div>
         </div>
-        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10,fontSize:12,color:"#6e6e73"}}>
-          <span style={{color:"#1b7f6a",fontWeight:800,fontSize:14}}>★</span>
-          <span>Recommended by the current strategy ({SM.find(function(m){return m.id===sm;}).short})</span>
-        </div>
         {res.flatMap(function(pp,pi){return pp.samps.map(function(s,si){
           var algoSel=s.aS[sm];var apk=pi+"-"+si;var gc=GC[(si+1)%GC.length];var rk=pi+"-"+si;var open=resultsExpanded[rk];
           var mySpikeRows=spikeRowsForSample(pi,si);
+          var chosen=gsc(pi,si);
           return (<div key={pi+"-"+si} style={{marginBottom:"1rem",background:"#fff",borderRadius:14,border:"1px solid #e5e5ea",overflow:"hidden",boxShadow:"0 10px 22px rgba(11,42,111,0.05)"}}>
             <div onClick={function(){var n={};for(var k in resultsExpanded)n[k]=resultsExpanded[k];n[rk]=!open;setResultsExpanded(n);}} style={{background:"linear-gradient(180deg,"+gc.hd+", "+gc.bg+")",padding:"11px 16px",display:"flex",alignItems:"center",gap:8,cursor:"pointer",borderBottom:open?"1px solid rgba(255,255,255,0.35)":"none",boxShadow:glow(gc)}}>
               <span style={{fontSize:14,fontWeight:700,color:gc.tx,transition:"transform 0.2s",transform:open?"rotate(90deg)":"rotate(0deg)"}}>&#9654;</span>
               <span style={{fontSize:11,fontWeight:700,color:gc.tx,textTransform:"uppercase",letterSpacing:1}}>Plate {pi+1}</span>
               <span style={{fontSize:14,fontWeight:800,color:gc.tx}}>{s.name}</span>
-              {mySpikeRows.length>0 && mySpikeRows[0].recovery!=null && <span style={{marginLeft:"auto",fontSize:11,fontWeight:700,padding:"3px 10px",borderRadius:20,background:mySpikeRows[0].recovery>=80&&mySpikeRows[0].recovery<=120?"#e8f5ea":"#ffeaed",color:mySpikeRows[0].recovery>=80&&mySpikeRows[0].recovery<=120?"#1b7f6a":"#b4332e"}}>Recovery {mySpikeRows[0].recovery.toFixed(0)}%</span>}
+              <span style={{marginLeft:"auto",fontSize:12,color:gc.tx,fontWeight:800,opacity:0.95}}>{chosen&&chosen.conc!=null?"Picked: "+sig3(convertConc(chosen.conc, unit, displayUnitResults))+" "+displayUnitResults:"No qualified concentration"}</span>
+              {mySpikeRows.length>0 && mySpikeRows[0].recovery!=null && <span style={{fontSize:11,fontWeight:700,padding:"3px 10px",borderRadius:20,background:mySpikeRows[0].recovery>=80&&mySpikeRows[0].recovery<=120?"#e8f5ea":"#ffeaed",color:mySpikeRows[0].recovery>=80&&mySpikeRows[0].recovery<=120?"#1b7f6a":"#b4332e"}}>Recovery {mySpikeRows[0].recovery.toFixed(0)}%</span>}
             </div>
             {open&&<div style={{padding:"0.75rem 1rem"}}>
               <div style={{overflowX:"auto"}}><table style={{borderCollapse:"collapse",width:"100%"}}><thead><tr>
-                <th style={{...thS,textAlign:"left"}}>Dilution</th><th style={{...thS,textAlign:"right"}}>CV (%)</th><th style={{...thS,textAlign:"right"}}>[{targetP}] in sample (<UnitPill unit={displayUnitResults} onChange={setDisplayUnitResults} size={11} color="#6e6e73" hoverColor="#0b2a6f" weight={700} />)</th>
-                {mySpikeRows.length>0 && <th style={{...thS,textAlign:"right",background:"#faf5ff",color:"#6337b9"}} title="Recovery if you reported this dilution, paired against your current unspiked concentration pick. Updates when you change the unspiked sample's pick.">Recovery<span style={{fontSize:8,fontWeight:400,display:"block",marginTop:2,opacity:0.75}}>(vs current unspiked pick)</span></th>}
+                <th style={{...thS,textAlign:"center"}}>Dilution</th><th style={{...thS,textAlign:"center"}}>CV (%)</th><th style={{...thS,textAlign:"center",lineHeight:1.3}}><div>[{targetP}]</div><div style={{fontWeight:500,fontSize:10,color:"#8e9bb5",textAlign:"center"}}>in sample (<UnitPill unit={displayUnitResults} onChange={setDisplayUnitResults} size={10} color="#8e9bb5" hoverColor="#0b2a6f" weight={500} />)</div></th>
+                {mySpikeRows.length>0 && <th style={{...thS,textAlign:"center",background:"#faf5ff",color:"#6337b9"}} title="Recovery if you reported this dilution, paired against your current unspiked concentration pick. Updates when you change the unspiked sample's pick.">Recovery<span style={{fontSize:8,fontWeight:400,display:"block",marginTop:2,opacity:0.75}}>(vs current unspiked pick)</span></th>}
                 <th style={{...thS,textAlign:"center"}}>Pick</th>
               </tr></thead><tbody>{s.dils.map(function(d){
                 var canPick=d.ir&&d.cS!=null&&d.cv<=.20;
@@ -4027,9 +10201,9 @@ export default function App() {
                 var dilRecPass = dilRec!=null ? (dilRec>=80 && dilRec<=120) : null;
                 return (<tr key={d.di} style={{background:isPk||isDef?"#e6f5f0":muted?"#fafafa":"transparent",color:muted?"#9ca0a8":"inherit"}} title={!d.ir&&instructor?"OOR — back-calculated value shown for teaching only. Do not report (extrapolated outside the standard curve range).":""}>
                   <td style={{...tdS,fontWeight:isAlgo?700:400}}>{d.di}{isAlgo?<span style={{color:"#1b7f6a",fontWeight:800}}> ★</span>:null}</td>
-                  <td style={{...tdS,textAlign:"right"}}><CVB val={d.cv} /></td>
-                  <td style={{...tdS,textAlign:"right",fontWeight:700,color:!d.ir&&instructor?"#a05a00":"inherit",fontStyle:!d.ir&&instructor?"italic":"normal"}}>{canPick?sig3(convertConc(d.cS, unit, displayUnitResults)):(instructor&&d.cS!=null?sig3(convertConc(d.cS, unit, displayUnitResults)):"")}</td>
-                  {mySpikeRows.length>0 && <td style={{...tdS,textAlign:"right",fontFamily:"monospace",fontWeight:isAlgo?800:600,color:dilRec==null?"#aeaeb2":(dilRecPass?"#1b7f6a":"#b4332e")}}>{dilRec!=null?dilRec.toFixed(0)+"%":"—"}</td>}
+                  <td style={{...tdS,textAlign:"center"}}><CVB val={d.cv} /></td>
+                  <td style={{...tdS,textAlign:"center",fontWeight:700,color:!d.ir&&instructor?"#a05a00":"inherit",fontStyle:!d.ir&&instructor?"italic":"normal"}}>{canPick?sig3(convertConc(d.cS, unit, displayUnitResults)):(instructor&&d.cS!=null?sig3(convertConc(d.cS, unit, displayUnitResults)):"")}</td>
+                  {mySpikeRows.length>0 && <td style={{...tdS,textAlign:"center",fontFamily:"monospace",fontWeight:isAlgo?800:600,color:dilRec==null?"#aeaeb2":(dilRecPass?"#1b7f6a":"#b4332e")}}>{dilRec!=null?dilRec.toFixed(0)+"%":"—"}</td>}
                   <td style={{...tdS,textAlign:"center"}}><input type="radio" name={"pk-"+pi+"-"+si} checked={isPk||isDef} disabled={!canPick} onChange={function(){var n={};for(var k in picks)n[k]=picks[k];n[apk]=d.di;setPicks(n);}} /></td>
                 </tr>);
               })}</tbody></table></div>
@@ -4095,10 +10269,16 @@ export default function App() {
           </div>);
         });})}
 
-        <details style={{marginBottom:"1.5rem"}}><summary style={{fontSize:13,fontWeight:600,cursor:"pointer",color:"#6e6e73"}}>References</summary><div style={{marginTop:8,fontSize:12,color:"#6e6e73",lineHeight:1.7}}><p style={{margin:"0 0 6px"}}>FDA Bioanalytical Method Validation (2018), VII.A.</p><p style={{margin:"0 0 6px"}}>ICH M10 (2022).</p><p style={{margin:"0 0 6px"}}>Findlay and Dillard, AAPS J 2007;9(2):E260.</p><p style={{margin:0}}>DeSilva et al., AAPS J 2003;5(4):22.</p></div></details>
-        <div style={{marginBottom:"1rem",padding:"10px 14px",background:"#f6fbff",border:"1px solid #d7e7fb",borderRadius:10,fontSize:12,color:"#30437a",lineHeight:1.6}}>
-          <strong>Final reported numbers</strong> are summarized in the <strong>Recommendations</strong> tab.
+        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14,fontSize:12,color:"#6e6e73"}}>
+          <span style={{color:"#1b7f6a",fontWeight:800,fontSize:14}}>★</span>
+          <span>Recommended by strategy: <span style={{position:"relative",display:"inline-block"}}>
+            <span style={{fontWeight:700,color:"#0b2a6f",borderBottom:"1px dotted #0b2a6f",cursor:"pointer",pointerEvents:"none"}}>{SM.find(function(m){return m.id===sm;}).name}</span>
+            <select value={sm} onChange={function(e){setSm(e.target.value);}} style={{position:"absolute",inset:0,opacity:0,cursor:"pointer",fontSize:12,fontFamily:"inherit",border:"none",background:"transparent",appearance:"none",WebkitAppearance:"none"}} title="Click to change strategy">
+              {SM.map(function(m){return <option key={m.id} value={m.id}>{m.name}</option>;})}
+            </select>
+          </span></span>
         </div>
+
         <button onClick={doExport} style={{background:"linear-gradient(135deg,#1b7f6a,#3478F6)",color:"#fff",border:"none",padding:"12px 32px",borderRadius:12,fontWeight:700,fontSize:14,cursor:"pointer"}}>Export CSV</button>
       </div>);
       })()}
@@ -4137,55 +10317,122 @@ export default function App() {
             pairwise.push({mA:mA, mB:mB, test:test, mdiff:mdiff, pctDiff:pctDiff, n:diffs.length});
           }
         }
-        // Build the analyst summary using the LITERATURE-BACKED (ICH M10) strategy as the canonical reporting choice
+        // Build the analyst summary using the LITERATURE-BACKED (ICH M10) strategy as the canonical reporting choice.
+        // buildSummaryRows returns rows containing both the algorithm pick (for "literature") AND the analyst's
+        // actual reported pick (gsc, which respects manual overrides), plus a `disagrees` flag.
         var litStrat = SM.find(function(m){return m.id==="literature";});
-        var summaryRows = res.flatMap(function(pp,pi){return pp.samps.map(function(s,si){
-          var sl = s.aS && s.aS.literature;
-          var srs = spikeRowsForSample(pi,si);
-          var rec = srs.length>0 ? srs[0].recovery : null;
-          return {pi:pi+1, name:s.name, dil:sl&&sl.dil!=null?sl.dil:"", cv:sl&&sl.cv!=null?sl.cv:null, conc:sl&&sl.conc!=null?sl.conc:null, recovery:rec};
-        });});
+        var summaryRows = buildSummaryRows("literature");
+        var nDisagree = summaryRows.filter(function(r){return r.disagrees;}).length;
+        // Per-plate de-facto LLOQ from the calibrator back-fit. Used to flag rows where the analyst's
+        // reported concentration falls below the lowest passing standard — those are BLOQ-zone results
+        // and should be reviewed (the curve doesn't reliably quantitate that low).
+        var deFactoLLOQs = computeDeFactoLLOQ(res);
+        var nBLOQ = summaryRows.filter(function(r){
+          var lloq = deFactoLLOQs[r.plateIdx];
+          return lloq != null && r.analystConc != null && r.analystConc < lloq;
+        }).length;
         return (<div>
           <div style={{marginBottom:"1.25rem"}}>
-            <h3 style={{fontSize:18,fontWeight:800,color:"#0b2a6f",marginBottom:4}}>Recommendations</h3>
-            <p style={{fontSize:13,color:"#6e6e73",margin:0,lineHeight:1.6}}>{instructor
-              ? "Explore how the six selection strategies compare on your data. Concentrations the analyst would report can differ across strategies — this tab helps you decide which to use."
-              : "Final reported concentrations using the recommended ICH M10 strategy (least-diluted qualified, no averaging). Toggle Instructor mode to compare strategies."}</p>
+            <h3 style={{fontSize:18,fontWeight:800,color:"#0b2a6f",marginBottom:4}}>Method Review</h3>
+            <p style={{fontSize:13,color:"#6e6e73",margin:0,lineHeight:1.6}}>Run-level QC, validation parameters, and strategy comparison. Active strategy: <strong style={{color:"#0b2a6f"}}>{SM.find(function(m){return m.id===sm;}).name}</strong>.{instructor ? " Compare strategies below." : " Toggle Instructor mode to compare strategies."}</p>
           </div>
 
-          {/* Analyst summary: simple reported-concentration table with recovery */}
+          {/* System Suitability + Standard Curve Quality — moved here from Results in v5cj */}
+          <SystemSuitabilityCard res={res} unit={unit} displayUnit={displayUnitResults} instructor={instructor} stdDisplayName={stdDisplayName} sstExpected={sstExpectedDict} setSSTExpected={setSSTExpected} sstFlags={sstFlagsDict} toggleSSTFlag={toggleSSTFlag} analystPickFor={analystPickFor} />
+
+          {/* ICH Q2(R2) Method Validation Parameters — moved here from Results in v5cj */}
+          <MethodValidationCard res={res} unit={unit} displayUnit={displayUnitResults} instructor={instructor} sstSamples={detectSSTSamples(res, sstFlagsDict)} sstExpected={sstExpectedDict} analystPickFor={analystPickFor} spikeRecovery={runQC()} />
+
+          {/* Robot QC: Replicate Reproducibility — added v5d3. Per-level CV across selected
+              "should-be-identical" samples reveals robot dispense reproducibility separately from
+              the assay/curve quality. Default selects all samples; user toggles as needed. */}
+          <RobotQCCard res={res} instructor={instructor} />
+
+          {/* Analyst summary: side-by-side concentrations (algorithm vs analyst), dilution as small gray subscript,
+              analyst column rendered in red when overridden. Per the v5bd spec — drop the dilution columns and
+              keep just the concentrations side-by-side, with disagreement signaled via red text on the analyst cell. */}
           <div style={{background:"#fff",borderRadius:14,border:"1px solid #e5e5ea",padding:"1.25rem",marginBottom:"1.25rem"}}>
             <div style={{display:"flex",alignItems:"baseline",justifyContent:"space-between",gap:12,marginBottom:10,flexWrap:"wrap"}}>
               <h4 style={{fontSize:14,fontWeight:700,margin:0,color:"#30437a"}}>Reported concentrations</h4>
-              <span style={{fontSize:11,color:"#8e9bb5",fontStyle:"italic"}}>Strategy: {litStrat.short} (ICH M10 default)</span>
+              <div style={{display:"flex",alignItems:"baseline",gap:14}}>
+                {res.length>1 && <span onClick={function(){setShowPlateSeparators(!showPlateSeparators);}} style={{fontSize:11,color:"#3478F6",cursor:"pointer",fontStyle:"italic",fontWeight:600,textDecoration:"underline",textDecorationStyle:"dotted",userSelect:"none"}}>{showPlateSeparators?"Hide plate separators":"Show plate separators"}</span>}
+                <span onClick={function(){setShowDilutions(!showDilutions);}} style={{fontSize:11,color:"#3478F6",cursor:"pointer",fontStyle:"italic",fontWeight:600,textDecoration:"underline",textDecorationStyle:"dotted",userSelect:"none"}}>{showDilutions?"Hide dilution":"Show dilution"}</span>
+                <span style={{fontSize:11,color:"#8e9bb5",fontStyle:"italic"}}>
+                  Algorithm: <span style={{position:"relative",display:"inline-block"}}>
+                    <span style={{fontWeight:700,color:"#30437a",borderBottom:"1px dotted #30437a",cursor:"pointer",pointerEvents:"none"}}>{SM.find(function(m){return m.id===sm;}).name}</span>
+                    <select value={sm} onChange={function(e){setSm(e.target.value);}} style={{position:"absolute",inset:0,opacity:0,cursor:"pointer",fontSize:11,fontFamily:"inherit",border:"none",background:"transparent",appearance:"none",WebkitAppearance:"none"}} title="Click to change strategy">
+                      {SM.map(function(m){return <option key={m.id} value={m.id}>{m.name}</option>;})}
+                    </select>
+                  </span>
+                  {nDisagree>0?" — "+nDisagree+" overridden":""}{nBLOQ>0?" — "+nBLOQ+" below de-facto LLOQ":""}
+                </span>
+              </div>
             </div>
             <div style={{overflowX:"auto"}}>
               <table style={{borderCollapse:"collapse",width:"100%"}}>
                 <thead><tr>
-                  <th style={{...thS,textAlign:"left"}}>Plate</th>
-                  <th style={{...thS,textAlign:"left"}}>Sample</th>
-                  <th style={{...thS,textAlign:"right"}}>Dilution</th>
-                  <th style={{...thS,textAlign:"right"}}>CV (%)</th>
-                  <th style={{...thS,textAlign:"right"}}>[{targetP}] (<UnitPill unit={displayUnitResults} onChange={setDisplayUnitResults} size={11} color="#6e6e73" hoverColor="#0b2a6f" weight={700} />)</th>
-                  <th style={{...thS,textAlign:"right"}}>Recovery</th>
+                  <th style={{...thS,textAlign:"center"}}>Plate</th>
+                  <th style={{...thS,textAlign:"center"}}>Sample</th>
+                  <th style={{...thS,textAlign:"center",lineHeight:1.3}}><div>Algorithm pick</div><div style={{fontWeight:500,fontSize:10,color:"#8e9bb5",textAlign:"center"}}>[{targetP}] (<UnitPill unit={displayUnitResults} onChange={setDisplayUnitResults} size={10} color="#8e9bb5" hoverColor="#0b2a6f" weight={500} />)</div></th>
+                  <th style={{...thS,textAlign:"center",lineHeight:1.3,background:"#f6fbff"}}><div>Analyst pick</div><div style={{fontWeight:500,fontSize:10,color:"#8e9bb5",textAlign:"center"}}>[{targetP}] (<UnitPill unit={displayUnitResults} onChange={setDisplayUnitResults} size={10} color="#8e9bb5" hoverColor="#0b2a6f" weight={500} />)</div></th>
+                  <th style={{...thS,textAlign:"center"}}>CV (%)</th>
+                  <th style={{...thS,textAlign:"center"}}>Recovery</th>
                 </tr></thead>
                 <tbody>
-                  {summaryRows.map(function(r,i){return <tr key={i}>
-                    <td style={tdS}>{r.pi}</td>
-                    <td style={{...tdS,fontWeight:700}}>{r.name}</td>
-                    <td style={{...tdS,textAlign:"right"}}>{r.dil!==""?r.dil:"—"}</td>
-                    <td style={{...tdS,textAlign:"right"}}>{r.cv!=null?<CVB val={r.cv} />:"—"}</td>
-                    <td style={{...tdS,textAlign:"right",fontWeight:700}}>{r.conc!=null?sig3(convertConc(r.conc, unit, displayUnitResults)):"—"}</td>
-                    <td style={{...tdS,textAlign:"right",fontWeight:700,color:r.recovery==null?"#aeaeb2":(r.recovery>=80&&r.recovery<=120?"#1b7f6a":"#b4332e")}}>{r.recovery!=null?r.recovery.toFixed(0)+"%":"—"}</td>
-                  </tr>;})}
+                  {summaryRows.map(function(r,i){
+                    // Disagreement: row gets a faint pink wash; analyst-conc rendered in red.
+                    // BLOQ check: if a de-facto LLOQ exists for this plate AND the analyst's reported
+                    // concentration is below it, flag the row. The de-facto LLOQ is the lowest passing
+                    // calibrator standard; below that the curve doesn't reliably quantitate.
+                    var rowBg = r.disagrees ? "rgba(180,51,46,0.07)" : "transparent";
+                    var analystColor = r.disagrees ? "#b4332e" : "#0b2a6f";
+                    var lloq = deFactoLLOQs[r.plateIdx];
+                    var isBLOQ = lloq != null && r.analystConc != null && r.analystConc < lloq;
+                    if (isBLOQ && !r.disagrees) rowBg = "rgba(154,106,0,0.07)";
+                    // Plate separator: solid line on top of row when previous row was a different plate
+                    var prevPi = i>0 ? summaryRows[i-1].pi : null;
+                    var isPlateBoundary = res.length>1 && showPlateSeparators && prevPi != null && prevPi !== r.pi;
+                    var rowStyle = {background:rowBg};
+                    if (isPlateBoundary) rowStyle.borderTop = "2px solid #6f7fa0";
+                    return <tr key={i} style={rowStyle}>
+                      <td style={tdS}>{r.pi}</td>
+                      <td style={{...tdS,fontWeight:700}}>{r.name}</td>
+                      <td style={{...tdS,textAlign:"center",color:"#5a6984"}}>
+                        <div style={{fontWeight:700}}>{r.algoConc!=null?sig3(convertConc(r.algoConc, unit, displayUnitResults)):"—"}</div>
+                        {showDilutions && <div style={{fontSize:9,color:"#aeaeb2",fontStyle:"italic",fontWeight:500}}>{r.algoDilDf!=null?"at "+fmtDilution(r.algoDilDf,dilFormat,100000):""}</div>}
+                      </td>
+                      <td style={{...tdS,textAlign:"center",background:r.disagrees?"rgba(180,51,46,0.04)":(isBLOQ?"rgba(154,106,0,0.05)":"#f6fbff"),color:analystColor}}>
+                        <div style={{fontWeight:800,display:"flex",alignItems:"center",justifyContent:"flex-end",gap:6}}>
+                          {r.analystConc!=null?sig3(convertConc(r.analystConc, unit, displayUnitResults)):"—"}
+                          {isBLOQ && <span title={"Reported concentration ("+sig3(convertConc(r.analystConc, unit, displayUnitResults))+" "+displayUnitResults+") is below the de-facto LLOQ for this plate ("+sig3(convertConc(lloq, unit, displayUnitResults))+" "+displayUnitResults+"). The lowest passing calibrator failed back-fit, so the curve doesn't reliably quantitate at this concentration. Consider reporting as <LLOQ instead. "+BLOQ_TIP} style={{fontSize:9,fontWeight:800,color:"#9a6a00",background:"#fff2d8",border:"1px solid #d4a76a",borderRadius:4,padding:"1px 5px",cursor:"help"}}>⚠ BLOQ</span>}
+                        </div>
+                        {showDilutions && <div style={{fontSize:9,fontStyle:"italic",fontWeight:500,color:r.disagrees?"#b4332e":"#aeaeb2"}}>{r.analystDilDf!=null?"at "+fmtDilution(r.analystDilDf,dilFormat,100000):""}</div>}
+                      </td>
+                      <td style={{...tdS,textAlign:"center"}}>{r.analystCv!=null?<CVB val={r.analystCv} />:"—"}</td>
+                      <td style={{...tdS,textAlign:"center",fontWeight:700,color:r.recovery==null?"#aeaeb2":(r.recovery>=80&&r.recovery<=120?"#1b7f6a":"#b4332e")}}>{r.recovery!=null?r.recovery.toFixed(0)+"%":"—"}</td>
+                    </tr>;
+                  })}
                 </tbody>
               </table>
             </div>
-            <div style={{marginTop:12,padding:"10px 14px",background:"#f6fbff",borderRadius:8,border:"1px solid #d7e7fb",fontSize:11,color:"#30437a",lineHeight:1.6}}>
-              <strong>Why this strategy?</strong> ICH M10 (and FDA Bioanalytical Method Validation 2018) recommend reporting the least-diluted in-range, qualified dilution — no averaging across dilutions. This minimizes random and matrix-related error and is the regulatory default for bioanalytical reporting. The other strategies (averaging, mid-curve, etc.) are useful for method development and teaching but should not be the default for regulated work.
-            </div>
+            {nDisagree>0 && <div style={{marginTop:10,padding:"8px 12px",background:"rgba(180,51,46,0.06)",border:"1px solid rgba(180,51,46,0.2)",borderRadius:8,fontSize:11,color:"#7a2620",lineHeight:1.55}}>
+              <strong>{nDisagree} sample{nDisagree===1?"":"s"}</strong> {nDisagree===1?"has":"have"} an analyst-overridden dilution different from the algorithm's recommendation.{instructor && <span> Reported concentrations on those rows reflect what you picked on the Results tab — be ready to defend each override in your method record (e.g. <span title={DILUTIONAL_LINEARITY_TIP} style={{cursor:"help",borderBottom:"1px dotted #7a2620"}}>dilutional linearity</span> agreement, hook-effect avoidance, or matrix interference at the algorithm-recommended dilution).</span>}
+            </div>}
+            {nBLOQ>0 && <div style={{marginTop:10,padding:"8px 12px",background:"rgba(154,106,0,0.07)",border:"1px solid #d4a76a",borderRadius:8,fontSize:11,color:"#5a3e00",lineHeight:1.55}}>
+              <strong>⚠ {nBLOQ} sample{nBLOQ===1?"":"s"}</strong> reported below the de-facto LLOQ for {nBLOQ===1?"its":"their"} plate. The de-facto LLOQ is the lowest calibrator standard that passes back-fit accuracy; the actual lowest standard failed, so the curve doesn't reliably quantitate that low.{instructor && <span> Consider reporting these as <span title={BLOQ_TIP} style={{cursor:"help",borderBottom:"1px dotted #5a3e00",fontWeight:700}}>&lt;LLOQ</span> instead of as numeric concentrations, or re-run with closer-spaced low standards. Hover the ⚠ BLOQ badge in any row to see that plate's de-facto LLOQ value.</span>}
+            </div>}
+            {instructor && <div style={{marginTop:12,padding:"10px 14px",background:"#f6fbff",borderRadius:8,border:"1px solid #d7e7fb",fontSize:11,color:"#30437a",lineHeight:1.6}}>
+              <strong>Why this strategy?</strong> ICH M10 (and FDA Bioanalytical Method Validation 2018) recommend reporting the least-diluted in-range, qualified dilution — no averaging across dilutions. For ELISA/LBA data, eSSF also looks for agreement with a neighboring in-range dilution (80–120% — see <span title={DILUTIONAL_LINEARITY_TIP} style={{cursor:"help",borderBottom:"1px dotted #30437a"}}>dilutional linearity</span>) before preferring that dilution, which helps avoid hook-effect and non-parallelism traps. The other strategies are useful for method development and teaching but should not be the default for regulated work.
+            </div>}
+            {instructor && <details style={{marginTop:8}}>
+              <summary style={{cursor:"pointer",fontSize:11,color:"#3478F6",fontStyle:"italic",fontWeight:600,textDecoration:"underline",textDecorationStyle:"dotted",userSelect:"none",padding:"4px 0"}}>
+                What is dilutional linearity, exactly? (plain-English explainer)
+              </summary>
+              <div style={{marginTop:8,padding:"10px 14px",background:"#fffaf3",border:"1px solid #f3e3c8",borderRadius:8,fontSize:11,color:"#5a3e00",lineHeight:1.65,whiteSpace:"pre-wrap"}}>{DILUTIONAL_LINEARITY_LONG}</div>
+            </details>}
             <button onClick={doExport} style={{marginTop:12,background:"linear-gradient(135deg,#1b7f6a,#3478F6)",color:"#fff",border:"none",padding:"10px 24px",borderRadius:10,fontWeight:700,fontSize:13,cursor:"pointer"}}>Export CSV</button>
           </div>
+
 
           {/* INSTRUCTOR-ONLY: full strategy comparison and statistical analysis */}
           {instructor && <div>
@@ -4199,9 +10446,9 @@ export default function App() {
             <div style={{overflowX:"auto"}}>
               <table style={{borderCollapse:"collapse",width:"100%",marginTop:10}}>
                 <thead><tr>
-                  <th style={{...thS,textAlign:"left"}}>Sample</th>
-                  {SM.map(function(m){return <th key={m.id} style={{...thS,textAlign:"right",fontSize:9}}>{m.short}</th>;})}
-                  <th style={{...thS,textAlign:"left",background:"#f4f4f6"}}>Agreement</th>
+                  <th style={{...thS,textAlign:"center"}}>Sample</th>
+                  {SM.map(function(m){return <th key={m.id} style={{...thS,textAlign:"center",fontSize:9}}>{m.short}</th>;})}
+                  <th style={{...thS,textAlign:"center",background:"#f4f4f6"}}>Agreement</th>
                 </tr></thead>
                 <tbody>
                   {cd.map(function(d,i){
@@ -4213,7 +10460,7 @@ export default function App() {
                     else { agreementLabel=instructor?"Strategies disagree ("+div.pct.toFixed(0)+"%)":"Strategies disagree"; agreementBg="#ffeaed"; agreementFg="#b4332e"; }
                     return <tr key={i}>
                       <td style={{...tdS,fontWeight:700}}>{d.nm}</td>
-                      {SM.map(function(m){return <td key={m.id} style={{...tdS,textAlign:"right"}}>{d.r[m.id]&&d.r[m.id].conc!=null?sig3(convertConc(d.r[m.id].conc, unit, displayUnitResults)):"—"}</td>;})}
+                      {SM.map(function(m){return <td key={m.id} style={{...tdS,textAlign:"center"}}>{d.r[m.id]&&d.r[m.id].conc!=null?sig3(convertConc(d.r[m.id].conc, unit, displayUnitResults)):"—"}</td>;})}
                       <td style={{...tdS,background:agreementBg,color:agreementFg,fontWeight:700,fontSize:11}}>{agreementLabel}</td>
                     </tr>;
                   })}
@@ -4284,12 +10531,12 @@ export default function App() {
               <table style={{borderCollapse:"collapse",width:"100%",fontSize:11}}>
                 <thead>
                   <tr>
-                    <th style={{...thS,textAlign:"left",fontSize:10}}>Strategy A</th>
-                    <th style={{...thS,textAlign:"left",fontSize:10}}>vs. Strategy B</th>
-                    <th style={{...thS,textAlign:"right",fontSize:10}}>Median diff (A−B)</th>
-                    <th style={{...thS,textAlign:"right",fontSize:10}}>% diff</th>
-                    <th style={{...thS,textAlign:"right",fontSize:10}}>p-value</th>
-                    <th style={{...thS,textAlign:"left",fontSize:10}}>Verdict</th>
+                    <th style={{...thS,textAlign:"center",fontSize:10}}>Strategy A</th>
+                    <th style={{...thS,textAlign:"center",fontSize:10}}>vs. Strategy B</th>
+                    <th style={{...thS,textAlign:"center",fontSize:10}}>Median diff (A−B)</th>
+                    <th style={{...thS,textAlign:"center",fontSize:10}}>% diff</th>
+                    <th style={{...thS,textAlign:"center",fontSize:10}}>p-value</th>
+                    <th style={{...thS,textAlign:"center",fontSize:10}}>Verdict</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -4305,9 +10552,9 @@ export default function App() {
                     return <tr key={pi}>
                       <td style={{...tdS,fontWeight:600}}>{pw.mA.short}</td>
                       <td style={{...tdS,fontWeight:600,color:"#6e6e73"}}>{pw.mB.short}</td>
-                      <td style={{...tdS,textAlign:"right",fontFamily:"monospace"}}>{pw.mdiff!=null?(pw.mdiff>=0?"+":"")+sig3(convertConc(pw.mdiff, unit, displayUnitResults)):"—"}</td>
-                      <td style={{...tdS,textAlign:"right",fontFamily:"monospace"}}>{pw.pctDiff!=null?(pw.pctDiff>=0?"+":"")+pw.pctDiff.toFixed(1)+"%":"—"}</td>
-                      <td style={{...tdS,textAlign:"right",fontFamily:"monospace",fontWeight:700,color:sig?"#b4332e":"#30437a"}}>{pw.test.p!=null?(pw.test.p<0.001?"<0.001":pw.test.p.toFixed(3)):"n/a"}</td>
+                      <td style={{...tdS,textAlign:"center",fontFamily:"monospace"}}>{pw.mdiff!=null?(pw.mdiff>=0?"+":"")+sig3(convertConc(pw.mdiff, unit, displayUnitResults)):"—"}</td>
+                      <td style={{...tdS,textAlign:"center",fontFamily:"monospace"}}>{pw.pctDiff!=null?(pw.pctDiff>=0?"+":"")+pw.pctDiff.toFixed(1)+"%":"—"}</td>
+                      <td style={{...tdS,textAlign:"center",fontFamily:"monospace",fontWeight:700,color:sig?"#b4332e":"#30437a"}}>{pw.test.p!=null?(pw.test.p<0.001?"<0.001":pw.test.p.toFixed(3)):"n/a"}</td>
                       <td style={{...tdS,background:vbg,color:vcolor,fontWeight:700,fontSize:10}}>{verdict}</td>
                     </tr>;
                   })}
@@ -4343,6 +10590,15 @@ export default function App() {
             <div style={{marginTop:12,padding:"10px 14px",background:"#f6fbff",borderRadius:8,border:"1px solid #d7e7fb",fontSize:11,color:"#30437a",lineHeight:1.6}}>
               <strong>Regulatory note:</strong> for regulated bioanalysis (PK, biomarker for clinical trials), ICH M10 and FDA Bioanalytical Method Validation guidance recommend the <strong>literature-backed</strong> strategy (least-diluted qualified, no averaging). The other strategies are useful for method development, cross-validation, and teaching — but should not be the default reporting strategy in a regulated submission.
             </div>
+            <details style={{marginTop:8}}>
+              <summary style={{fontSize:11,fontWeight:600,cursor:"pointer",color:"#6e6e73",padding:"4px 0"}}>References</summary>
+              <div style={{marginTop:6,fontSize:11,color:"#6e6e73",lineHeight:1.7,padding:"0 10px"}}>
+                <p style={{margin:"0 0 4px"}}>FDA Bioanalytical Method Validation (2018), VII.A.</p>
+                <p style={{margin:"0 0 4px"}}>ICH M10 (2022).</p>
+                <p style={{margin:"0 0 4px"}}>Findlay and Dillard, AAPS J 2007;9(2):E260.</p>
+                <p style={{margin:0}}>DeSilva et al., AAPS J 2003;5(4):22.</p>
+              </div>
+            </details>
           </div>
           </div>}
         </div>);
@@ -4389,10 +10645,17 @@ export default function App() {
             <circle cx="9" cy="10.5" r="0.9" fill="#fff"/>
             <circle cx="13" cy="15.5" r="0.9" fill="#fff"/>
           </svg>;
+          var iconValidation = <svg width="22" height="22" viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect x="4" y="3" width="14" height="16" rx="2" stroke="#fff" strokeWidth="1.6" fill="none"/>
+            <path d="M7.5 11 L10 13.5 L15 8.5" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
+            <line x1="7" y1="6" x2="15" y2="6" stroke="#fff" strokeWidth="1.2" strokeLinecap="round" opacity="0.6"/>
+            <line x1="7" y1="16" x2="13" y2="16" stroke="#fff" strokeWidth="1.2" strokeLinecap="round" opacity="0.6"/>
+          </svg>;
           var tools = [
             {id:"unit",  title:"Unit Converter",          desc:"Convert mg/mL ↔ ug/mL ↔ ng/mL etc.",  icon:iconConv,  color:"#0F8AA2"},
             {id:"spike", title:"Spike Recovery Planner",   desc:"Plan spike volumes and check expected recovery.", icon:iconSpike, color:"#6337b9"},
-            {id:"elisa", title:"ELISA Designer",          desc:"Plan dilution schemes, interpret pilot runs, run real plates.", icon:iconElisa, color:"#BF7A1A"},
+            {id:"elisa", title:"Dilution Planner",        desc:"Plan tube pre-dilutions and plate serial dilutions for any assay.", icon:iconElisa, color:"#BF7A1A"},
+            {id:"validation", title:"Validation Designer", desc:"Design simple ICH Q2-aligned validation experiments — linearity, accuracy, precision, LLOQ, spike recovery.", icon:iconValidation, color:"#6337b9"},
           ];
           if(!selectedTool){
             return <div>
@@ -4427,9 +10690,6 @@ export default function App() {
                   </button>;
                 })}
               </div>
-              <div style={{background:"#fafcff",borderRadius:14,border:"1px dashed #dfe7f2",padding:"1rem 1.25rem",textAlign:"center"}}>
-                <div style={{fontSize:11,color:"#aeaeb2",fontStyle:"italic"}}>Dilution planner, CV estimator, and other tools will appear here as they are added.</div>
-              </div>
             </div>;
           }
           // A tool is selected: show back button + the tool
@@ -4440,19 +10700,19 @@ export default function App() {
             </button>
             {selectedTool==="unit" && <UnitConverterCard />}
             {selectedTool==="spike" && <SpikeCalculatorCard instructor={instructor} />}
-            {selectedTool==="elisa" && <ElisaDesignerCard instructor={instructor} onApplyDilutions={function(xdf, xds){
+            {selectedTool==="elisa" && <ElisaDesignerCard instructor={instructor} dilFormat={dilFormat} setDilFormat={setDilFormat} onApplyDilutions={function(xdf, xds){
               // Populate the General Information sample dilution fields with the planned series, then jump to Data Entry tab.
               u("xdf", xdf);
               u("xds", xds);
               setOn(true);
               setTab(0);
             }} />}
+            {selectedTool==="validation" && <ValidationDesignerEntry instructor={instructor} unit={unit} />}
           </div>;
         })()}
       </div>)}
 
-      {tab===5&&dbg&&res&&(<div><h3 style={{fontSize:16,fontWeight:800,color:"#a05a00"}}>Debug</h3>{res.map(function(pp,pi){return <div key={pi} style={{marginBottom:"2rem"}}><h4 style={{fontSize:13,fontWeight:700}}>Plate {pi+1} | Blank: {fm4(pp.bA)}</h4><details><summary style={{fontSize:12,cursor:"pointer",color:"#6e6e73"}}>Standard</summary><table style={{borderCollapse:"collapse",width:"100%",marginTop:6,fontSize:10,fontFamily:"monospace"}}><thead><tr>{["Row","Conc","Raw","Blank","Corr","Avg","SD","CV (%)"].map(function(h){return <th key={h} style={thS}>{h}</th>;})}</tr></thead><tbody>{(pp.dbS||[]).map(function(d,i){return <tr key={i}><td style={tdS}>{d.row}</td><td style={tdS}>{sig3(d.conc)}</td><td style={tdS}>{d.raw.map(function(v){return v.toFixed(3);}).join(", ")}</td><td style={tdS}>{fm4(d.blank)}</td><td style={tdS}>{d.cor.map(function(v){return v.toFixed(4);}).join(", ")}</td><td style={tdS}>{fm4(d.avg)}</td><td style={tdS}>{fm4(d.sd)}</td><td style={tdS}><CVB val={d.cv} /></td></tr>;})}</tbody></table></details>{pp.samps.map(function(s,si){return <details key={si} style={{marginBottom:6}}><summary style={{fontSize:12,cursor:"pointer",color:"#6e6e73"}}>{s.name}</summary><table style={{borderCollapse:"collapse",width:"100%",marginTop:6,fontSize:10,fontFamily:"monospace"}}><thead><tr>{["Dil","Raw","Blank","Corr","Avg","CV (%)","IR","Well","DilF","Smp"].map(function(h){return <th key={h} style={thS}>{h}</th>;})}</tr></thead><tbody>{(s.dbD||[]).map(function(d,i){return <tr key={i}><td style={tdS}>{d.di}</td><td style={tdS}>{d.raw.map(function(v){return v.toFixed(3);}).join(", ")}</td><td style={tdS}>{fm4(d.blank)}</td><td style={tdS}>{d.cor.map(function(v){return v.toFixed(4);}).join(", ")}</td><td style={tdS}>{fm4(d.avgA)}</td><td style={tdS}><CVB val={d.cv} /></td><td style={tdS}>{d.ir?"Y":"N"}</td><td style={tdS}>{sig3(d.cW)}</td><td style={tdS}>{fm4(d.df)}</td><td style={tdS}>{sig3(d.cS)}</td></tr>;})}</tbody></table></details>;})}</div>;})}</div>)}
+      {tab===5&&dbg&&res&&(<div><h3 style={{fontSize:16,fontWeight:800,color:"#a05a00"}}>Debug</h3>{res.map(function(pp,pi){return <div key={pi} style={{marginBottom:"2rem"}}><h4 style={{fontSize:13,fontWeight:700}}>Plate {pi+1} | Blank: {fm4(pp.bA)}</h4><details><summary style={{fontSize:12,cursor:"pointer",color:"#6e6e73"}}>Standard</summary><table style={{borderCollapse:"collapse",width:"100%",marginTop:6,fontSize:10,fontFamily:"monospace"}}><thead><tr>{["Row","Conc","Raw","Blank","Corr","Avg","SD","CV (%)"].map(function(h){return <th key={h} style={thS}>{h}</th>;})}</tr></thead><tbody>{(pp.dbS||[]).map(function(d,i){return <tr key={i}><td style={tdS}>{d.row}</td><td style={tdS}>{sig3(d.conc)}</td><td style={tdS}>{d.raw.map(function(v){return v.toFixed(3);}).join(", ")}</td><td style={tdS}>{fm4(d.blank)}</td><td style={tdS}>{d.cor.map(function(v){return v.toFixed(4);}).join(", ")}</td><td style={tdS}>{fm4(d.avg)}</td><td style={tdS}>{fm4(d.sd)}</td><td style={tdS}><CVB val={d.cv} /></td></tr>;})}</tbody></table></details>{pp.samps.map(function(s,si){return <details key={si} style={{marginBottom:6}}><summary style={{fontSize:12,cursor:"pointer",color:"#6e6e73"}}>{s.name}</summary><table style={{borderCollapse:"collapse",width:"100%",marginTop:6,fontSize:10,fontFamily:"monospace"}}><thead><tr>{["Dil","Raw","Blank","Corr","Avg","CV (%)","IR","Well","DilF","Smp"].map(function(h){return <th key={h} style={thS}>{h}</th>;})}</tr></thead><tbody>{(s.dbD||[]).map(function(d,i){return <tr key={i}><td style={tdS}>{d.di}</td><td style={tdS}>{d.raw.map(function(v){return v.toFixed(3);}).join(", ")}</td><td style={tdS}>{fm4(d.blank)}</td><td style={tdS}>{d.cor.map(function(v){return v.toFixed(4);}).join(", ")}</td><td style={tdS}>{fmtResponse(d.avgA)}</td><td style={tdS}><CVB val={d.cv} /></td><td style={tdS}>{d.ir?"Y":"N"}</td><td style={tdS}>{sig3(d.cW)}</td><td style={tdS}>{fm4(d.df)}</td><td style={tdS}>{sig3(d.cS)}</td></tr>;})}</tbody></table></details>;})}</div>;})}</div>)}
     </div>
   );
 }
-
