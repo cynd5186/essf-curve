@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from "react";
+import { LoginGate, HeaderUserBadge } from "./auth.jsx";
 
 var avg = function(a) { return a.length ? a.reduce(function(s,v){return s+v;},0)/a.length : 0; };
 var sdc = function(a) { if (a.length<2) return 0; var m=avg(a); return Math.sqrt(a.reduce(function(s,v){return s+(v-m)*(v-m);},0)/(a.length-1)); };
@@ -815,6 +816,8 @@ function PageHeader(props){
       <div onClick={props.onSecretTap} style={{fontSize:large?12:10,color:"#6f7fa0",fontFamily:"Georgia,serif",letterSpacing:1,paddingLeft:large?12:8,borderLeft:"1px solid #dfe7f2",cursor:"default",userSelect:"none"}}>{APP_VERSION}</div>
     </div>
     <div style={{display:"flex",alignItems:"center",gap:14}}>
+      <HeaderUserBadge />
+      <div style={{width:1,height:18,background:"#dfe7f2"}}/>
       <ModeToggle instructor={props.instructor} setInstructor={props.setInstructor} />
       {props.onReset && <button
         onClick={doReset}
@@ -3651,6 +3654,2514 @@ function SystemSuitabilityCard(props) {
 }
 
 
+// Specific Growth Rate (µ) Calculator card — Bio Tools.
+// Computes µ from at-line OD samples by fitting ln(OD/OD₀) vs time linearly over an
+// auto-selected (or user-selected) exponential-phase window. Also computes lag-phase end
+// and exponential-phase end via the inflection-point + tangent-line method (matches the
+// Excel workflow used by bench scientists, but auto-finds the inflection points).
+//
+// Methods:
+//   slope_r2 (default): for each contiguous window of ≥4 points, compute slope×R² as score.
+//                       Pick max. Tiebreak: longer window. Penalizes both flat (low slope) and
+//                       noisy (low R²) regions.
+//   best_r2:           pick window with highest R² subject to slope > 0 and ≥4 points.
+//                       Falls back to highest R² if no window has R² ≥ 0.99.
+//   manual:            user clicks rows in/out; live recompute.
+//
+// Lag/exp end: rolling 3-point SLOPE on OD (and on ln(OD)) gives 1st and 2nd derivatives.
+// First sign change of 2nd derivative = inflection. Tangent line through inflection rows,
+// extrapolated to OD=0 (lag) or current-OD level (exp end).
+// Specific Growth Rate (µ) Calculator card — Bio Tools.
+// Multi-step flow mirroring the analytical workflow: Setup → Data Entry → Analysis → Review.
+// Each step is a discrete tab; the user navigates with Continue/Back buttons.
+//
+// Methods for selecting the exponential-phase window:
+//   slope_r2 (default): for each contiguous window of ≥4 points, score = slope×R². Pick max.
+//   best_r2:           pick window with highest R² among slope > 0, ≥4 points.
+//   manual:            user clicks rows in/out; live recompute.
+//
+// Lag/exp end via the colleague's tangent-line method (rolling 3-point SLOPE for derivatives,
+// peak of slope2(OD) = lag→exp inflection, sign change in slope2(ln(OD)) = exp→stationary).
+function GrowthRateCalculatorCard(props) {
+  var batches = props.batches;
+  var setBatches = props.setBatches;
+  var activeId = props.activeId;
+  var setActiveId = props.setActiveId;
+  var instructor = !!props.instructor;
+  var step = props.step != null ? props.step : 0;
+  var setStep = props.setStep || function(){};
+
+  var activeIdResolved = activeId && batches.find(function(b){return b.id===activeId;}) ? activeId : (batches[0] ? batches[0].id : null);
+
+  // ── Hooks must run on EVERY render in the same order, BEFORE any early return ──
+  // ── Zoom state (synced across both plots) ──────────────────────────────
+  // null = auto-fit to all data; otherwise [tMin, tMax] in elapsed-hours.
+  var _zoomRange = useState(null);
+  var zoomRange = _zoomRange[0];
+  var setZoomRange = _zoomRange[1];
+  // Method picker disclosure (hidden by default — most users use the default method)
+  var _methodOpen = useState(false);
+  var methodPickerOpen = _methodOpen[0];
+  var setMethodPickerOpen = _methodOpen[1];
+  // Zoom mode toggle (synced with both plots; off by default so wheel passes through to page scroll)
+  var _zoomMode = useState(false);
+  var zoomMode = _zoomMode[0];
+  var setZoomMode = _zoomMode[1];
+  // Drag-to-zoom rectangle in progress: {startT: number, currentT: number} or null
+  var _zoomDrag = useState(null);
+  var zoomDrag = _zoomDrag[0];
+  var setZoomDrag = _zoomDrag[1];
+  // Quick-paste local state for the metadata-extract textarea
+  var _pasteBuf = useState("");
+  var pasteBuf = _pasteBuf[0];
+  var setPasteBuf = _pasteBuf[1];
+  var _pasteFeedback = useState("");
+  var pasteFeedback = _pasteFeedback[0];
+  var setPasteFeedback = _pasteFeedback[1];
+  // Track whether user is currently dragging-to-pan and the starting position
+  var _panState = useRef({active:false, startX:0, startMin:0, startMax:0, plotW:0, dataMin:0, dataMax:0});
+  var panState = _panState.current;
+  // Drag-handle state for manual-mode boundary handles on OD plot
+  var _dragHandle = useRef({active:false, side:null, otherTime:0, plotW:0, padL:0, innerW:0, tMin:0, tMax:0});
+  var resetZoom = function(){setZoomRange(null);};
+  // Reset zoom when switching batches (different time scale per batch)
+  useEffect(function(){setZoomRange(null);}, [activeIdResolved]);
+
+  // Method label lookup — used in JSX and in the per-batch summary helper.
+  // Defined here at component top to be available in any later closure / JSX.
+  var METHOD_LABELS = {peak_rate:"peak growth rate", slope_r2:"slope × R²", best_r2:"best R²", inflection:"inflection-based", manual:"manual"};
+
+  var batch = batches.find(function(b){return b.id===activeIdResolved;});
+  if (!batch) {
+    return <div style={{padding:"1.25rem",background:"#fff",borderRadius:14,border:"1px solid #e5e5ea"}}>
+      <p style={{fontSize:12,color:"#6e6e73"}}>No batches available. Add one to begin.</p>
+    </div>;
+  }
+
+  // ── Mutators (immutable updates to batches array) ─────────────────────────
+  var updateActive = function(updater){
+    setBatches(batches.map(function(b){
+      if (b.id !== activeIdResolved) return b;
+      var n = {};
+      for (var k in b) n[k] = b[k];
+      updater(n);
+      return n;
+    }));
+  };
+
+  // Toggle a point in/out of manual selection (used by clicks on either plot)
+  var togglePoint = function(idx){
+    if (!batch.manualSelection) return;
+    var sel2 = batch.manualSelection.slice();
+    var pos = sel2.indexOf(idx);
+    if (pos >= 0) sel2.splice(pos, 1); else sel2.push(idx);
+    updateActive(function(b){b.manualSelection = sel2;});
+  };
+
+  // Make wheel/drag/double-click handlers for a plot. Both plots share zoomRange;
+  // wheeling on either updates the synced X-axis range. dataMin/dataMax are the
+  // FULL data range (no padding) — used to clamp zoom-out.
+  // Pinch state ref (track 2-finger touch distance for pinch-to-zoom)
+  var _pinchState = useRef({active:false, startDist:0, startMin:0, startMax:0, centerT:0});
+  var pinchState = _pinchState.current;
+
+  var makePlotInteractionHandlers = function(dataMin, dataMax, currentMin, currentMax){
+    // Helper: convert clientX to time-axis value
+    var clientXToT = function(clientX, rect){
+      var fx = (clientX - rect.left) / rect.width;
+      var inPlotFrac = (fx * plotW - padL) / innerW;
+      return currentMin + inPlotFrac * (currentMax - currentMin);
+    };
+    var clampZoom = function(newMin, newMax){
+      var fullRange = dataMax - dataMin;
+      var minRange = fullRange * 0.05;
+      if (newMax - newMin < minRange) {
+        var center = (newMin + newMax) / 2;
+        newMin = center - minRange / 2;
+        newMax = center + minRange / 2;
+      }
+      var pad = fullRange * 0.05;
+      var lo = dataMin - pad, hi = dataMax + pad;
+      if (newMax - newMin >= (hi - lo) * 0.98) return null;  // back to auto
+      if (newMin < lo) {newMax = lo + (newMax - newMin); newMin = lo;}
+      if (newMax > hi) {newMin = hi - (newMax - newMin); newMax = hi;}
+      return [newMin, newMax];
+    };
+
+    var onWheel = function(e){
+      // Zoom only if user explicitly opted in (zoom mode toggle) OR is holding shift.
+      // Otherwise, wheel passes through to page scroll — no preventDefault.
+      if (!zoomMode && !e.shiftKey) return;
+      e.preventDefault();
+      var rect = e.currentTarget.getBoundingClientRect();
+      var fx = (e.clientX - rect.left) / rect.width;
+      var inPlotFrac = (fx * plotW - padL) / innerW;
+      if (inPlotFrac < 0 || inPlotFrac > 1) return;
+      var range = currentMax - currentMin;
+      var cursorT = currentMin + inPlotFrac * range;
+      var factor = e.deltaY < 0 ? 0.85 : 1.18;
+      var newRange = range * factor;
+      var newMin = cursorT - inPlotFrac * newRange;
+      var newMax = newMin + newRange;
+      setZoomRange(clampZoom(newMin, newMax));
+    };
+
+    var onMouseDown = function(e){
+      // Drag-to-zoom-region only active in zoom mode. Don't initiate on data points or buttons.
+      if (!zoomMode) return;
+      var tag = (e.target && e.target.tagName) || "";
+      if (tag === "circle" || tag === "BUTTON" || tag === "rect") return;
+      e.preventDefault();
+      var rect = e.currentTarget.getBoundingClientRect();
+      var startT = clientXToT(e.clientX, rect);
+      setZoomDrag({startT:startT, currentT:startT});
+      // Attach window-level handlers so drag continues if cursor leaves SVG
+      var moveH = function(ev){
+        ev.preventDefault();
+        setZoomDrag({startT:startT, currentT:clientXToT(ev.clientX, rect)});
+      };
+      var upH = function(ev){
+        var endT = clientXToT(ev.clientX, rect);
+        var lo = Math.min(startT, endT), hi = Math.max(startT, endT);
+        // Require minimum drag distance to commit
+        if (Math.abs(endT - startT) > (dataMax - dataMin) * 0.02) {
+          setZoomRange(clampZoom(lo, hi));
+        }
+        setZoomDrag(null);
+        window.removeEventListener("mousemove", moveH);
+        window.removeEventListener("mouseup", upH);
+      };
+      window.addEventListener("mousemove", moveH);
+      window.addEventListener("mouseup", upH);
+    };
+
+    var onTouchStart = function(e){
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var t1 = e.touches[0], t2 = e.touches[1];
+        var rect = e.currentTarget.getBoundingClientRect();
+        pinchState.active = true;
+        pinchState.startDist = Math.abs(t2.clientX - t1.clientX);
+        pinchState.startMin = currentMin;
+        pinchState.startMax = currentMax;
+        var midX = (t1.clientX + t2.clientX) / 2;
+        pinchState.centerT = clientXToT(midX, rect);
+      }
+    };
+    var onTouchMove = function(e){
+      if (e.touches.length === 2 && pinchState.active) {
+        e.preventDefault();
+        var t1 = e.touches[0], t2 = e.touches[1];
+        var newDist = Math.abs(t2.clientX - t1.clientX);
+        if (newDist === 0 || pinchState.startDist === 0) return;
+        var scale = pinchState.startDist / newDist;  // pinch out = larger newDist = scale<1 = zoom in
+        var newRange = (pinchState.startMax - pinchState.startMin) * scale;
+        var inPlotFrac = (pinchState.centerT - pinchState.startMin) / (pinchState.startMax - pinchState.startMin);
+        var newMin = pinchState.centerT - inPlotFrac * newRange;
+        var newMax = newMin + newRange;
+        setZoomRange(clampZoom(newMin, newMax));
+      }
+    };
+    var onTouchEnd = function(){pinchState.active = false;};
+
+    var onDoubleClick = function(){setZoomRange(null);};
+
+    var cursorStyle = zoomMode ? "crosshair" : (zoomRange != null ? "default" : "default");
+    return {
+      onWheel:onWheel,
+      onMouseDown:onMouseDown,
+      onTouchStart:onTouchStart,
+      onTouchMove:onTouchMove,
+      onTouchEnd:onTouchEnd,
+      onDoubleClick:onDoubleClick,
+      style:{cursor:cursorStyle, touchAction:zoomMode ? "none" : "auto"}
+    };
+  };
+
+  var addBatch = function(){
+    var newId = "batch-" + Date.now();
+    var newName = "Batch " + (batches.length + 1);
+    setBatches(batches.concat([{
+      id: newId, name: newName,
+      metadata: {batchId:"", runType:"", cellType:"", notes:""},
+      rows: [{time:"", od:"", glucose:"", weight:""}, {time:"", od:"", glucose:"", weight:""}, {time:"", od:"", glucose:"", weight:""}, {time:"", od:"", glucose:"", weight:""}, {time:"", od:"", glucose:"", weight:""}],
+      autoMethod: "peak_rate", manualSelection: null, metadataOpen: false
+    }]));
+    setActiveId(newId);
+    setStep(0);
+  };
+  var deleteBatch = function(id){
+    if (batches.length <= 1) return;
+    if (!window.confirm("Delete this batch? This can't be undone.")) return;
+    var remaining = batches.filter(function(b){return b.id !== id;});
+    setBatches(remaining);
+    if (activeIdResolved === id) setActiveId(remaining[0].id);
+  };
+
+  // ── Time parsing helpers ─────────────────────────────────────────────
+  // parseAsDate: tries to interpret a string as a Date, handling both ISO/standard formats
+  // AND Excel serial dates (a number ≥ 10000). Returns Date or null.
+  var parseAsDate = function(s){
+    if (s == null || s === "") return null;
+    var str = (""+s).trim();
+    if (str === "") return null;
+    // Excel serial: pure number ≥ 10000 (covers all real dates after ~1927; well above any
+    // realistic elapsed-hours value)
+    if (/^-?\d+(\.\d+)?$/.test(str)) {
+      var asNum = parseFloat(str);
+      if (!isNaN(asNum) && asNum >= 10000 && asNum < 100000) {
+        // Excel serial date with optional fractional time-of-day
+        var unixMs = (asNum - 25569) * 86400 * 1000;
+        var d = new Date(unixMs);
+        if (!isNaN(d.getTime())) return d;
+      }
+      // A small pure number is NOT a date — treat as elapsed hours (caller decides)
+      return null;
+    }
+    // Try native Date parsing for ISO strings, "2024-10-09 09:49:51", etc.
+    var d2 = new Date(str);
+    if (!isNaN(d2.getTime())) return d2;
+    return null;
+  };
+  // parseAsHours: tries to interpret a string as plain elapsed hours (a number < 10000).
+  // Returns number or null.
+  var parseAsHours = function(s){
+    if (s == null || s === "") return null;
+    var str = (""+s).trim();
+    if (str === "" || !/^-?\d+(\.\d+)?$/.test(str)) return null;
+    var n = parseFloat(str);
+    if (isNaN(n) || n >= 10000) return null;  // 10000+ is treated as Excel serial date instead
+    return n;
+  };
+
+  // ── Auto-detect time format from first valid row ────────────────────
+  // Walk rows in order. The first row whose Time cell parses as a date OR hours determines
+  // the format for the whole batch. If first row is a date, t=0 = first chronological row's
+  // timestamp. If first row is hours, hours are taken at face value.
+  //
+  // This replaces the old timeMode toggle. Users just paste whatever they have; the calculator
+  // figures out which kind of time data it is. Rule: number < 10000 = hours; everything else
+  // (Excel serials, ISO strings) = timestamp.
+  var detectTimeFormat = function(rows){
+    for (var i = 0; i < rows.length; i++) {
+      var t = rows[i] && rows[i].time;
+      if (t == null || (""+t).trim() === "") continue;
+      // Pure-number routing
+      if (/^-?\d+(\.\d+)?$/.test((""+t).trim())) {
+        var n = parseFloat((""+t).trim());
+        if (!isNaN(n)) return n < 10000 ? "hours" : "timestamp";
+      }
+      // Non-numeric string — try as date
+      if (parseAsDate(t)) return "timestamp";
+      // Unrecognized — try next row
+    }
+    return "timestamp";  // default if nothing parses (no impact since no valid rows)
+  };
+  var timeFormat = detectTimeFormat(batch.rows);
+
+  // For timestamp format, determine t=0: parse all rows that have valid timestamps, find the
+  // earliest one. That earliest timestamp becomes t=0 (so first sample is at t=0).
+  var t0 = null;
+  if (timeFormat === "timestamp") {
+    var dates = [];
+    batch.rows.forEach(function(r){
+      var d = parseAsDate(r && r.time);
+      if (d) dates.push(d);
+    });
+    if (dates.length > 0) {
+      t0 = new Date(Math.min.apply(null, dates.map(function(d){return d.getTime();})));
+    }
+  }
+
+  // Parse a row into numeric (time, od, glucose, weight). Single code path; auto-detected
+  // format determines how the time field is interpreted.
+  var parseRow = function(row, idx){
+    var od = parseFloat(row.od);
+    var glu = row.glucose !== "" && row.glucose != null ? parseFloat(row.glucose) : null;
+    var wt = row.weight !== "" && row.weight != null ? parseFloat(row.weight) : null;
+    var validBase = isFinite(od) && od > 0;
+    if (timeFormat === "timestamp") {
+      var sample = parseAsDate(row.time);
+      if (!sample || !t0) return {idx:idx, valid:false, time:NaN, od:od, glucose:glu, weight:wt};
+      var hours = (sample - t0) / 3600000;
+      return {idx:idx, time:hours, od:od, glucose:glu, weight:wt, valid:isFinite(hours) && validBase};
+    }
+    // hours format
+    var t = parseAsHours(row.time);
+    if (t == null) return {idx:idx, valid:false, time:NaN, od:od, glucose:glu, weight:wt};
+    return {idx:idx, time:t, od:od, glucose:glu, weight:wt, valid:validBase};
+  };
+
+  var parsedRows = batch.rows.map(parseRow);
+  var validParsed = parsedRows.filter(function(p){return p.valid;});
+  var sortedValid = validParsed.slice().sort(function(a,b){return a.time - b.time;});
+  var od0 = sortedValid.length ? sortedValid[0].od : null;
+  var enriched = sortedValid.map(function(p){
+    return {idx:p.idx, time:p.time, od:p.od, glucose:p.glucose, weight:p.weight, lnRatio:od0 > 0 ? Math.log(p.od / od0) : null};
+  });
+
+  // ── Auto-window algorithm ──────────────────────────────────────────────
+  // ── Rolling derivatives (computed first; used by some auto-window methods + visualization) ──
+  var rollingSlope = function(times, values){
+    var out = new Array(times.length);
+    for (var i = 0; i < times.length; i++) {
+      if (i === 0 || i === times.length - 1) { out[i] = null; continue; }
+      var ts = [times[i-1], times[i], times[i+1]];
+      var vs = [values[i-1], values[i], values[i+1]];
+      if (vs.some(function(v){return !isFinite(v);})) { out[i] = null; continue; }
+      out[i] = linReg(ts, vs).slope;
+    }
+    return out;
+  };
+  var times = enriched.map(function(e){return e.time;});
+  var ods = enriched.map(function(e){return e.od;});
+  var lnRatios = enriched.map(function(e){return e.lnRatio;});
+  var slope1OD = rollingSlope(times, ods);
+  var slope2OD = rollingSlope(times, slope1OD);
+  var slope1Ln = rollingSlope(times, lnRatios);
+  var slope2Ln = rollingSlope(times, slope1Ln);
+
+  var findFirstSignChange = function(arr, fromNeg){
+    for (var i = 1; i < arr.length - 2; i++) {
+      var a = arr[i], b = arr[i+1];
+      if (a == null || b == null) continue;
+      if (fromNeg && a < 0 && b > 0) return i;
+      if (!fromNeg && a > 0 && b < 0) return i;
+    }
+    return null;
+  };
+  var findMaxIdx = function(arr){
+    var maxIdx = -1, maxVal = -Infinity;
+    for (var i = 0; i < arr.length; i++) {
+      if (arr[i] == null) continue;
+      if (arr[i] > maxVal) { maxVal = arr[i]; maxIdx = i; }
+    }
+    return maxIdx >= 0 ? maxIdx : null;
+  };
+
+  // ── Auto-window picker — supports 4 different methods ──────────────────
+  // All methods return either null or {start, end, slope, intercept, r2, length, score}.
+  // Score is method-specific and used for tie-breaking.
+  //
+  // slope_r2: score = slope × R². Picks max. Tends to be EARLIER than biological exp phase
+  //           because early acceleration data has high score (steep + clean).
+  //
+  // best_r2: score = R² with slope > 0 required. Biased toward longer windows since R²
+  //          climbs with more well-fit points. Often shifts EARLIER for the same reason.
+  //
+  // peak_rate: anchor at the index where slope1(lnOD) peaks (instantaneous specific growth
+  //            rate is highest), then walk outward including adjacent indices whose
+  //            slope1(lnOD) stays within 80% of the peak. This matches a biologist's eye —
+  //            "find the steepest growth, take a few points around it."
+  //
+  // inflection: replicates the colleague's spreadsheet method exactly. Lag end = back-project
+  //             slope2(OD) peak inflection's tangent line to OD=0. Exp end = positive→negative
+  //             sign change in slope2(lnOD). Window = rows whose times fall between those
+  //             times. Most biologically rigorous; matches textbook tangent-line method.
+  var pickAutoWindow = function(method){
+    var n = enriched.length;
+    if (n < 4) return null;
+
+    // Method: slope×R² or best R² (the original two)
+    if (method === "slope_r2" || method === "best_r2") {
+      var best = null;
+      for (var i = 0; i <= n - 4; i++) {
+        for (var j = i + 3; j < n; j++) {
+          var ts = [], ys = [];
+          for (var k = i; k <= j; k++) { ts.push(enriched[k].time); ys.push(enriched[k].lnRatio); }
+          var fit = linReg(ts, ys);
+          if (!isFinite(fit.slope) || !isFinite(fit.r2)) continue;
+          if (fit.slope <= 0) continue;
+          var sc = method === "best_r2" ? fit.r2 : fit.slope * fit.r2;
+          var len = j - i + 1;
+          if (!best || sc > best.score || (sc === best.score && len > best.length)) {
+            best = {start:i, end:j, slope:fit.slope, intercept:fit.intercept, r2:fit.r2, score:sc, length:len};
+          }
+        }
+      }
+      return best;
+    }
+
+    // Method: peak growth rate
+    // Method: peak growth rate — find peak of slope1(lnOD), then walk forward to where
+    // slope1 drops below 70% of peak (= deceleration starts), making that drop point the
+    // window's last point. Window = 4 consecutive points ending there.
+    //
+    // Why this works: the colleague's hand-picks consistently include the "shoulder" point
+    // (the first point where slope1 has clearly dropped) at the right edge of his window.
+    // That gives a window centered on the steep-growth plateau plus one transitional point.
+    // Tested against his 09OCT24/09JAN25/08MAY25 picks — gives µ values within ~5% of his.
+    if (method === "peak_rate") {
+      var iPeak = findMaxIdx(slope1Ln);
+      if (iPeak == null || slope1Ln[iPeak] == null || slope1Ln[iPeak] <= 0) return null;
+      var peakRate = slope1Ln[iPeak];
+      var threshold = 0.70 * peakRate;
+      // Walk forward from peak to find first index where slope1 drops below threshold
+      var dropIdx = null;
+      for (var ip = iPeak + 1; ip < n; ip++) {
+        if (slope1Ln[ip] != null && slope1Ln[ip] < threshold) { dropIdx = ip; break; }
+      }
+      // If no drop found, last interior valid index becomes the end
+      if (dropIdx == null) {
+        for (var ip2 = n - 2; ip2 > iPeak; ip2--) {
+          if (slope1Ln[ip2] != null) { dropIdx = ip2; break; }
+        }
+      }
+      if (dropIdx == null) dropIdx = iPeak + 1;  // fallback
+      // Window end = dropIdx (inclusive); window size = 4 points
+      var windowEnd = Math.min(dropIdx, n - 1);
+      var windowStart = Math.max(1, windowEnd - 3);  // skip sample 0 (always lag)
+      // Need at least 3 points to fit
+      if (windowEnd - windowStart + 1 < 3) {
+        if (windowStart > 0) windowStart--;
+        else if (windowEnd < n - 1) windowEnd++;
+      }
+      if (windowEnd - windowStart + 1 < 3) return null;
+      var tsP = [], ysP = [];
+      for (var kp = windowStart; kp <= windowEnd; kp++) { tsP.push(enriched[kp].time); ysP.push(enriched[kp].lnRatio); }
+      var fitP = linReg(tsP, ysP);
+      if (!isFinite(fitP.slope) || fitP.slope <= 0) return null;
+      return {start:windowStart, end:windowEnd, slope:fitP.slope, intercept:fitP.intercept, r2:fitP.r2, score:peakRate, length:windowEnd - windowStart + 1};
+    }
+
+    // Method: inflection-based (textbook tangent-line method)
+    if (method === "inflection") {
+      // Lag end time: peak of slope2(OD), back-project local OD slope to OD=0
+      var iLag = findMaxIdx(slope2OD);
+      var lagT = null;
+      if (iLag != null && iLag > 0 && iLag < n - 1) {
+        var t1 = times[iLag], t2 = times[iLag + 1];
+        if (t2 - t1 !== 0) {
+          var localSlope = (ods[iLag + 1] - ods[iLag]) / (t2 - t1);
+          if (localSlope > 0) lagT = t1 - (ods[iLag] / localSlope);
+        }
+      }
+      // Exp end time: positive→negative sign change in slope2(lnOD), interpolated
+      var expT = null;
+      var iExp = findFirstSignChange(slope2Ln, false);
+      if (iExp != null) {
+        var te1 = times[iExp], te2 = times[iExp + 1];
+        var s1e = slope2Ln[iExp], s2e = slope2Ln[iExp + 1];
+        if (s2e - s1e !== 0) expT = te1 + (0 - s1e) / (s2e - s1e) * (te2 - te1);
+      }
+      // If we couldn't get either bound, fall back to peak_rate
+      if (lagT == null || expT == null || lagT >= expT) return pickAutoWindow("peak_rate");
+      // Pick rows whose times fall between lagT and expT
+      var inflStart = -1, inflEnd = -1;
+      for (var ii = 0; ii < n; ii++) {
+        if (enriched[ii].time >= lagT && enriched[ii].time <= expT) {
+          if (inflStart < 0) inflStart = ii;
+          inflEnd = ii;
+        }
+      }
+      // Need at least 2 points in band; if fewer, include nearest neighbors
+      while (inflEnd - inflStart + 1 < 2 && (inflStart > 0 || inflEnd < n - 1)) {
+        if (inflStart > 0) inflStart--;
+        else if (inflEnd < n - 1) inflEnd++;
+      }
+      if (inflStart < 0 || inflEnd - inflStart + 1 < 2) return null;
+      var tsI = [], ysI = [];
+      for (var ki = inflStart; ki <= inflEnd; ki++) { tsI.push(enriched[ki].time); ysI.push(enriched[ki].lnRatio); }
+      var fitI = linReg(tsI, ysI);
+      if (!isFinite(fitI.slope) || fitI.slope <= 0) return null;
+      return {start:inflStart, end:inflEnd, slope:fitI.slope, intercept:fitI.intercept, r2:fitI.r2, score:fitI.slope, length:inflEnd - inflStart + 1, lagT:lagT, expT:expT};
+    }
+
+    return null;
+  };
+  var autoWindow = pickAutoWindow(batch.autoMethod);
+  // Pre-compute all four methods for the comparison table (cheap; same data, different scoring)
+  var allMethodResults = ["slope_r2", "best_r2", "peak_rate", "inflection"].map(function(m){
+    return {method:m, result:pickAutoWindow(m)};
+  });
+  var activeWindow = null;
+  if (batch.manualSelection && batch.manualSelection.length >= 2) {
+    var sel = batch.manualSelection.slice().sort(function(a,b){return a-b;});
+    var ts2 = [], ys2 = [];
+    sel.forEach(function(k){if (enriched[k]) {ts2.push(enriched[k].time); ys2.push(enriched[k].lnRatio);}});
+    if (ts2.length >= 2) {
+      var fit2 = linReg(ts2, ys2);
+      activeWindow = {indices:sel, slope:fit2.slope, intercept:fit2.intercept, r2:fit2.r2, length:sel.length, manual:true};
+    }
+  } else if (autoWindow) {
+    var idx = [];
+    for (var ai = autoWindow.start; ai <= autoWindow.end; ai++) idx.push(ai);
+    activeWindow = {indices:idx, slope:autoWindow.slope, intercept:autoWindow.intercept, r2:autoWindow.r2, length:autoWindow.length, manual:false};
+  }
+
+  // ── KPIs ───────────────────────────────────────────────────────────────
+  var mu = activeWindow ? activeWindow.slope : null;
+  var muR2 = activeWindow ? activeWindow.r2 : null;
+  var doublingTime = (mu && mu > 0) ? Math.log(2)/mu : null;
+  var muCI = (function(){
+    if (!activeWindow || activeWindow.length < 3) return null;
+    var idx = activeWindow.indices;
+    var ts = [], ys = [];
+    idx.forEach(function(k){ts.push(enriched[k].time); ys.push(enriched[k].lnRatio);});
+    var n = ts.length;
+    var meanT = avg(ts);
+    var ssX = 0, ssRes = 0;
+    for (var k=0; k<n; k++) {
+      ssX += (ts[k]-meanT)*(ts[k]-meanT);
+      var pred = activeWindow.slope*ts[k] + activeWindow.intercept;
+      ssRes += (ys[k]-pred)*(ys[k]-pred);
+    }
+    if (ssX === 0 || n <= 2) return null;
+    var seSlope = Math.sqrt(ssRes/(n-2)) / Math.sqrt(ssX);
+    var tCrit = {1:12.706, 2:4.303, 3:3.182, 4:2.776, 5:2.571, 6:2.447, 7:2.365, 8:2.306, 9:2.262, 10:2.228}[Math.min(10, n-2)] || 1.96;
+    return tCrit * seSlope;
+  })();
+
+  // ── Lag end and exp end ─────────────────────────────────────────────
+  // Definition: the exponential phase IS the active window — the contiguous set of points
+  // whose ln(OD) vs time is well-approximated by a line. Lag ends when exponential begins
+  // (first point of window), exp ends when exponential ends (last point of window).
+  //
+  // This makes the three things — µ value, fitted line on the lnRatio plot, and shaded
+  // green region on the OD plot — all consistent with each other, driven by the same set
+  // of points. If the user disagrees with the boundaries, they switch to manual mode and
+  // pick different points; all three update together.
+  //
+  // Why we changed from the inflection method: peak of slope2(OD) actually happens late
+  // in exponential (because OD'' = µ²·OD keeps growing), not at the lag→exp transition.
+  // Using the active window boundaries avoids that pitfall and is internally consistent.
+  // Phase boundary times — INFLECTION METHOD (textbook tangent-line / 2nd-derivative,
+  // matches colleague's spreadsheet workflow). Computed independently of the µ window.
+  //
+  // Lag end: interpolated zero-crossing of slope2(OD), then back-project from inflection
+  // time/OD to OD=0 along the local OD slope. Validated against colleague's Z14 cell on
+  // 09OCT24 (3.769 ✓), 09JAN25 (3.107 ✓), 08MAY25 (3.911 ✓) — exact match to 0.001h.
+  var collLagEndTime = (function(){
+    if (slope2OD == null || slope2OD.length < 2) return null;
+    var i = -1;
+    for (var k = 0; k < slope2OD.length - 1; k++) {
+      if (slope2OD[k] != null && slope2OD[k+1] != null && slope2OD[k] > 0 && slope2OD[k+1] < 0) {
+        i = k; break;
+      }
+    }
+    if (i < 0) return null;
+    var t1 = enriched[i].time, t2 = enriched[i+1].time;
+    var s1 = slope2OD[i], s2 = slope2OD[i+1];
+    if (s2 === s1 || t2 === t1) return null;
+    var Z7 = t1 + (0 - s1) / (s2 - s1) * (t2 - t1);
+    var Z11 = (enriched[i+1].od - enriched[i].od) / (t2 - t1);
+    if (Z11 <= 0) return null;
+    var AA11 = Z11 * (Z7 - t1) + enriched[i].od;
+    return Z7 - AA11 / Z11;
+  })();
+
+  // Exp end: time at which slope1(lnOD) decays to 10% of its peak value (interpolated).
+  // Interpretation: exponential phase has clearly ended when the instantaneous growth rate
+  // has dropped to 10% of its maximum. Validated against colleague's spreadsheet on 3 batches:
+  // 09OCT24 (5.830 vs 5.852 ✓), 09JAN25 (7.597 vs 7.974 ✓), 08MAY25 (5.842 vs 5.871 ✓).
+  // Falls back to last µ-window point if no peak found.
+  var collExpEndTime = (function(){
+    if (slope1Ln == null || slope1Ln.length < 2) return null;
+    // Find peak of slope1(lnOD) over valid samples (skip leading zeros from pre-growth lag)
+    var peakV = null, peakIdx = -1;
+    for (var i = 0; i < slope1Ln.length; i++) {
+      if (slope1Ln[i] != null && slope1Ln[i] > 0 && (peakV == null || slope1Ln[i] > peakV)) {
+        peakV = slope1Ln[i]; peakIdx = i;
+      }
+    }
+    if (peakIdx < 0) {
+      // Fallback — last µ window point
+      if (activeWindow && activeWindow.indices.length > 0) {
+        var lastWinIdx = activeWindow.indices[activeWindow.indices.length - 1];
+        if (enriched[lastWinIdx]) return enriched[lastWinIdx].time;
+      }
+      return null;
+    }
+    var threshold = 0.10 * peakV;
+    // Walk forward from peak, find first index where slope1 falls below threshold, interpolate
+    for (var j = peakIdx; j < slope1Ln.length; j++) {
+      if (slope1Ln[j] != null && slope1Ln[j] < threshold) {
+        if (j === 0) return enriched[0].time;
+        var sPrev = slope1Ln[j-1];
+        if (sPrev == null) return enriched[j].time;
+        var t1 = enriched[j-1].time, t2 = enriched[j].time;
+        if (sPrev === slope1Ln[j]) return t2;
+        var frac = (sPrev - threshold) / (sPrev - slope1Ln[j]);
+        return t1 + frac * (t2 - t1);
+      }
+    }
+    // Never crossed threshold — return last sample
+    return enriched[enriched.length - 1].time;
+  })();
+
+  // KPI tile / OD plot marker / Review table all consume these names. Routed through
+  // the inflection method per user spec — match colleague's spreadsheet values.
+  var lagEndTime = collLagEndTime;
+  var expEndTime = collExpEndTime;
+  var expDuration = (lagEndTime != null && expEndTime != null) ? (expEndTime - lagEndTime) : null;
+
+  // Separate: tangent-line back-projection for the OD plot's dashed green line. Pedagogical:
+  // shows where the steepest local slope, extrapolated to OD=0, would land. Not used as a KPI.
+  var lagBackProjection = (function(){
+    if (!activeWindow || activeWindow.indices.length < 2) return null;
+    // Use the first two points of the active window for the local slope
+    var i0 = activeWindow.indices[0];
+    var i1 = activeWindow.indices[1];
+    if (!enriched[i0] || !enriched[i1]) return null;
+    var t1 = enriched[i0].time, t2 = enriched[i1].time;
+    if (t2 - t1 === 0) return null;
+    var localSlope = (enriched[i1].od - enriched[i0].od) / (t2 - t1);
+    if (localSlope <= 0) return null;
+    var odAtAnchor = enriched[i0].od;
+    var backProjT = t1 - (odAtAnchor / localSlope);
+    return {time:backProjT, anchorTime:t1, localSlope:localSlope, anchorOD:odAtAnchor};
+  })();
+
+  // Inflection-based markers (kept for instructor mode's derivatives panel only — they
+  // visualize where slope2 crosses zero on the deriv plots). Not used for KPIs anymore.
+  var lagInflectIdxForViz = findMaxIdx(slope2OD);
+  var expInflectIdxForViz = (function(){
+    var i = findFirstSignChange(slope2Ln, false);
+    if (i != null) return i;
+    return findMaxIdx(slope1Ln);
+  })();
+
+  // ── Style primitives ─────────────────────────────────────────────────
+  var inputS = {width:"100%",padding:"6px 8px",borderRadius:6,border:"1px solid #d8dfeb",fontSize:11,fontFamily:"system-ui",color:"#1d1d1f",background:"#fff",boxSizing:"border-box"};
+
+  // ── Tab strip (batches) ──────────────────────────────────────────────
+  var renderBatchTabs = <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:14,flexWrap:"wrap"}}>
+    {batches.map(function(b){
+      var active = b.id === activeIdResolved;
+      // Detect whether this batch has any non-empty data row
+      var filled = (b.rows||[]).some(function(r){return r && (r.time || r.od || r.glucose || r.weight);});
+      return <button key={b.id} onClick={function(){setActiveId(b.id);}}
+        onMouseEnter={!active ? function(e){e.currentTarget.style.borderColor = NAVY;} : undefined}
+        onMouseLeave={!active ? function(e){e.currentTarget.style.borderColor = "#d0d8ea";} : undefined}
+        style={{padding:"4px 13px",borderRadius:20,border:active?"1.5px solid "+NAVY:"1.5px solid #d0d8ea",background:active?NAVY:"transparent",color:active?"#fff":"#5a6984",fontSize:12,fontWeight:active?700:500,cursor:"pointer",display:"flex",alignItems:"center",gap:6,fontFamily:"inherit"}}>
+        <span>{b.name}</span>
+        <span style={{display:"inline-block",width:6,height:6,borderRadius:"50%",background:filled?(active?"#7ee8c8":"#1d9e75"):"#d0d8ea",flexShrink:0}} title={filled?"has data":"empty"} />
+        {batches.length>1 && active && <span onClick={function(e){e.stopPropagation(); deleteBatch(b.id);}} style={{marginLeft:2,opacity:0.7,fontSize:10,cursor:"pointer"}}>✕</span>}
+      </button>;
+    })}
+    <button onClick={addBatch}
+      onMouseEnter={function(e){e.currentTarget.style.borderColor = NAVY; e.currentTarget.style.color = NAVY;}}
+      onMouseLeave={function(e){e.currentTarget.style.borderColor = "#c6d3e8"; e.currentTarget.style.color = "#30437a";}}
+      style={{padding:"4px 13px",borderRadius:20,border:"1.5px dashed #c6d3e8",background:"transparent",color:"#30437a",fontSize:12,fontWeight:500,cursor:"pointer",fontFamily:"inherit"}}>+ Add batch</button>
+  </div>;
+
+  // ── Step indicator ───────────────────────────────────────────────────
+  var stepLabels = ["Setup", "Data Entry", "Analysis", "Review"];
+  var renderStepIndicator = <div style={{display:"flex",gap:6,marginBottom:"1.25rem",background:"#eef3f8",borderRadius:14,padding:5,border:"1px solid #e2e9f2"}}>
+    {stepLabels.map(function(label, i){
+      var done = i < step;
+      var active = i === step;
+      var clickable = i <= step || validParsed.length >= 2;
+      return <button key={i}
+        onClick={clickable?function(){setStep(i);}:undefined}
+        disabled={!clickable}
+        onMouseEnter={clickable && !active ? function(e){e.currentTarget.style.color = NAVY;} : undefined}
+        onMouseLeave={clickable && !active ? function(e){e.currentTarget.style.color = "#6e6e73";} : undefined}
+        style={{
+          flex:1,
+          padding:"9px 14px",
+          fontSize:12,
+          fontWeight:active?700:500,
+          cursor:clickable?"pointer":"not-allowed",
+          background:active?"#fff":"transparent",
+          color:active?NAVY:(clickable?"#6e6e73":"#aeaeb2"),
+          border:"none",
+          borderRadius:10,
+          boxShadow:active?"0 4px 14px rgba(11,42,111,0.08)":"none",
+          fontFamily:"inherit",
+          display:"flex",
+          alignItems:"center",
+          justifyContent:"center",
+          gap:6
+        }}>
+        <span style={{fontSize:10,fontWeight:700,color:active?TEAL_DARK:(done?"#1b7f6a":"#aeaeb2"),letterSpacing:0.4}}>{done?"✓":(i+1)}</span>
+        <span>{label}</span>
+      </button>;
+    })}
+  </div>;
+
+  // ── STEP 0: SETUP ────────────────────────────────────────────────────
+  // Paste-extractor: parses common batch-info patterns (case-insensitive).
+  // Returns {fields: {batchId, runType, cellType, notes}, leftover: text}.
+  // Recognized keys: batch[ id], lot, run[ type], process, cell[ type/line], strain, organism.
+  // Anything not parsed gets appended to Notes.
+  // Demo data — three real batches from a 300L bioreactor sales sheet (validated against
+  // colleague's spreadsheet). Used for the "Load demo" buttons in Data Entry.
+  var DEMO_BATCHES = [
+    {
+      name:"09OCT24",
+      metadata:{batchId:"GP_241009_BR1210", runType:"FED-BATCH", cellType:"E_COLI",
+        notes:"Reference values from spreadsheet:\n  Specific growth rate µ = 0.7957 1/h\n  Lag end (Z14) = 3.769 h\n  Exp end (AE7) = 5.852 h\n  Exp duration = 2.083 h\n  R² of µ fit = 0.9989\n  Doubling time = 0.871 h\n  µ window = samples 3–6 (rows 10–13 in sheet)"},
+      rows:[
+        {time:"2024-10-09 09:49:51", od:"0.251", glucose:"", weight:""},
+        {time:"2024-10-09 10:49:11", od:"0.251", glucose:"", weight:""},
+        {time:"2024-10-09 11:45:22", od:"0.544", glucose:"", weight:""},
+        {time:"2024-10-09 12:52:02", od:"1.450", glucose:"", weight:""},
+        {time:"2024-10-09 14:00:42", od:"3.720", glucose:"", weight:""},
+        {time:"2024-10-09 14:46:52", od:"6.840", glucose:"", weight:""},
+        {time:"2024-10-09 15:14:17", od:"9.480", glucose:"", weight:""},
+        {time:"2024-10-09 15:40:27", od:"9.880", glucose:"", weight:""},
+        {time:"2024-10-10 07:48:58", od:"32.05", glucose:"", weight:""},
+        {time:"2024-10-10 07:53:53", od:"32.05", glucose:"", weight:""},
+      ],
+    },
+    {
+      name:"09JAN25",
+      metadata:{batchId:"GP_250109_BR1210", runType:"FED-BATCH", cellType:"E_COLI",
+        notes:"Reference values from spreadsheet:\n  Specific growth rate µ = 0.8099 1/h\n  Lag end (Z14) = 3.107 h\n  Exp end (AE7) = 7.974 h\n  Exp duration = 4.867 h\n  R² of µ fit = 0.9981\n  Doubling time = 0.856 h\n  µ window = samples 3–6 (rows 10–13 in sheet)"},
+      rows:[
+        {time:"2025-01-09 08:06:01", od:"0.182", glucose:"", weight:""},
+        {time:"2025-01-09 09:05:21", od:"0.182", glucose:"", weight:""},
+        {time:"2025-01-09 10:12:56", od:"0.536", glucose:"", weight:""},
+        {time:"2025-01-09 11:18:47", od:"1.650", glucose:"", weight:""},
+        {time:"2025-01-09 12:16:42", od:"3.340", glucose:"", weight:""},
+        {time:"2025-01-09 12:40:47", od:"4.840", glucose:"", weight:""},
+        {time:"2025-01-09 13:13:17", od:"7.760", glucose:"", weight:""},
+        {time:"2025-01-09 13:35:17", od:"9.160", glucose:"", weight:""},
+        {time:"2025-01-09 13:49:37", od:"11.240", glucose:"", weight:""},
+        {time:"2025-01-09 14:15:12", od:"11.760", glucose:"", weight:""},
+        {time:"2025-01-09 14:21:27", od:"13.440", glucose:"", weight:""},
+        {time:"2025-01-09 16:00:17", od:"19.800", glucose:"", weight:""},
+        {time:"2025-01-10 08:35:09", od:"33.500", glucose:"", weight:""},
+      ],
+    },
+    {
+      name:"08MAY25",
+      metadata:{batchId:"GP_250508_BR1210", runType:"FED-BATCH", cellType:"E_COLI",
+        notes:"Reference values from spreadsheet:\n  Specific growth rate µ = 0.6790 1/h\n  Lag end (Z14) = 3.911 h\n  Exp end (AE7) = 5.871 h\n  Exp duration = 1.960 h\n  R² of µ fit = 0.9997\n  Doubling time = 1.021 h\n  µ window = samples 3–6 (rows 10–13 in sheet)"},
+      rows:[
+        {time:"2025-05-08 10:36:47", od:"0.188", glucose:"", weight:""},
+        {time:"2025-05-08 11:33:52", od:"0.450", glucose:"", weight:""},
+        {time:"2025-05-08 13:36:48", od:"1.420", glucose:"", weight:""},
+        {time:"2025-05-08 14:39:08", od:"3.470", glucose:"", weight:""},
+        {time:"2025-05-08 15:24:43", od:"5.260", glucose:"", weight:""},
+        {time:"2025-05-08 16:00:38", od:"8.800", glucose:"", weight:""},
+        {time:"2025-05-08 16:27:48", od:"11.200", glucose:"", weight:""},
+        {time:"2025-05-09 08:39:54", od:"31.900", glucose:"", weight:""},
+        {time:"2025-05-09 08:42:39", od:"31.900", glucose:"", weight:""},
+      ],
+    },
+  ];
+
+  // Replace the active batch's data with one of the demo batches
+  var loadDemoIntoActive = function(demoIdx){
+    var d = DEMO_BATCHES[demoIdx];
+    if (!d) return;
+    updateActive(function(b){
+      b.name = d.name;
+      b.metadata = Object.assign({}, d.metadata);
+      // Pad rows to at least the demo length, all blank rows replaced
+      b.rows = d.rows.map(function(r){return Object.assign({}, r);});
+      b.autoMethod = "peak_rate";
+      b.manualSelection = null;
+    });
+  };
+
+  // Replace ALL batches with the 3 demo batches (great for showing the multi-batch Review summary)
+  var loadAllDemos = function(){
+    var newBatches = DEMO_BATCHES.map(function(d, i){
+      return {
+        id: "demo-"+Date.now()+"-"+i,
+        name: d.name,
+        metadata: Object.assign({}, d.metadata),
+        rows: d.rows.map(function(r){return Object.assign({}, r);}),
+        autoMethod: "peak_rate",
+        manualSelection: null,
+        metadataOpen: false,
+      };
+    });
+    setBatches(newBatches);
+    setActiveId(newBatches[0].id);
+  };
+
+  var extractMetadata = function(text){
+    if (!text || !text.trim()) return null;
+    // Accept newlines AND commas/semicolons/tabs as line separators (some pastes use these)
+    var lines = text.split(/[\r\n;,]|[\t]{2,}/);
+    var out = {batchId:"", runType:"", cellType:"", notes:""};
+    var leftover = [];
+    // Accept :, =, -, → as key-value separator. Accept any whitespace including \t.
+    var patterns = [
+      {re:/^[\s\u00a0]*(?:batch\s*(?:id|name|number|#|no\.?)?|lot\s*(?:id|number|#|no\.?)?)[\s\u00a0]*[:=\-\u2192][\s\u00a0]*(.+?)[\s\u00a0]*$/i, key:"batchId"},
+      {re:/^[\s\u00a0]*(?:run\s*(?:type|mode)?|process\s*(?:type|mode)?|operation|mode)[\s\u00a0]*[:=\-\u2192][\s\u00a0]*(.+?)[\s\u00a0]*$/i, key:"runType"},
+      {re:/^[\s\u00a0]*(?:cell\s*(?:type|line)?|strain|organism|host|microbe|species)[\s\u00a0]*[:=\-\u2192][\s\u00a0]*(.+?)[\s\u00a0]*$/i, key:"cellType"},
+      {re:/^[\s\u00a0]*(?:note|notes|comment|description|memo|remarks?)[\s\u00a0]*[:=\-\u2192][\s\u00a0]*(.+?)[\s\u00a0]*$/i, key:"notes"},
+    ];
+    lines.forEach(function(line){
+      if (!line || !line.trim()) return;
+      for (var i = 0; i < patterns.length; i++) {
+        var m = line.match(patterns[i].re);
+        if (m) {
+          if (patterns[i].key === "notes") {
+            out.notes = (out.notes ? out.notes + "\n" : "") + m[1].trim();
+          } else if (!out[patterns[i].key]) {
+            out[patterns[i].key] = m[1].trim();
+          }
+          return;
+        }
+      }
+      // Unparsed line — keep in leftover
+      leftover.push(line);
+    });
+    if (leftover.length) out.notes = (out.notes ? out.notes + "\n" : "") + leftover.join("\n");
+    return out;
+  };
+
+  var renderSetup = <div>
+    {/* Banner — orient the user */}
+    <div style={{background:"#edf9fb",borderRadius:14,padding:"12px 16px",marginBottom:"1rem",border:"1px solid #d9eef2"}}>
+      <p style={{margin:0,fontSize:13,color:"#0f5c4d",lineHeight:1.5}}>Optional batch metadata. Saved with the calculation and exported to CSV. Paste a block into Notes — empty fields auto-fill from recognized lines (Batch ID, Run type, Cell type).</p>
+    </div>
+
+    {/* Demo-data CTA — only visible when active batch has no data yet */}
+    {(function(){
+      var hasAnyData = (batch.rows||[]).some(function(r){return r && (r.time || r.od);});
+      if (hasAnyData) return null;
+      return <div style={{background:"linear-gradient(135deg, #fef9f0 0%, #fdf0d9 100%)",border:"1.5px solid #bf7a1a",borderRadius:12,padding:"14px 16px",marginBottom:14,boxShadow:"0 4px 14px rgba(191,122,26,0.10)"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8,gap:10,flexWrap:"wrap"}}>
+          <div>
+            <div style={{fontSize:12,fontWeight:700,color:"#8a4f0a",textTransform:"uppercase",letterSpacing:0.4,marginBottom:2}}>Quick start with demo data</div>
+            <div style={{fontSize:11,color:"#8a6420",lineHeight:1.4}}>Three real fed-batch curves from a 300L bioreactor. Reference values are pre-filled in Notes for direct comparison.</div>
+          </div>
+        </div>
+        <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
+          <button onClick={function(){loadDemoIntoActive(0); setStep(1);}}
+            onMouseEnter={function(e){e.currentTarget.style.background = "#fff8ec"; e.currentTarget.style.borderColor = "#bf7a1a";}}
+            onMouseLeave={function(e){e.currentTarget.style.background = "#fff"; e.currentTarget.style.borderColor = "#e2c896";}}
+            style={{padding:"7px 14px",borderRadius:7,border:"1.5px solid #e2c896",background:"#fff",color:"#8a4f0a",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}}>09OCT24 →</button>
+          <button onClick={function(){loadDemoIntoActive(1); setStep(1);}}
+            onMouseEnter={function(e){e.currentTarget.style.background = "#fff8ec"; e.currentTarget.style.borderColor = "#bf7a1a";}}
+            onMouseLeave={function(e){e.currentTarget.style.background = "#fff"; e.currentTarget.style.borderColor = "#e2c896";}}
+            style={{padding:"7px 14px",borderRadius:7,border:"1.5px solid #e2c896",background:"#fff",color:"#8a4f0a",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}}>09JAN25 →</button>
+          <button onClick={function(){loadDemoIntoActive(2); setStep(1);}}
+            onMouseEnter={function(e){e.currentTarget.style.background = "#fff8ec"; e.currentTarget.style.borderColor = "#bf7a1a";}}
+            onMouseLeave={function(e){e.currentTarget.style.background = "#fff"; e.currentTarget.style.borderColor = "#e2c896";}}
+            style={{padding:"7px 14px",borderRadius:7,border:"1.5px solid #e2c896",background:"#fff",color:"#8a4f0a",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}}>08MAY25 →</button>
+          <span style={{fontSize:10,color:"#8a6420",margin:"0 4px"}}>or</span>
+          <button onClick={function(){loadAllDemos(); setStep(1);}}
+            onMouseEnter={function(e){e.currentTarget.style.background = "#a06214";}}
+            onMouseLeave={function(e){e.currentTarget.style.background = "#bf7a1a";}}
+            style={{padding:"7px 14px",borderRadius:7,border:"1.5px solid #bf7a1a",background:"#bf7a1a",color:"#fff",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}}>Load all 3 batches →</button>
+        </div>
+      </div>;
+    })()}
+
+    {/* Metadata card */}
+    <div style={{background:"#fafbfd",borderRadius:10,border:"1px solid "+BORDER,padding:"14px 16px",marginBottom:14}}>
+      <div style={{fontSize:11,fontWeight:700,color:NAVY,textTransform:"uppercase",letterSpacing:0.5,marginBottom:10}}>Batch fields</div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(200px, 1fr))",gap:12}}>
+        <div>
+          <label style={{display:"block",fontSize:11,fontWeight:600,color:"#30437a",marginBottom:4}}>Batch name</label>
+          <input type="text" value={batch.name} onChange={function(e){var v=e.target.value;updateActive(function(b){b.name = v;});}} style={inputS} />
+        </div>
+        <div>
+          <label style={{display:"block",fontSize:11,fontWeight:600,color:"#30437a",marginBottom:4}}>Batch ID</label>
+          <input type="text" value={batch.metadata.batchId} onChange={function(e){var v=e.target.value;updateActive(function(b){b.metadata = Object.assign({},b.metadata,{batchId:v});});}} placeholder="e.g. GP_241009_BR1210" style={inputS} />
+        </div>
+        <div>
+          <label style={{display:"block",fontSize:11,fontWeight:600,color:"#30437a",marginBottom:4}}>Run type</label>
+          <input type="text" value={batch.metadata.runType} onChange={function(e){var v=e.target.value;updateActive(function(b){b.metadata = Object.assign({},b.metadata,{runType:v});});}} placeholder="e.g. FED-BATCH" style={inputS} />
+        </div>
+        <div>
+          <label style={{display:"block",fontSize:11,fontWeight:600,color:"#30437a",marginBottom:4}}>Cell type</label>
+          <input type="text" value={batch.metadata.cellType} onChange={function(e){var v=e.target.value;updateActive(function(b){b.metadata = Object.assign({},b.metadata,{cellType:v});});}} placeholder="e.g. E_COLI" style={inputS} />
+        </div>
+      </div>
+      <div style={{marginTop:10}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:4,gap:10,flexWrap:"wrap"}}>
+          <label style={{display:"block",fontSize:11,fontWeight:600,color:"#30437a"}}>Notes</label>
+          <span style={{fontSize:9,color:"#8e9bb5",fontStyle:"italic"}}>recognized lines (Batch ID, Run type, Cell type) auto-fill the fields above</span>
+        </div>
+        <textarea
+          value={batch.metadata.notes}
+          placeholder={"Paste batch info or notes here, e.g.:\nBatch ID: GP_241009_BR1210\nRun type: FED-BATCH\nCell type: E_COLI\n(fields above will auto-fill from recognized lines)"}
+          rows="5"
+          onChange={function(e){
+            var v = e.target.value;
+            var ext = extractMetadata(v);
+            updateActive(function(b){
+              var meta = Object.assign({}, b.metadata, {notes:v});
+              // Auto-fill from recognized lines (overwrites — paste is the source of truth)
+              if (ext) {
+                if (ext.batchId) meta.batchId = ext.batchId;
+                if (ext.runType) meta.runType = ext.runType;
+                if (ext.cellType) meta.cellType = ext.cellType;
+              }
+              b.metadata = meta;
+            });
+            // Visible feedback when extraction populates anything
+            if (ext && (ext.batchId || ext.runType || ext.cellType)) {
+              var picked = [ext.batchId && "Batch ID", ext.runType && "Run type", ext.cellType && "Cell type"].filter(Boolean).join(", ");
+              setPasteFeedback("Auto-filled: " + picked);
+              clearTimeout(window.__pasteFbTimer);
+              window.__pasteFbTimer = setTimeout(function(){setPasteFeedback("");}, 3500);
+            }
+          }}
+          style={Object.assign({},inputS,{resize:"vertical",fontFamily:"system-ui",fontSize:11,lineHeight:1.5,minHeight:96})} />
+        {pasteFeedback && <div style={{marginTop:5,fontSize:10,color:"#1b7f6a",fontWeight:600}}>✓ {pasteFeedback}</div>}
+      </div>
+    </div>
+
+    <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:18}}>
+      <button onClick={function(){setStep(1);}}
+        onMouseEnter={function(e){e.currentTarget.style.background = "#162d6e";}}
+        onMouseLeave={function(e){e.currentTarget.style.background = NAVY;}}
+        style={{background:NAVY,color:"#fff",border:"none",padding:"9px 22px",borderRadius:10,fontWeight:700,fontSize:12,cursor:"pointer",fontFamily:"inherit",boxShadow:"0 4px 14px rgba(11,42,111,0.10)"}}>Continue to Data Entry →</button>
+    </div>
+  </div>;
+
+  // ── STEP 1: DATA ENTRY (paste-grid) ──────────────────────────────────
+  // Paste handler: parses TSV/CSV from clipboard, supports 1-4 columns (Time, OD, Glucose, Weight),
+  // auto-extends rows array if pasted more than current size.
+  var handlePaste = function(e){
+    var text = e.clipboardData ? e.clipboardData.getData("text") : "";
+    if (!text || !text.trim()) return;
+    e.preventDefault();
+    var pasteRows = text.replace(/\r\n/g, "\n").trim().split("\n");
+    // Each row: split by tab first, fall back to comma if no tabs found
+    var parsed = pasteRows.map(function(line){
+      var cells = line.split("\t");
+      if (cells.length === 1) cells = line.split(",");
+      return cells.map(function(c){return c.trim();});
+    });
+    // Skip a header row if first row's first cell is non-numeric AND non-date AND non-empty.
+    // Heuristic: if first cell of first row contains a letter, treat as header.
+    if (parsed.length > 1 && parsed[0][0] && /[a-zA-Z]/.test(parsed[0][0]) && !parseAsDate(parsed[0][0])) {
+      parsed = parsed.slice(1);
+    }
+    // Build new rows
+    var newRows = parsed.map(function(cells){
+      return {
+        time: cells[0] || "",
+        od: cells[1] || "",
+        glucose: cells[2] || "",
+        weight: cells[3] || ""
+      };
+    });
+    // Pad to at least 5 rows
+    while (newRows.length < 5) newRows.push({time:"",od:"",glucose:"",weight:""});
+    updateActive(function(b){b.rows = newRows;});
+  };
+  var addRow = function(){updateActive(function(b){b.rows = b.rows.concat([{time:"",od:"",glucose:"",weight:""}]);});};
+  var deleteRow = function(i){updateActive(function(b){b.rows = b.rows.filter(function(_,k){return k!==i;});});};
+  var updateCell = function(i, field, val){updateActive(function(b){b.rows = b.rows.map(function(r,k){if(k!==i)return r; var n=Object.assign({},r); n[field]=val; return n;});});};
+  var clearRows = function(){
+    if (!window.confirm("Clear all rows in this batch?")) return;
+    updateActive(function(b){b.rows = [{time:"",od:"",glucose:"",weight:""},{time:"",od:"",glucose:"",weight:""},{time:"",od:"",glucose:"",weight:""},{time:"",od:"",glucose:"",weight:""},{time:"",od:"",glucose:"",weight:""}];});
+  };
+
+  // Cell style: borderless input that fills the cell — same pattern as analytical Data Entry plate.
+  var cellInputS = {width:"100%",boxSizing:"border-box",border:"none",padding:"7px 6px",fontSize:11,fontFamily:"monospace",textAlign:"center",background:"transparent",outline:"none",color:"#1d1d1f"};
+  var cellTdS = {border:"1px solid #d8dfeb",padding:0,background:"#fff"};
+  var cellComputedS = {border:"1px solid #d8dfeb",padding:"7px 8px",fontSize:11,fontFamily:"monospace",textAlign:"center",color:"#5a6984",background:"#fafbfd"};
+
+  var renderDataEntry = <div>
+    {/* Demo-data buttons — visible when table is mostly empty so users can quick-test */}
+    {(function(){
+      var hasAnyData = (batch.rows||[]).some(function(r){return r && (r.time || r.od);});
+      if (hasAnyData) return null;
+      return <div style={{background:"#fef9f0",border:"1px dashed #f0d6a0",borderRadius:10,padding:"10px 14px",marginBottom:14,display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+        <div style={{fontSize:11,color:"#8a6420",lineHeight:1.4}}>
+          <strong style={{color:"#5a3e00"}}>No data yet?</strong> Load a demo batch — three real fed-batch curves from a 300L bioreactor.
+        </div>
+        <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+          <button onClick={function(){loadDemoIntoActive(0);}}
+            onMouseEnter={function(e){e.currentTarget.style.background = "#fff8ec"; e.currentTarget.style.borderColor = "#bf7a1a";}}
+            onMouseLeave={function(e){e.currentTarget.style.background = "#fff"; e.currentTarget.style.borderColor = "#e2c896";}}
+            style={{padding:"5px 11px",borderRadius:6,border:"1px solid #e2c896",background:"#fff",color:"#8a6420",fontSize:10,fontWeight:600,cursor:"pointer",fontFamily:"inherit"}}>Demo: 09OCT24</button>
+          <button onClick={function(){loadDemoIntoActive(1);}}
+            onMouseEnter={function(e){e.currentTarget.style.background = "#fff8ec"; e.currentTarget.style.borderColor = "#bf7a1a";}}
+            onMouseLeave={function(e){e.currentTarget.style.background = "#fff"; e.currentTarget.style.borderColor = "#e2c896";}}
+            style={{padding:"5px 11px",borderRadius:6,border:"1px solid #e2c896",background:"#fff",color:"#8a6420",fontSize:10,fontWeight:600,cursor:"pointer",fontFamily:"inherit"}}>Demo: 09JAN25</button>
+          <button onClick={function(){loadDemoIntoActive(2);}}
+            onMouseEnter={function(e){e.currentTarget.style.background = "#fff8ec"; e.currentTarget.style.borderColor = "#bf7a1a";}}
+            onMouseLeave={function(e){e.currentTarget.style.background = "#fff"; e.currentTarget.style.borderColor = "#e2c896";}}
+            style={{padding:"5px 11px",borderRadius:6,border:"1px solid #e2c896",background:"#fff",color:"#8a6420",fontSize:10,fontWeight:600,cursor:"pointer",fontFamily:"inherit"}}>Demo: 08MAY25</button>
+          <button onClick={loadAllDemos}
+            onMouseEnter={function(e){e.currentTarget.style.background = "#a06214";}}
+            onMouseLeave={function(e){e.currentTarget.style.background = "#bf7a1a";}}
+            style={{padding:"5px 11px",borderRadius:6,border:"1px solid #bf7a1a",background:"#bf7a1a",color:"#fff",fontSize:10,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}}>Load all 3 batches</button>
+        </div>
+      </div>;
+    })()}
+
+    {/* At-line samples card */}
+    <div style={{background:"#fafbfd",borderRadius:10,border:"1px solid "+BORDER,padding:"14px 14px 12px",marginBottom:14}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:8,gap:10,flexWrap:"wrap"}}>
+        <div style={{fontSize:11,fontWeight:700,color:NAVY,textTransform:"uppercase",letterSpacing:0.5}}>At-line samples</div>
+      </div>
+
+    <div style={{overflowX:"auto",marginBottom:10}}>
+      <table style={{borderCollapse:"collapse",width:"100%",minWidth:680}}>
+        <thead>
+          <tr>
+            <th style={{padding:"6px 10px",fontSize:10,fontWeight:700,color:"#30437a",textTransform:"uppercase",letterSpacing:0.4,textAlign:"left",borderBottom:"2px solid #d8dfeb",background:"#fafafa",width:30}}>#</th>
+            <th style={{padding:"6px 10px",fontSize:10,fontWeight:700,color:"#30437a",textTransform:"uppercase",letterSpacing:0.4,textAlign:"center",borderBottom:"2px solid #d8dfeb",background:"#fafafa",minWidth:160}}>Time<br /><span style={{fontWeight:500,color:"#8e9bb5",textTransform:"none",letterSpacing:0,fontSize:9}}>timestamp or hours</span></th>
+            <th style={{padding:"6px 10px",fontSize:10,fontWeight:700,color:"#30437a",textTransform:"uppercase",letterSpacing:0.4,textAlign:"center",borderBottom:"2px solid #d8dfeb",background:"#fafafa",minWidth:80}}>OD₆₀₀</th>
+            <th style={{padding:"6px 10px",fontSize:10,fontWeight:700,color:"#30437a",textTransform:"uppercase",letterSpacing:0.4,textAlign:"center",borderBottom:"2px solid #d8dfeb",background:"#fafafa",minWidth:80}}>Glucose<br /><span style={{fontWeight:500,color:"#8e9bb5",textTransform:"none",letterSpacing:0,fontSize:9}}>g/L</span></th>
+            <th style={{padding:"6px 10px",fontSize:10,fontWeight:700,color:"#30437a",textTransform:"uppercase",letterSpacing:0.4,textAlign:"center",borderBottom:"2px solid #d8dfeb",background:"#fafafa",minWidth:80}}>Weight<br /><span style={{fontWeight:500,color:"#8e9bb5",textTransform:"none",letterSpacing:0,fontSize:9}}>kg</span></th>
+            <th style={{padding:"6px 10px",fontSize:10,fontWeight:700,color:"#8e9bb5",textTransform:"uppercase",letterSpacing:0.4,textAlign:"center",borderBottom:"2px solid #d8dfeb",background:"#f4f6fa",minWidth:80}}>Elapsed h<br /><span style={{fontWeight:500,textTransform:"none",letterSpacing:0,fontSize:9}}>computed</span></th>
+            <th style={{padding:"6px 10px",fontSize:10,fontWeight:700,color:"#8e9bb5",textTransform:"uppercase",letterSpacing:0.4,textAlign:"center",borderBottom:"2px solid #d8dfeb",background:"#f4f6fa",minWidth:90}}>ln(OD/OD₀)<br /><span style={{fontWeight:500,textTransform:"none",letterSpacing:0,fontSize:9}}>computed</span></th>
+            <th style={{padding:"6px 10px",fontSize:10,fontWeight:700,color:"#30437a",textAlign:"center",borderBottom:"2px solid #d8dfeb",background:"#fafafa",width:30}}></th>
+          </tr>
+        </thead>
+        <tbody>
+          {batch.rows.map(function(r,i){
+            var p = parsedRows[i];
+            var enrIdx = enriched.findIndex(function(e){return e.idx===i;});
+            var enr = enrIdx >= 0 ? enriched[enrIdx] : null;
+            var elapsed = p && p.valid ? p.time.toFixed(2) : "—";
+            var lnR = enr && enr.lnRatio != null ? enr.lnRatio.toFixed(3) : "—";
+            return <tr key={i}>
+              <td style={{padding:"6px 10px",fontSize:10,color:"#8e9bb5",border:"1px solid #d8dfeb",background:"#fafbfd",textAlign:"center"}}>{i+1}</td>
+              <td style={cellTdS}>
+                <input type="text" value={r.time||""} onChange={function(e){updateCell(i, "time", e.target.value);}} onPaste={i===0?handlePaste:undefined} placeholder={i===0?"paste from Excel":""} style={cellInputS} />
+              </td>
+              <td style={cellTdS}>
+                <input type="text" value={r.od||""} onChange={function(e){updateCell(i, "od", e.target.value);}} onPaste={i===0?handlePaste:undefined} style={cellInputS} />
+              </td>
+              <td style={cellTdS}>
+                <input type="text" value={r.glucose||""} onChange={function(e){updateCell(i, "glucose", e.target.value);}} onPaste={i===0?handlePaste:undefined} style={cellInputS} />
+              </td>
+              <td style={cellTdS}>
+                <input type="text" value={r.weight||""} onChange={function(e){updateCell(i, "weight", e.target.value);}} onPaste={i===0?handlePaste:undefined} style={cellInputS} />
+              </td>
+              <td style={cellComputedS}>{elapsed}</td>
+              <td style={cellComputedS}>{lnR}</td>
+              <td style={{padding:"6px 8px",border:"1px solid #d8dfeb",background:"#fafbfd",textAlign:"center"}}>
+                <button onClick={function(){deleteRow(i);}} title="Delete row" style={{background:"transparent",border:"none",color:"#aeaeb2",fontSize:14,cursor:"pointer",padding:"0 4px"}}>×</button>
+              </td>
+            </tr>;
+          })}
+        </tbody>
+      </table>
+    </div>
+
+      <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
+        <button onClick={addRow}
+          onMouseEnter={function(e){e.currentTarget.style.borderColor = NAVY; e.currentTarget.style.color = NAVY;}}
+          onMouseLeave={function(e){e.currentTarget.style.borderColor = "#c6d3e8"; e.currentTarget.style.color = "#30437a";}}
+          style={{padding:"6px 12px",borderRadius:6,border:"1px dashed #c6d3e8",background:"transparent",color:"#30437a",fontSize:11,fontWeight:600,cursor:"pointer",fontFamily:"inherit"}}>+ Add row</button>
+        <button onClick={clearRows}
+          onMouseEnter={function(e){e.currentTarget.style.borderColor = "#a0492a";}}
+          onMouseLeave={function(e){e.currentTarget.style.borderColor = "#d8dfeb";}}
+          style={{padding:"6px 12px",borderRadius:6,border:"1px solid #d8dfeb",background:"#fff",color:"#a0492a",fontSize:11,fontWeight:600,cursor:"pointer",fontFamily:"inherit"}}>Clear all</button>
+        {validParsed.length > 0 && <span style={{fontSize:10,color:"#8e9bb5",fontStyle:"italic",marginLeft:"auto"}}>
+          {validParsed.length}/{batch.rows.length} valid · OD₀ = {od0!=null?od0.toFixed(3):"—"}{timeFormat==="timestamp" && t0 ? " · t=0 anchored at "+t0.toISOString().replace("T"," ").replace(/\.\d+Z$/,"") : ""}
+        </span>}
+      </div>
+    </div>
+
+    <div style={{display:"flex",gap:8,justifyContent:"space-between",marginTop:18,flexWrap:"wrap"}}>
+      <button onClick={function(){setStep(0);}}
+        onMouseEnter={function(e){e.currentTarget.style.borderColor = NAVY; e.currentTarget.style.color = NAVY;}}
+        onMouseLeave={function(e){e.currentTarget.style.borderColor = "#d8dfeb"; e.currentTarget.style.color = "#30437a";}}
+        style={{background:"#fff",color:"#30437a",border:"1px solid #d8dfeb",padding:"9px 18px",borderRadius:10,fontWeight:600,fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>← Back to Setup</button>
+      <button onClick={function(){setStep(2);}} disabled={validParsed.length<2}
+        onMouseEnter={validParsed.length>=2 ? function(e){e.currentTarget.style.background = "#162d6e";} : undefined}
+        onMouseLeave={validParsed.length>=2 ? function(e){e.currentTarget.style.background = NAVY;} : undefined}
+        style={{background:validParsed.length>=2?NAVY:"#c6cdd9",color:"#fff",border:"none",padding:"9px 22px",borderRadius:10,fontWeight:700,fontSize:12,cursor:validParsed.length>=2?"pointer":"not-allowed",fontFamily:"inherit",boxShadow:validParsed.length>=2?"0 4px 14px rgba(11,42,111,0.10)":"none"}}>Continue to Analysis →</button>
+    </div>
+  </div>;
+
+  // ── STEP 2: ANALYSIS ─────────────────────────────────────────────────
+  var kpiBox = function(label, value, sublabel, color){
+    return <div style={{padding:"8px 10px",background:"#f4f7fb",border:"1px solid #d8dfeb",borderRadius:6}}>
+      <div style={{fontSize:9,fontWeight:700,color:"#6e6e73",textTransform:"uppercase",letterSpacing:0.4,marginBottom:2}}>{label}</div>
+      <div style={{fontSize:16,fontWeight:800,color:color||NAVY,lineHeight:1.2}}>{value}</div>
+      {sublabel && <div style={{fontSize:9,color:"#8e9bb5",marginTop:1}}>{sublabel}</div>}
+    </div>;
+  };
+
+  // Plot 1: OD vs time
+  var plotW = 620, plotH = 320, padL = 56, padR = 18, padT = 18, padB = 44;
+  var innerW = plotW - padL - padR, innerH = plotH - padT - padB;
+  var renderODPlot = null;
+  if (enriched.length >= 2) {
+    var dataTMin = Math.min.apply(null, times), dataTMax = Math.max.apply(null, times);
+    var tPad = (dataTMax - dataTMin) * 0.05 || 0.5;
+    var fullTMin = Math.min(0, dataTMin - tPad), fullTMax = dataTMax + tPad;
+    // Apply zoom (or use full range)
+    var tMin = zoomRange ? zoomRange[0] : fullTMin;
+    var tMax = zoomRange ? zoomRange[1] : fullTMax;
+    // Auto-rescale Y to only visible points
+    var visibleODs = [];
+    for (var ev = 0; ev < enriched.length; ev++) {
+      if (enriched[ev].time >= tMin && enriched[ev].time <= tMax) visibleODs.push(enriched[ev].od);
+    }
+    if (visibleODs.length === 0) { visibleODs = ods; }  // safety
+    var oMax = Math.max.apply(null, visibleODs) * 1.1, oMin = 0;
+    var xS = function(t){return padL + ((t - tMin) / (tMax - tMin || 1)) * innerW;};
+    var yS = function(o){return padT + (1 - (o - oMin) / (oMax - oMin || 1)) * innerH;};
+    var pathD = enriched.map(function(e,i){return (i===0?"M":"L")+xS(e.time).toFixed(1)+" "+yS(e.od).toFixed(1);}).join(" ");
+    var lagLine = lagEndTime != null && lagEndTime >= tMin && lagEndTime <= tMax ? <line x1={xS(lagEndTime)} y1={padT} x2={xS(lagEndTime)} y2={plotH-padB} stroke="#1b7f6a" strokeWidth="1.5" strokeDasharray="4,3" opacity="0.7" /> : null;
+    var expLine = expEndTime != null && expEndTime >= tMin && expEndTime <= tMax ? <line x1={xS(expEndTime)} y1={padT} x2={xS(expEndTime)} y2={plotH-padB} stroke="#bf7a1a" strokeWidth="1.5" strokeDasharray="4,3" opacity="0.7" /> : null;
+    // Gray inflection marker — peak of slope2(OD), the textbook lag→exp inflection point.
+    // Reference-only (not used as a KPI). Matches colleague's spreadsheet's three-marker style.
+    var inflectionTime = lagInflectIdxForViz != null && enriched[lagInflectIdxForViz] ? enriched[lagInflectIdxForViz].time : null;
+    var inflectionLine = inflectionTime != null && inflectionTime >= tMin && inflectionTime <= tMax ? <line x1={xS(inflectionTime)} y1={padT} x2={xS(inflectionTime)} y2={plotH-padB} stroke="#8e9bb5" strokeWidth="1.5" strokeDasharray="4,3" opacity="0.7" /> : null;
+    var shading = [];
+    if (lagEndTime != null) shading.push(<rect key="lagShade" x={xS(tMin)} y={padT} width={Math.max(0,xS(lagEndTime)-xS(tMin))} height={innerH} fill="#aeaeb2" opacity="0.06" />);
+    if (lagEndTime != null && expEndTime != null) shading.push(<rect key="expShade" x={xS(lagEndTime)} y={padT} width={Math.max(0,xS(expEndTime)-xS(lagEndTime))} height={innerH} fill="#1b7f6a" opacity="0.06" />);
+    if (expEndTime != null) shading.push(<rect key="statShade" x={xS(expEndTime)} y={padT} width={Math.max(0,xS(tMax)-xS(expEndTime))} height={innerH} fill="#bf7a1a" opacity="0.06" />);
+    var tangentLine = null;
+    if (lagBackProjection) {
+      tangentLine = <line x1={xS(lagBackProjection.time)} y1={yS(0)} x2={xS(lagBackProjection.anchorTime)} y2={yS(lagBackProjection.anchorOD)} stroke="#1b7f6a" strokeWidth="1.2" strokeDasharray="3,3" opacity="0.6" />;
+    }
+    var phaseLabels = [];
+    if (lagEndTime != null) phaseLabels.push(<text key="lagLbl" x={xS((tMin+lagEndTime)/2)} y={padT+11} fontSize="9" fill="#6e6e73" textAnchor="middle" fontStyle="italic">lag</text>);
+    if (lagEndTime != null && expEndTime != null) phaseLabels.push(<text key="expLbl" x={xS((lagEndTime+expEndTime)/2)} y={padT+11} fontSize="9" fill="#1b5a4d" textAnchor="middle" fontStyle="italic">exponential</text>);
+    if (expEndTime != null) phaseLabels.push(<text key="statLbl" x={xS((expEndTime+tMax)/2)} y={padT+11} fontSize="9" fill="#8a6420" textAnchor="middle" fontStyle="italic">stationary</text>);
+    var yTicks = [oMin, oMin + (oMax-oMin)/3, oMin + 2*(oMax-oMin)/3, oMax];
+    var nXTicks = 5, xStep = (tMax-tMin)/nXTicks, xTicks = [];
+    for (var xi=0; xi<=nXTicks; xi++) xTicks.push(tMin + xi*xStep);
+    // Build area path (curve + baseline) for subtle fill under curve
+    var areaD = pathD + " L"+xS(tMax).toFixed(1)+" "+yS(oMin).toFixed(1)+" L"+xS(tMin).toFixed(1)+" "+yS(oMin).toFixed(1)+" Z";
+    var odHandlers = makePlotInteractionHandlers(dataTMin, dataTMax, tMin, tMax);
+    renderODPlot = <svg viewBox={"0 0 "+plotW+" "+plotH}
+      style={Object.assign({width:"100%",height:"auto",maxWidth:plotW,display:"block",userSelect:"none"}, odHandlers.style)}
+      onWheel={odHandlers.onWheel}
+      onMouseDown={odHandlers.onMouseDown}
+      onTouchStart={odHandlers.onTouchStart}
+      onTouchMove={odHandlers.onTouchMove}
+      onTouchEnd={odHandlers.onTouchEnd}
+      onDoubleClick={odHandlers.onDoubleClick}
+    >
+      <defs>
+        <filter id="grdotShadow" x="-50%" y="-50%" width="200%" height="200%">
+          <feGaussianBlur in="SourceAlpha" stdDeviation="1.2" />
+          <feOffset dx="0" dy="1" result="offsetblur" />
+          <feComponentTransfer><feFuncA type="linear" slope="0.4"/></feComponentTransfer>
+          <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+        <linearGradient id="grOdArea" x1="0%" y1="0%" x2="0%" y2="100%">
+          <stop offset="0%" stopColor={NAVY} stopOpacity="0.18" />
+          <stop offset="100%" stopColor={NAVY} stopOpacity="0.02" />
+        </linearGradient>
+      </defs>
+      {shading}
+      {yTicks.map(function(t,i){var y=yS(t); return <g key={"y"+i}><line x1={padL} y1={y} x2={plotW-padR} y2={y} stroke="#eef2f7" strokeWidth="1" /><text x={padL-6} y={y+3} fontSize="10" fill="#6e6e73" textAnchor="end" fontFamily="system-ui">{t.toFixed(1)}</text></g>;})}
+      {xTicks.map(function(t,i){var x=xS(t); return <g key={"x"+i}><line x1={x} y1={padT} x2={x} y2={plotH-padB} stroke="#eef2f7" strokeWidth="1" /><text x={x} y={plotH-padB+13} fontSize="10" fill="#6e6e73" textAnchor="middle" fontFamily="system-ui">{t.toFixed(1)}</text></g>;})}
+      {/* Axis frame */}
+      <line x1={padL} y1={padT} x2={padL} y2={plotH-padB} stroke="#cfd9ea" strokeWidth="1" />
+      <line x1={padL} y1={plotH-padB} x2={plotW-padR} y2={plotH-padB} stroke="#cfd9ea" strokeWidth="1" />
+      {tangentLine}
+      <path d={areaD} fill="url(#grOdArea)" />
+      <path d={pathD} stroke={NAVY} strokeWidth="2" fill="none" filter="url(#grdotShadow)" />
+      {enriched.map(function(e,i){
+        var inW = activeWindow && activeWindow.indices.indexOf(i) >= 0;
+        var tipParts = ["Row "+(e.idx+1), "Time: "+e.time.toFixed(2)+" h", "OD\u2086\u2080\u2080: "+e.od.toFixed(3)];
+        if (e.glucose != null && isFinite(e.glucose)) tipParts.push("Glucose: "+e.glucose.toFixed(2)+" g/L");
+        if (e.weight != null && isFinite(e.weight)) tipParts.push("Weight: "+e.weight.toFixed(2)+" kg");
+        if (e.lnRatio != null) tipParts.push("ln(OD/OD\u2080): "+e.lnRatio.toFixed(3));
+        if (batch.manualSelection) {tipParts.push(inW ? "in fit window" : "excluded"); tipParts.push("click to toggle");}
+        var tip = tipParts.join(" · ");
+        var clickHandler = batch.manualSelection ? function(){togglePoint(i);} : undefined;
+        // In manual mode, use red/gray fill like lnRatio plot. Otherwise default navy.
+        var dotColor = batch.manualSelection ? (inW ? "#b4332e" : "#cfd9ea") : NAVY;
+        var dotR = batch.manualSelection && inW ? 5 : 3.5;
+        return <g key={i}>
+          <circle cx={xS(e.time)} cy={yS(e.od)} r="12" fill="transparent" pointerEvents="all" onClick={clickHandler} style={{cursor:batch.manualSelection?"pointer":"default"}}>
+            <title>{tip}</title>
+          </circle>
+          <circle cx={xS(e.time)} cy={yS(e.od)} r={dotR} fill={dotColor} stroke="#fff" strokeWidth="1.5" pointerEvents="none" filter="url(#grdotShadow)" />
+        </g>;
+      })}
+      {lagLine}{inflectionLine}{expLine}{phaseLabels}
+      {/* Zoom drag rectangle */}
+      {zoomDrag && zoomMode && (function(){
+        var x1 = xS(Math.min(zoomDrag.startT, zoomDrag.currentT));
+        var x2 = xS(Math.max(zoomDrag.startT, zoomDrag.currentT));
+        if (Math.abs(x2 - x1) < 2) return null;
+        return <g pointerEvents="none">
+          <rect x={x1} y={padT} width={x2-x1} height={innerH} fill={NAVY} fillOpacity="0.10" stroke={NAVY} strokeWidth="1" strokeDasharray="3,3" />
+        </g>;
+      })()}
+      {/* Manual-mode drag handles — green for left (lag-end / window start), red for right (exp-end / window end) */}
+      {batch.manualSelection && batch.manualSelection.length >= 1 && (function(){
+        var selSorted = batch.manualSelection.slice().sort(function(a,c){return a-c;});
+        var leftIdx = selSorted[0], rightIdx = selSorted[selSorted.length-1];
+        if (!enriched[leftIdx] || !enriched[rightIdx]) return null;
+        var leftT = enriched[leftIdx].time, rightT = enriched[rightIdx].time;
+        // Drag handler factory — recomputes selection live as user drags
+        var startDrag = function(side){
+          return function(e){
+            e.preventDefault();
+            e.stopPropagation();
+            var svg = e.currentTarget.ownerSVGElement;
+            if (!svg) return;
+            // The "other" boundary stays fixed during this drag
+            var otherT = side === "left" ? rightT : leftT;
+            var moveHandler = function(ev){
+              ev.preventDefault();
+              var rect = svg.getBoundingClientRect();
+              var fx = (ev.clientX - rect.left) / rect.width;
+              // Convert to plot coords (using the SAME tMin/tMax the plot uses, accounting for zoom)
+              var plotXFrac = (fx * plotW - padL) / innerW;
+              var newT = tMin + plotXFrac * (tMax - tMin);
+              // Determine bounds: left handle ≤ otherT, right handle ≥ otherT
+              var lo, hi;
+              if (side === "left") {lo = Math.min(newT, otherT); hi = otherT;}
+              else {lo = otherT; hi = Math.max(newT, otherT);}
+              // Pick all enriched indices whose time falls in [lo, hi]
+              var newSel = [];
+              for (var ii = 0; ii < enriched.length; ii++) {
+                if (enriched[ii].time >= lo && enriched[ii].time <= hi) newSel.push(ii);
+              }
+              if (newSel.length >= 1) updateActive(function(b){b.manualSelection = newSel;});
+            };
+            var upHandler = function(){
+              window.removeEventListener("mousemove", moveHandler);
+              window.removeEventListener("mouseup", upHandler);
+            };
+            window.addEventListener("mousemove", moveHandler);
+            window.addEventListener("mouseup", upHandler);
+          };
+        };
+        var renderHandle = function(t, color, side){
+          if (t < tMin || t > tMax) return null;
+          var x = xS(t);
+          return <g key={side} style={{cursor:"ew-resize"}} onMouseDown={startDrag(side)}>
+            {/* Hit area — wide transparent rect for easier grabbing */}
+            <rect x={x-8} y={padT} width="16" height={innerH} fill="transparent" pointerEvents="all" />
+            {/* Visible line */}
+            <line x1={x} y1={padT} x2={x} y2={plotH-padB} stroke={color} strokeWidth="2.5" pointerEvents="none" />
+            {/* Top grab triangle */}
+            <polygon points={(x-5)+","+(padT-1)+" "+(x+5)+","+(padT-1)+" "+x+","+(padT+6)} fill={color} pointerEvents="none" />
+            {/* Bottom grab triangle */}
+            <polygon points={(x-5)+","+(plotH-padB+1)+" "+(x+5)+","+(plotH-padB+1)+" "+x+","+(plotH-padB-6)} fill={color} pointerEvents="none" />
+            {/* Time label */}
+            <rect x={x-22} y={padT-16} width="44" height="14" rx="3" fill={color} pointerEvents="none" />
+            <text x={x} y={padT-6} fontSize="9" fill="#fff" textAnchor="middle" fontWeight="700" fontFamily="system-ui" pointerEvents="none">{t.toFixed(2)}h</text>
+          </g>;
+        };
+        return <g>
+          {renderHandle(leftT, "#1b7f6a", "left")}
+          {renderHandle(rightT, "#bf7a1a", "right")}
+        </g>;
+      })()}
+      <text x={plotW/2} y={plotH-4} fontSize="11" fill="#30437a" textAnchor="middle" fontWeight="600" fontFamily="system-ui">Time (h)</text>
+      <text x={14} y={plotH/2} fontSize="11" fill="#30437a" textAnchor="middle" fontWeight="600" fontFamily="system-ui" transform={"rotate(-90, 14, "+(plotH/2)+")"}>OD₆₀₀</text>
+    </svg>;
+  }
+
+  // Plot 2: ln(OD/OD₀) vs time
+  var renderLnPlot = null;
+  if (enriched.length >= 2) {
+    var dataTMinL = Math.min.apply(null, times), dataTMaxL = Math.max.apply(null, times);
+    var tPadL = (dataTMaxL - dataTMinL) * 0.05 || 0.5;
+    var fullTMinL = dataTMinL - tPadL, fullTMaxL = dataTMaxL + tPadL;
+    var tMinL = zoomRange ? zoomRange[0] : fullTMinL;
+    var tMaxL = zoomRange ? zoomRange[1] : fullTMaxL;
+    // Auto-rescale Y to only visible points
+    var visibleLn = [];
+    for (var lv = 0; lv < enriched.length; lv++) {
+      if (enriched[lv].time >= tMinL && enriched[lv].time <= tMaxL && enriched[lv].lnRatio != null) visibleLn.push(enriched[lv].lnRatio);
+    }
+    if (visibleLn.length === 0) visibleLn = lnRatios.filter(function(v){return v != null;});
+    var lnMin = Math.min.apply(null, visibleLn), lnMax = Math.max.apply(null, visibleLn);
+    var lnPad = (lnMax - lnMin) * 0.1 || 0.1;
+    lnMin -= lnPad; lnMax += lnPad;
+    var xSL = function(t){return padL + ((t - tMinL) / (tMaxL - tMinL || 1)) * innerW;};
+    var ySL = function(v){return padT + (1 - (v - lnMin) / (lnMax - lnMin || 1)) * innerH;};
+    var inWindow = function(idx){return activeWindow && activeWindow.indices.indexOf(idx) >= 0;};
+    var fitPath = null;
+    if (activeWindow) {
+      var t0 = tMinL, t1L = tMaxL;
+      var y0 = activeWindow.slope * t0 + activeWindow.intercept;
+      var y1L = activeWindow.slope * t1L + activeWindow.intercept;
+      fitPath = <line x1={xSL(t0)} y1={ySL(y0)} x2={xSL(t1L)} y2={ySL(y1L)} stroke="#b4332e" strokeWidth="1.5" strokeDasharray="5,3" opacity="0.7" />;
+    }
+    var yTicksL = [lnMin, lnMin + (lnMax-lnMin)/3, lnMin + 2*(lnMax-lnMin)/3, lnMax];
+    var nXTicksL = 5, xStepL = (tMaxL-tMinL)/nXTicksL, xTicksL = [];
+    for (var xli=0; xli<=nXTicksL; xli++) xTicksL.push(tMinL + xli*xStepL);
+    var lnHandlers = makePlotInteractionHandlers(dataTMinL, dataTMaxL, tMinL, tMaxL);
+    renderLnPlot = <svg viewBox={"0 0 "+plotW+" "+plotH}
+      style={Object.assign({width:"100%",height:"auto",maxWidth:plotW,display:"block",userSelect:"none"}, lnHandlers.style)}
+      onWheel={lnHandlers.onWheel}
+      onMouseDown={lnHandlers.onMouseDown}
+      onTouchStart={lnHandlers.onTouchStart}
+      onTouchMove={lnHandlers.onTouchMove}
+      onTouchEnd={lnHandlers.onTouchEnd}
+      onDoubleClick={lnHandlers.onDoubleClick}
+    >
+      <defs>
+        <filter id="grLnDotShadow" x="-50%" y="-50%" width="200%" height="200%">
+          <feGaussianBlur in="SourceAlpha" stdDeviation="1.2" />
+          <feOffset dx="0" dy="1" result="offsetblur" />
+          <feComponentTransfer><feFuncA type="linear" slope="0.4"/></feComponentTransfer>
+          <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+      </defs>
+      {yTicksL.map(function(t,i){var y=ySL(t); return <g key={"yL"+i}><line x1={padL} y1={y} x2={plotW-padR} y2={y} stroke="#eef2f7" strokeWidth="1" /><text x={padL-6} y={y+3} fontSize="10" fill="#6e6e73" textAnchor="end" fontFamily="system-ui">{t.toFixed(2)}</text></g>;})}
+      {xTicksL.map(function(t,i){var x=xSL(t); return <g key={"xL"+i}><line x1={x} y1={padT} x2={x} y2={plotH-padB} stroke="#eef2f7" strokeWidth="1" /><text x={x} y={plotH-padB+13} fontSize="10" fill="#6e6e73" textAnchor="middle" fontFamily="system-ui">{t.toFixed(1)}</text></g>;})}
+      {/* Axis frame */}
+      <line x1={padL} y1={padT} x2={padL} y2={plotH-padB} stroke="#cfd9ea" strokeWidth="1" />
+      <line x1={padL} y1={plotH-padB} x2={plotW-padR} y2={plotH-padB} stroke="#cfd9ea" strokeWidth="1" />
+      {fitPath}
+      {enriched.map(function(e,i){
+        var inW = inWindow(i);
+        var tipParts = ["Row "+(e.idx+1), "Time: "+e.time.toFixed(2)+" h", "ln(OD/OD\u2080): "+(e.lnRatio!=null?e.lnRatio.toFixed(3):"\u2014"), "OD\u2086\u2080\u2080: "+e.od.toFixed(3)];
+        tipParts.push(inW ? "in fit window" : "excluded from fit");
+        if (batch.manualSelection) tipParts.push("click to toggle");
+        var tip = tipParts.join(" \u00b7 ");
+        var visibleR = inW ? 5.5 : 3.5;
+        var clickHandler = batch.manualSelection ? function(){togglePoint(i);} : undefined;
+        return <g key={i}>
+          <circle cx={xSL(e.time)} cy={ySL(e.lnRatio)} r="12" fill="transparent" pointerEvents="all" onClick={clickHandler} style={{cursor:batch.manualSelection?"pointer":"default"}}>
+            <title>{tip}</title>
+          </circle>
+          <circle cx={xSL(e.time)} cy={ySL(e.lnRatio)} r={visibleR} fill={inW?"#b4332e":"#cfd9ea"} stroke="#fff" strokeWidth="1.5" pointerEvents="none" filter="url(#grLnDotShadow)" />
+        </g>;
+      })}
+      <text x={plotW/2} y={plotH-4} fontSize="11" fill="#30437a" textAnchor="middle" fontWeight="600" fontFamily="system-ui">Time (h)</text>
+      <text x={14} y={plotH/2} fontSize="11" fill="#30437a" textAnchor="middle" fontWeight="600" fontFamily="system-ui" transform={"rotate(-90, 14, "+(plotH/2)+")"}>ln(OD / OD₀)</text>
+      {activeWindow && <g>
+        <rect x={plotW-padR-186} y={padT+4} width="180" height="22" rx="6" fill="#fff" stroke="#e2c5c2" strokeWidth="1" />
+        <text x={plotW-padR-10} y={padT+18} fontSize="10" fill="#b4332e" textAnchor="end" fontWeight="700" fontFamily="system-ui">µ = {activeWindow.slope.toFixed(4)} /h · R² = {activeWindow.r2.toFixed(4)} · n = {activeWindow.length}{activeWindow.manual?" (manual)":""}</text>
+      </g>}
+      {/* Zoom drag rectangle */}
+      {zoomDrag && zoomMode && (function(){
+        var x1 = xSL(Math.min(zoomDrag.startT, zoomDrag.currentT));
+        var x2 = xSL(Math.max(zoomDrag.startT, zoomDrag.currentT));
+        if (Math.abs(x2 - x1) < 2) return null;
+        return <g pointerEvents="none">
+          <rect x={x1} y={padT} width={x2-x1} height={innerH} fill={NAVY} fillOpacity="0.10" stroke={NAVY} strokeWidth="1" strokeDasharray="3,3" />
+        </g>;
+      })()}
+    </svg>;
+  }
+
+  var renderDerivPanel = null;
+  if (enriched.length >= 3) {
+    // Mini plot helper — small, bordered card with axis frame, dot+line, optional v-marker
+    var miniPlot = function(label, values, color, markerTime, markerColor, markerLabel){
+      var W = 290, H = 160, pL = 42, pR = 12, pT = 22, pB = 28;
+      var iW = W - pL - pR, iH = H - pT - pB;
+      var validIdxArr = [], validVs = [];
+      values.forEach(function(v, ii){if (v != null && isFinite(v)) {validIdxArr.push(ii); validVs.push(v);}});
+      if (validVs.length === 0) return <div style={{padding:"30px 10px",textAlign:"center",fontSize:10,color:"#aeaeb2",fontStyle:"italic",border:"1px dashed #d8dfeb",borderRadius:6}}>not enough data</div>;
+      var vMin = Math.min.apply(null, validVs), vMax = Math.max.apply(null, validVs);
+      vMin = Math.min(0, vMin); vMax = Math.max(0, vMax);
+      var vPad = (vMax - vMin) * 0.12 || 0.1;
+      vMin -= vPad; vMax += vPad;
+      var dataMnT = Math.min.apply(null, times), dataMxT = Math.max.apply(null, times);
+      var tPad2 = (dataMxT - dataMnT) * 0.05 || 0.5;
+      // Honor the synced zoomRange — when other plots zoom, derivative plots follow
+      var tMnP, tMxP;
+      if (zoomRange) { tMnP = zoomRange[0]; tMxP = zoomRange[1]; }
+      else { tMnP = dataMnT - tPad2; tMxP = dataMxT + tPad2; }
+      var xs = function(t){return pL + ((t - tMnP) / (tMxP - tMnP || 1)) * iW;};
+      var ys = function(v){return pT + (1 - (v - vMin) / (vMax - vMin || 1)) * iH;};
+      var pathPts = validIdxArr.map(function(ii, k){return (k === 0 ? "M" : "L") + xs(times[ii]).toFixed(1) + " " + ys(values[ii]).toFixed(1);}).join(" ");
+      var xTickN = 4, yTickN = 3;
+      var xT = []; for (var ii = 0; ii <= xTickN; ii++) xT.push(tMnP + (tMxP - tMnP) * ii / xTickN);
+      var yT = []; for (var ji = 0; ji <= yTickN; ji++) yT.push(vMin + (vMax - vMin) * ji / yTickN);
+      // Zoom interaction handlers — same logic as main plots, scaled for miniPlot dimensions
+      var clientXToT = function(clientX, rect){
+        var fx = (clientX - rect.left) / rect.width;
+        var inPlotFrac = (fx * W - pL) / iW;
+        return tMnP + inPlotFrac * (tMxP - tMnP);
+      };
+      var clampZoom = function(newMin, newMax){
+        var fullRange = dataMxT - dataMnT;
+        var minRange = fullRange * 0.05;
+        if (newMax - newMin < minRange) {
+          var center = (newMin + newMax) / 2;
+          newMin = center - minRange / 2;
+          newMax = center + minRange / 2;
+        }
+        var pad = fullRange * 0.05;
+        var lo = dataMnT - pad, hi = dataMxT + pad;
+        if (newMax - newMin >= (hi - lo) * 0.98) return null;
+        if (newMin < lo) {newMax = lo + (newMax - newMin); newMin = lo;}
+        if (newMax > hi) {newMin = hi - (newMax - newMin); newMax = hi;}
+        return [newMin, newMax];
+      };
+      var onWheel = function(e){
+        if (!zoomMode && !e.shiftKey) return;
+        e.preventDefault();
+        var rect = e.currentTarget.getBoundingClientRect();
+        var fx = (e.clientX - rect.left) / rect.width;
+        var inPlotFrac = (fx * W - pL) / iW;
+        if (inPlotFrac < 0 || inPlotFrac > 1) return;
+        var range = tMxP - tMnP;
+        var cursorT = tMnP + inPlotFrac * range;
+        var factor = e.deltaY < 0 ? 0.85 : 1.18;
+        var newRange = range * factor;
+        var newMin = cursorT - inPlotFrac * newRange;
+        var newMax = newMin + newRange;
+        setZoomRange(clampZoom(newMin, newMax));
+      };
+      var onMouseDown = function(e){
+        if (!zoomMode) return;
+        var tag = (e.target && e.target.tagName) || "";
+        if (tag === "circle" || tag === "BUTTON") return;
+        e.preventDefault();
+        var rect = e.currentTarget.getBoundingClientRect();
+        var startT = clientXToT(e.clientX, rect);
+        setZoomDrag({startT:startT, currentT:startT});
+        var moveH = function(ev){ev.preventDefault(); setZoomDrag({startT:startT, currentT:clientXToT(ev.clientX, rect)});};
+        var upH = function(ev){
+          var endT = clientXToT(ev.clientX, rect);
+          var lo = Math.min(startT, endT), hi = Math.max(startT, endT);
+          if (Math.abs(endT - startT) > (dataMxT - dataMnT) * 0.02) setZoomRange(clampZoom(lo, hi));
+          setZoomDrag(null);
+          window.removeEventListener("mousemove", moveH);
+          window.removeEventListener("mouseup", upH);
+        };
+        window.addEventListener("mousemove", moveH);
+        window.addEventListener("mouseup", upH);
+      };
+      var onTouchStart = function(e){
+        if (e.touches.length === 2) {
+          e.preventDefault();
+          var t1 = e.touches[0], t2 = e.touches[1];
+          var rect = e.currentTarget.getBoundingClientRect();
+          pinchState.active = true;
+          pinchState.startDist = Math.abs(t2.clientX - t1.clientX);
+          pinchState.startMin = tMnP;
+          pinchState.startMax = tMxP;
+          pinchState.centerT = clientXToT((t1.clientX + t2.clientX) / 2, rect);
+        }
+      };
+      var onTouchMove = function(e){
+        if (e.touches.length === 2 && pinchState.active) {
+          e.preventDefault();
+          var t1 = e.touches[0], t2 = e.touches[1];
+          var newDist = Math.abs(t2.clientX - t1.clientX);
+          if (newDist === 0 || pinchState.startDist === 0) return;
+          var scale = pinchState.startDist / newDist;
+          var newRange = (pinchState.startMax - pinchState.startMin) * scale;
+          var inFrac = (pinchState.centerT - pinchState.startMin) / (pinchState.startMax - pinchState.startMin);
+          var newMin = pinchState.centerT - inFrac * newRange;
+          setZoomRange(clampZoom(newMin, newMin + newRange));
+        }
+      };
+      var onTouchEnd = function(){pinchState.active = false;};
+      var onDoubleClick = function(){setZoomRange(null);};
+      // Drag-rectangle overlay
+      var dragRect = null;
+      if (zoomDrag && zoomMode) {
+        var dx1 = xs(Math.min(zoomDrag.startT, zoomDrag.currentT));
+        var dx2 = xs(Math.max(zoomDrag.startT, zoomDrag.currentT));
+        if (Math.abs(dx2 - dx1) >= 2) {
+          dragRect = <rect x={dx1} y={pT} width={dx2-dx1} height={iH} fill={NAVY} fillOpacity="0.10" stroke={NAVY} strokeWidth="1" strokeDasharray="3,3" pointerEvents="none" />;
+        }
+      }
+      return <svg viewBox={"0 0 "+W+" "+H}
+        style={{width:"100%",height:"auto",maxWidth:W,display:"block",cursor:zoomMode?"crosshair":"default",touchAction:zoomMode?"none":"auto",userSelect:"none"}}
+        onWheel={onWheel}
+        onMouseDown={onMouseDown}
+        onTouchStart={onTouchStart}
+        onTouchMove={onTouchMove}
+        onTouchEnd={onTouchEnd}
+        onDoubleClick={onDoubleClick}>
+        {/* Clip path so points outside zoom range don't render */}
+        <defs>
+          <clipPath id={"clip-"+label.replace(/[^a-z0-9]/gi,"-")}>
+            <rect x={pL} y={pT} width={iW} height={iH} />
+          </clipPath>
+        </defs>
+        {yT.map(function(v, i){return <line key={"yg"+i} x1={pL} y1={ys(v)} x2={W-pR} y2={ys(v)} stroke="#eef2f7" strokeWidth="1" />;})}
+        {xT.map(function(t, i){return <line key={"xg"+i} x1={xs(t)} y1={pT} x2={xs(t)} y2={H-pB} stroke="#eef2f7" strokeWidth="1" />;})}
+        {vMin < 0 && vMax > 0 && <line x1={pL} y1={ys(0)} x2={W-pR} y2={ys(0)} stroke="#aeaeb2" strokeWidth="1" strokeDasharray="3,3" />}
+        <line x1={pL} y1={pT} x2={pL} y2={H-pB} stroke="#cfd9ea" strokeWidth="1" />
+        <line x1={pL} y1={H-pB} x2={W-pR} y2={H-pB} stroke="#cfd9ea" strokeWidth="1" />
+        {yT.map(function(v, i){return <text key={"yt"+i} x={pL-4} y={ys(v)+3} fontSize="8" fill="#8e9bb5" textAnchor="end" fontFamily="system-ui">{v.toFixed(2)}</text>;})}
+        {xT.map(function(t, i){return <text key={"xt"+i} x={xs(t)} y={H-pB+10} fontSize="8" fill="#8e9bb5" textAnchor="middle" fontFamily="system-ui">{t.toFixed(1)}</text>;})}
+        <g clipPath={"url(#clip-"+label.replace(/[^a-z0-9]/gi,"-")+")"}>
+          {markerTime != null && markerTime >= tMnP && markerTime <= tMxP && <g>
+            <line x1={xs(markerTime)} y1={pT} x2={xs(markerTime)} y2={H-pB} stroke={markerColor} strokeWidth="1.5" strokeDasharray="4,3" opacity="0.75" />
+            <text x={xs(markerTime)+3} y={pT+8} fontSize="8" fill={markerColor} fontWeight="700">{markerLabel} {markerTime.toFixed(2)}h</text>
+          </g>}
+          <path d={pathPts} stroke={color} strokeWidth="1.5" fill="none" />
+          {validIdxArr.map(function(ii, k){return <circle key={k} cx={xs(times[ii])} cy={ys(values[ii])} r="2.5" fill={color} stroke="#fff" strokeWidth="1" />;})}
+        </g>
+        {dragRect}
+        <text x={pL} y={pT-8} fontSize="9" fill={NAVY} fontWeight="700" fontFamily="system-ui">{label}</text>
+        <text x={W/2} y={H-4} fontSize="9" fill="#8e9bb5" textAnchor="middle" fontFamily="system-ui">Time (h)</text>
+      </svg>;
+    };
+    renderDerivPanel = <div style={{background:"#fafbfd",borderRadius:10,border:"1px solid "+BORDER,padding:"14px 14px 12px",marginBottom:14}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:8,gap:10,flexWrap:"wrap"}}>
+        <div style={{fontSize:11,fontWeight:700,color:NAVY,textTransform:"uppercase",letterSpacing:0.5}}>Phase boundary derivatives</div>
+        <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"center"}}>
+          <div style={{fontSize:10,color:"#6e6e73",display:"flex",gap:14,flexWrap:"wrap",alignItems:"center"}}>
+            <span><span style={{display:"inline-block",width:14,height:2,background:"#1b7f6a",verticalAlign:"middle",marginRight:4}}></span>lag end {collLagEndTime != null ? collLagEndTime.toFixed(2)+"h" : "—"}</span>
+            <span><span style={{display:"inline-block",width:14,height:2,background:"#bf7a1a",verticalAlign:"middle",marginRight:4}}></span>exp end {collExpEndTime != null ? collExpEndTime.toFixed(2)+"h" : "—"}</span>
+          </div>
+          <button onClick={function(){setZoomMode(!zoomMode);}}
+            onMouseEnter={function(e){if(!zoomMode){e.currentTarget.style.borderColor = NAVY; e.currentTarget.style.color = NAVY;}}}
+            onMouseLeave={function(e){if(!zoomMode){e.currentTarget.style.borderColor = "#d8dfeb"; e.currentTarget.style.color = "#30437a";}}}
+            style={{padding:"3px 10px",borderRadius:6,border:"1px solid "+(zoomMode?NAVY:"#d8dfeb"),background:zoomMode?NAVY:"#fff",color:zoomMode?"#fff":"#30437a",fontSize:10,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}}>
+            🔍 {zoomMode ? "Zoom: ON" : "Zoom"}
+          </button>
+        </div>
+      </div>
+      <div style={{fontSize:11,color:"#5a6984",marginBottom:10,lineHeight:1.5}}>
+        First and second derivatives of OD (top row → lag-to-exponential inflection) and ln(OD/OD₀) (bottom row → exponential-to-stationary inflection). Lag end is back-projected from the OD slope at the inflection point. Exp end is from sign change in d²(lnOD)/dt². <strong>Matches the analysis pattern in the spreadsheet template.</strong> All plots share zoom — drag a region in zoom mode to focus on a phase, double-click to reset.
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(280px, 1fr))",gap:10}}>
+        {miniPlot("Lag Phase – 1st Der: d(OD)/dt", slope1OD, "#3478F6", collLagEndTime, "#1b7f6a", "lag end")}
+        {miniPlot("Lag Phase – 2nd Der: d²(OD)/dt²", slope2OD, "#bf7a1a", collLagEndTime, "#1b7f6a", "lag end")}
+        {miniPlot("Exponential Phase – 1st Der: d(lnOD)/dt", slope1Ln, "#3478F6", collExpEndTime, "#bf7a1a", "exp end")}
+        {miniPlot("Exponential Phase – 2nd Der: d²(lnOD)/dt²", slope2Ln, "#bf7a1a", collExpEndTime, "#bf7a1a", "exp end")}
+      </div>
+    </div>;
+  }
+
+  var renderAnalysis = <div>
+    {/* Banner */}
+    <div style={{background:"#edf9fb",borderRadius:14,padding:"12px 16px",marginBottom:"1rem",border:"1px solid #d9eef2"}}>
+      <p style={{margin:0,fontSize:13,color:"#0f5c4d",lineHeight:1.5}}>The selected window (highlighted on the lower plot) is fit linearly to give µ. The same window defines the green-shaded exponential phase on the OD plot. Hover any point for values; switch to manual to pick points yourself.</p>
+    </div>
+
+    {/* KPI tiles — three primary cards covering the headline outputs */}
+    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(180px, 1fr))",gap:8,marginBottom:8}}>
+      {/* PRIMARY 1: Specific growth rate */}
+      <div style={{padding:"12px 14px",background:"linear-gradient(135deg, #f4f7fb 0%, #e8eef9 100%)",border:"1.5px solid "+NAVY,borderRadius:8,boxShadow:"0 4px 14px rgba(11,42,111,0.08)"}}>
+        <div style={{fontSize:10,fontWeight:700,color:NAVY,textTransform:"uppercase",letterSpacing:0.5,marginBottom:4}}>Specific Growth Rate</div>
+        <div style={{fontSize:24,fontWeight:800,color:NAVY,lineHeight:1.1,fontFamily:"system-ui"}}>{mu!=null?mu.toFixed(4):"—"} <span style={{fontSize:12,fontWeight:600,color:"#5a6984"}}>1/h</span></div>
+        {instructor && <div style={{fontSize:10,color:"#5a6984",marginTop:3,fontStyle:"italic"}}>µ — slope of ln(OD/OD₀) vs time</div>}
+      </div>
+      {/* PRIMARY 2: Lag Phase — both duration and end time */}
+      <div style={{padding:"12px 14px",background:"linear-gradient(135deg, #f4faf8 0%, #e8f5ee 100%)",border:"1.5px solid #1b7f6a",borderRadius:8,boxShadow:"0 4px 14px rgba(27,127,106,0.10)"}}>
+        <div style={{fontSize:10,fontWeight:700,color:"#1b7f6a",textTransform:"uppercase",letterSpacing:0.5,marginBottom:4}}>Lag Phase</div>
+        <div style={{display:"flex",gap:14,alignItems:"baseline",flexWrap:"wrap"}}>
+          <div>
+            <div style={{fontSize:8,color:"#5a6984",textTransform:"uppercase",letterSpacing:0.3,fontWeight:600}}>Duration</div>
+            <div style={{fontSize:20,fontWeight:800,color:"#1b7f6a",lineHeight:1.1,fontFamily:"system-ui"}}>{lagEndTime!=null?lagEndTime.toFixed(2):"—"} <span style={{fontSize:11,fontWeight:600,color:"#5a6984"}}>h</span></div>
+          </div>
+          <div>
+            <div style={{fontSize:8,color:"#5a6984",textTransform:"uppercase",letterSpacing:0.3,fontWeight:600}}>Ends at</div>
+            <div style={{fontSize:14,fontWeight:700,color:"#1b7f6a",lineHeight:1.1,fontFamily:"system-ui",opacity:0.85}}>{lagEndTime!=null?lagEndTime.toFixed(2):"—"} <span style={{fontSize:10,fontWeight:600,color:"#5a6984"}}>h</span></div>
+          </div>
+        </div>
+        {instructor && <div style={{fontSize:10,color:"#5a6984",marginTop:3,fontStyle:"italic"}}>back-projection from slope2(OD) inflection</div>}
+      </div>
+      {/* PRIMARY 3: Exponential Phase — both duration and end time */}
+      <div style={{padding:"12px 14px",background:"linear-gradient(135deg, #fef9f0 0%, #fdf0d9 100%)",border:"1.5px solid #bf7a1a",borderRadius:8,boxShadow:"0 4px 14px rgba(191,122,26,0.10)"}}>
+        <div style={{fontSize:10,fontWeight:700,color:"#bf7a1a",textTransform:"uppercase",letterSpacing:0.5,marginBottom:4}}>Exponential Phase</div>
+        <div style={{display:"flex",gap:14,alignItems:"baseline",flexWrap:"wrap"}}>
+          <div>
+            <div style={{fontSize:8,color:"#5a6984",textTransform:"uppercase",letterSpacing:0.3,fontWeight:600}}>Duration</div>
+            <div style={{fontSize:20,fontWeight:800,color:"#bf7a1a",lineHeight:1.1,fontFamily:"system-ui"}}>{expDuration!=null?expDuration.toFixed(2):"—"} <span style={{fontSize:11,fontWeight:600,color:"#5a6984"}}>h</span></div>
+          </div>
+          <div>
+            <div style={{fontSize:8,color:"#5a6984",textTransform:"uppercase",letterSpacing:0.3,fontWeight:600}}>Ends at</div>
+            <div style={{fontSize:14,fontWeight:700,color:"#bf7a1a",lineHeight:1.1,fontFamily:"system-ui",opacity:0.85}}>{expEndTime!=null?expEndTime.toFixed(2):"—"} <span style={{fontSize:10,fontWeight:600,color:"#5a6984"}}>h</span></div>
+          </div>
+        </div>
+        {instructor && <div style={{fontSize:10,color:"#5a6984",marginTop:3,fontStyle:"italic"}}>exp-end − lag-end</div>}
+      </div>
+    </div>
+
+    {/* Secondary metrics — smaller tiles for context */}
+    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(120px, 1fr))",gap:8,marginBottom:14}}>
+      {kpiBox("R² of fit", muR2!=null?muR2.toFixed(4):"—", instructor ? "linearity of the fit" : null)}
+      {(function(){
+        // 95% CI tile — shows both absolute and percentage of µ
+        if (muCI == null || mu == null || mu === 0) {
+          return <div style={{padding:"8px 10px",background:"#f4f7fb",border:"1px solid #d8dfeb",borderRadius:6}}>
+            <div style={{fontSize:9,fontWeight:700,color:"#6e6e73",textTransform:"uppercase",letterSpacing:0.4,marginBottom:2}}>95% CI</div>
+            <div style={{fontSize:14,fontWeight:800,color:"#aeaeb2"}}>—</div>
+            <div style={{fontSize:9,color:"#8e9bb5",marginTop:1}}>need ≥ 3 points</div>
+          </div>;
+        }
+        var pct = (muCI / Math.abs(mu)) * 100;
+        var col = pct < 10 ? "#1b7f6a" : (pct < 25 ? NAVY : "#bf7a1a");
+        var hint = pct < 10 ? "tight \u2014 well-constrained" : (pct < 25 ? "moderate" : "wide \u2014 try more points");
+        return <div style={{padding:"8px 10px",background:"#f4f7fb",border:"1px solid #d8dfeb",borderRadius:6}}>
+          <div style={{fontSize:9,fontWeight:700,color:"#6e6e73",textTransform:"uppercase",letterSpacing:0.4,marginBottom:2}}>95% CI <span title={"Half-width of the 95% confidence interval for the specific growth rate.\n\nFormula: ± t_critical × SE(slope)\n  where SE(slope) = √(Σresiduals² / (n-2)) ÷ √(Σ(t-t̄)²)\n  and t_critical comes from Student's t at 95% with n-2 df.\n\nMeans: with similar biology and noise, 95% of repeats would give a value within ± this much of the estimate. Wider with fewer points, more scatter, or narrower time range."} style={{color:"#aeaeb2",cursor:"help"}}>ⓘ</span></div>
+          <div style={{fontSize:16,fontWeight:800,color:col,lineHeight:1.2}}>± {muCI.toFixed(4)}</div>
+          <div style={{fontSize:9,color:col,marginTop:1,fontWeight:600}}>{pct.toFixed(0)}% of value{instructor && <span style={{color:"#8e9bb5",fontWeight:500}}> · {hint}</span>}</div>
+        </div>;
+      })()}
+      {kpiBox("Doubling time", doublingTime!=null?doublingTime.toFixed(2)+" h":"—", instructor ? "ln(2) ÷ growth rate" : null)}
+    </div>
+
+    {/* Method picker card — collapsible (most users use default; advanced disclosure) */}
+    <div style={{background:"#fafbfd",borderRadius:10,border:"1px solid "+BORDER,marginBottom:14,overflow:"hidden"}}>
+      <button onClick={function(){setMethodPickerOpen(!methodPickerOpen);}}
+        onMouseEnter={function(e){e.currentTarget.style.background = "#f3f6fb";}}
+        onMouseLeave={function(e){e.currentTarget.style.background = "transparent";}}
+        style={{width:"100%",padding:"12px 16px",background:"transparent",border:"none",cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"center",fontFamily:"inherit",textAlign:"left"}}>
+        <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+          <span style={{fontSize:11,fontWeight:700,color:NAVY,textTransform:"uppercase",letterSpacing:0.5}}>Window selection</span>
+          <span style={{fontSize:10,color:"#5a6984"}}>using <strong style={{color:NAVY}}>{batch.manualSelection ? "manual" : (METHOD_LABELS[batch.autoMethod] || "peak growth rate")}</strong></span>
+          {!methodPickerOpen && <span style={{fontSize:9,color:"#8e9bb5",fontStyle:"italic"}}>· click to compare other methods or pick points manually</span>}
+        </div>
+        <span style={{fontSize:14,color:"#8e9bb5",transform:methodPickerOpen?"rotate(90deg)":"none",transition:"transform 0.15s"}}>›</span>
+      </button>
+      {methodPickerOpen && <div style={{padding:"0 14px 12px"}}>
+      <div style={{display:"flex",gap:14,flexWrap:"wrap",alignItems:"center",marginTop:4}}>
+        <label style={{display:"flex",alignItems:"center",gap:5,fontSize:11,cursor:"pointer"}}>
+          <input type="radio" name={"method-"+batch.id} checked={batch.autoMethod==="peak_rate" && !batch.manualSelection} onChange={function(){updateActive(function(b){b.autoMethod = "peak_rate"; b.manualSelection = null;});}} />
+          peak growth rate <span style={{color:"#8e9bb5",fontSize:10}}>(default · matches bench scientist intuition)</span>
+        </label>
+        <label style={{display:"flex",alignItems:"center",gap:5,fontSize:11,cursor:"pointer"}}>
+          <input type="radio" name={"method-"+batch.id} checked={batch.autoMethod==="slope_r2" && !batch.manualSelection} onChange={function(){updateActive(function(b){b.autoMethod = "slope_r2"; b.manualSelection = null;});}} />
+          slope × R²
+        </label>
+        <label style={{display:"flex",alignItems:"center",gap:5,fontSize:11,cursor:"pointer"}}>
+          <input type="radio" name={"method-"+batch.id} checked={batch.autoMethod==="best_r2" && !batch.manualSelection} onChange={function(){updateActive(function(b){b.autoMethod = "best_r2"; b.manualSelection = null;});}} />
+          best R²
+        </label>
+        <label style={{display:"flex",alignItems:"center",gap:5,fontSize:11,cursor:"pointer"}}>
+          <input type="radio" name={"method-"+batch.id} checked={batch.autoMethod==="inflection" && !batch.manualSelection} onChange={function(){updateActive(function(b){b.autoMethod = "inflection"; b.manualSelection = null;});}} />
+          inflection-based <span style={{color:"#8e9bb5",fontSize:10}}>(textbook tangent-line method)</span>
+        </label>
+        <label style={{display:"flex",alignItems:"center",gap:5,fontSize:11,cursor:"pointer"}}>
+          <input type="radio" name={"method-"+batch.id} checked={batch.manualSelection != null} onChange={function(){updateActive(function(b){b.manualSelection = autoWindow ? Array.from({length:autoWindow.length},function(_,k){return autoWindow.start+k;}) : [];});}} />
+          manual <span style={{color:"#8e9bb5",fontSize:10}}>(drag boundaries or click points)</span>
+        </label>
+      </div>
+
+      {/* ── Compare all methods table ────────────────────────────────────── */}
+      {!batch.manualSelection && enriched.length >= 4 && <div style={{marginTop:10,padding:"8px 10px",background:"#fff",border:"1px solid #e5e9f0",borderRadius:6}}>
+        <div style={{fontSize:10,fontWeight:700,color:"#6e6e73",textTransform:"uppercase",letterSpacing:0.4,marginBottom:6}}>Compare all auto methods</div>
+        <table style={{width:"100%",borderCollapse:"collapse",fontSize:10}}>
+          <thead>
+            <tr>
+              <th style={{padding:"4px 6px",textAlign:"left",color:"#6e6e73",fontWeight:700,borderBottom:"1px solid #e5e9f0"}}>Method</th>
+              <th style={{padding:"4px 6px",textAlign:"right",color:"#6e6e73",fontWeight:700,borderBottom:"1px solid #e5e9f0"}}>µ (1/h)</th>
+              <th style={{padding:"4px 6px",textAlign:"right",color:"#6e6e73",fontWeight:700,borderBottom:"1px solid #e5e9f0"}}>R²</th>
+              <th style={{padding:"4px 6px",textAlign:"center",color:"#6e6e73",fontWeight:700,borderBottom:"1px solid #e5e9f0"}}>Rows</th>
+              <th style={{padding:"4px 6px",textAlign:"center",color:"#6e6e73",fontWeight:700,borderBottom:"1px solid #e5e9f0"}}>n</th>
+              <th style={{padding:"4px 6px",textAlign:"center",color:"#6e6e73",fontWeight:700,borderBottom:"1px solid #e5e9f0"}}></th>
+            </tr>
+          </thead>
+          <tbody>
+            {allMethodResults.map(function(mr){
+              var labels = {slope_r2:"slope × R²", best_r2:"best R²", peak_rate:"peak growth rate", inflection:"inflection-based"};
+              var isActive = batch.autoMethod === mr.method;
+              var r = mr.result;
+              return <tr key={mr.method} style={{background:isActive?"rgba(11,42,111,0.05)":"transparent"}}>
+                <td style={{padding:"4px 6px",color:isActive?NAVY:"#30437a",fontWeight:isActive?700:500,borderBottom:"1px solid #f0f0f3"}}>
+                  {labels[mr.method]}{mr.method==="peak_rate" && <span style={{color:"#8e9bb5",fontSize:9,fontWeight:500}}> · default</span>}
+                </td>
+                <td style={{padding:"4px 6px",textAlign:"right",fontFamily:"monospace",color:isActive?NAVY:"#5a6984",fontWeight:isActive?700:500,borderBottom:"1px solid #f0f0f3"}}>{r?r.slope.toFixed(4):"—"}</td>
+                <td style={{padding:"4px 6px",textAlign:"right",fontFamily:"monospace",color:isActive?NAVY:"#5a6984",fontWeight:isActive?700:500,borderBottom:"1px solid #f0f0f3"}}>{r?r.r2.toFixed(4):"—"}</td>
+                <td style={{padding:"4px 6px",textAlign:"center",fontFamily:"monospace",color:"#8e9bb5",borderBottom:"1px solid #f0f0f3"}}>{r?(r.start+1)+"–"+(r.end+1):"—"}</td>
+                <td style={{padding:"4px 6px",textAlign:"center",fontFamily:"monospace",color:"#8e9bb5",borderBottom:"1px solid #f0f0f3"}}>{r?r.length:"—"}</td>
+                <td style={{padding:"4px 6px",textAlign:"center",borderBottom:"1px solid #f0f0f3"}}>
+                  {!isActive && r && <button onClick={function(){var m = mr.method; updateActive(function(b){b.autoMethod = m; b.manualSelection = null;});}}
+                    onMouseEnter={function(e){e.currentTarget.style.borderColor = NAVY; e.currentTarget.style.color = NAVY;}}
+                    onMouseLeave={function(e){e.currentTarget.style.borderColor = "#d8dfeb"; e.currentTarget.style.color = "#30437a";}}
+                    style={{padding:"2px 8px",borderRadius:4,border:"1px solid #d8dfeb",background:"#fff",color:"#30437a",fontSize:9,fontWeight:600,cursor:"pointer",fontFamily:"inherit"}}>Use this</button>}
+                  {isActive && <span style={{fontSize:9,fontWeight:700,color:TEAL_DARK}}>● active</span>}
+                </td>
+              </tr>;
+            })}
+          </tbody>
+        </table>
+        <div style={{fontSize:9,color:"#8e9bb5",fontStyle:"italic",marginTop:6,lineHeight:1.4}}>
+          Different definitions of "exponential phase" give different specific growth rates. <strong>peak growth rate</strong> (default) finds the steepest local slope of ln(OD) and includes 4 points ending where deceleration begins — closest to bench-scientist intuition. <strong>slope × R²</strong> tends to over-include early-acceleration data. <strong>inflection-based</strong> uses the 2nd-derivative tangent-line method (matches the Excel template approach). The choice of definition can change the value by 10–20%; switch to <strong>manual</strong> to drag the green/red boundary handles on the OD plot, or click individual points to fine-tune.
+        </div>
+      </div>}
+
+      {batch.manualSelection && <div style={{marginTop:12,background:"#fafbfd",borderRadius:10,border:"1px solid "+BORDER,padding:"12px 14px"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:8,gap:10,flexWrap:"wrap"}}>
+          <div style={{fontSize:11,fontWeight:700,color:NAVY,textTransform:"uppercase",letterSpacing:0.5}}>Manual point selection</div>
+          <div style={{fontSize:10,color:"#8a6420",fontStyle:"italic"}}>
+            <strong>{batch.manualSelection.length}</strong> of {enriched.length} selected · need ≥ 2 to fit · drag green/red handles on OD plot, or click any point on either plot, or use rows below
+          </div>
+        </div>
+        <div style={{overflowX:"auto",maxHeight:180,overflowY:"auto",border:"1px solid #e5e9f0",borderRadius:6,background:"#fff"}}>
+          <table style={{width:"100%",borderCollapse:"collapse",fontSize:10}}>
+            <thead style={{position:"sticky",top:0,background:"#fafafa"}}>
+              <tr>
+                <th style={{padding:"5px 8px",fontWeight:700,color:"#6e6e73",textAlign:"center",borderBottom:"1px solid #d8dfeb",width:30}}>Use</th>
+                <th style={{padding:"5px 8px",fontWeight:700,color:"#6e6e73",textAlign:"center",borderBottom:"1px solid #d8dfeb",width:30}}>#</th>
+                <th style={{padding:"5px 8px",fontWeight:700,color:"#6e6e73",textAlign:"center",borderBottom:"1px solid #d8dfeb"}}>Time (h)</th>
+                <th style={{padding:"5px 8px",fontWeight:700,color:"#6e6e73",textAlign:"center",borderBottom:"1px solid #d8dfeb"}}>OD₆₀₀</th>
+                <th style={{padding:"5px 8px",fontWeight:700,color:"#6e6e73",textAlign:"center",borderBottom:"1px solid #d8dfeb"}}>ln(OD/OD₀)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {enriched.map(function(e,i){
+                var checked = batch.manualSelection.indexOf(i) >= 0;
+                return <tr key={i} style={{background:checked?"rgba(180,51,46,0.05)":"transparent",cursor:"pointer"}} onClick={function(){
+                  var sel2 = batch.manualSelection.slice();
+                  var pos = sel2.indexOf(i);
+                  if (pos >= 0) sel2.splice(pos, 1); else sel2.push(i);
+                  updateActive(function(b){b.manualSelection = sel2;});
+                }}>
+                  <td style={{padding:"5px 8px",textAlign:"center",borderBottom:"1px solid #f0f0f3"}}>
+                    <input type="checkbox" checked={checked} readOnly style={{cursor:"pointer"}} />
+                  </td>
+                  <td style={{padding:"5px 8px",textAlign:"center",color:"#8e9bb5",borderBottom:"1px solid #f0f0f3"}}>{e.idx+1}</td>
+                  <td style={{padding:"5px 8px",textAlign:"center",fontFamily:"monospace",color:checked?"#b4332e":"#5a6984",fontWeight:checked?700:500,borderBottom:"1px solid #f0f0f3"}}>{e.time.toFixed(2)}</td>
+                  <td style={{padding:"5px 8px",textAlign:"center",fontFamily:"monospace",color:checked?"#b4332e":"#5a6984",fontWeight:checked?700:500,borderBottom:"1px solid #f0f0f3"}}>{e.od.toFixed(3)}</td>
+                  <td style={{padding:"5px 8px",textAlign:"center",fontFamily:"monospace",color:checked?"#b4332e":"#5a6984",fontWeight:checked?700:500,borderBottom:"1px solid #f0f0f3"}}>{e.lnRatio!=null?e.lnRatio.toFixed(3):"—"}</td>
+                </tr>;
+              })}
+            </tbody>
+          </table>
+        </div>
+        <div style={{marginTop:8,display:"flex",gap:6,flexWrap:"wrap"}}>
+          <button onClick={function(){updateActive(function(b){b.manualSelection = enriched.map(function(_,i){return i;});});}}
+            onMouseEnter={function(e){e.currentTarget.style.borderColor = NAVY; e.currentTarget.style.color = NAVY;}}
+            onMouseLeave={function(e){e.currentTarget.style.borderColor = "#d8dfeb"; e.currentTarget.style.color = "#30437a";}}
+            style={{padding:"4px 10px",borderRadius:6,border:"1px solid #d8dfeb",background:"#fff",color:"#30437a",fontSize:10,fontWeight:600,cursor:"pointer",fontFamily:"inherit"}}>Select all</button>
+          <button onClick={function(){updateActive(function(b){b.manualSelection = [];});}}
+            onMouseEnter={function(e){e.currentTarget.style.borderColor = NAVY; e.currentTarget.style.color = NAVY;}}
+            onMouseLeave={function(e){e.currentTarget.style.borderColor = "#d8dfeb"; e.currentTarget.style.color = "#30437a";}}
+            style={{padding:"4px 10px",borderRadius:6,border:"1px solid #d8dfeb",background:"#fff",color:"#30437a",fontSize:10,fontWeight:600,cursor:"pointer",fontFamily:"inherit"}}>Clear all</button>
+          {autoWindow && <button onClick={function(){var idx=[]; for (var ai=autoWindow.start; ai<=autoWindow.end; ai++) idx.push(ai); updateActive(function(b){b.manualSelection = idx;});}}
+            onMouseEnter={function(e){e.currentTarget.style.borderColor = NAVY; e.currentTarget.style.color = NAVY;}}
+            onMouseLeave={function(e){e.currentTarget.style.borderColor = "#d8dfeb"; e.currentTarget.style.color = "#30437a";}}
+            style={{padding:"4px 10px",borderRadius:6,border:"1px solid #d8dfeb",background:"#fff",color:"#30437a",fontSize:10,fontWeight:600,cursor:"pointer",fontFamily:"inherit"}}>Reset to auto</button>}
+        </div>
+      </div>}
+      </div>}
+    </div>
+
+    {/* OD plot card */}
+    <div style={{background:"#fafbfd",borderRadius:10,border:"1px solid "+BORDER,padding:"14px 14px 12px",marginBottom:14}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:8,gap:10,flexWrap:"wrap"}}>
+        <div style={{fontSize:11,fontWeight:700,color:NAVY,textTransform:"uppercase",letterSpacing:0.5}}>OD₆₀₀ vs time</div>
+        <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"center"}}>
+          <div style={{fontSize:10,color:"#6e6e73",display:"flex",gap:14,flexWrap:"wrap",alignItems:"center"}}>
+            <span><span style={{display:"inline-block",width:14,height:2,background:"#1b7f6a",verticalAlign:"middle",marginRight:4}}></span>lag end</span>
+            <span><span style={{display:"inline-block",width:14,height:2,background:"#8e9bb5",verticalAlign:"middle",marginRight:4}}></span>OD inflection</span>
+            <span><span style={{display:"inline-block",width:14,height:2,background:"#bf7a1a",verticalAlign:"middle",marginRight:4}}></span>exp end</span>
+          </div>
+          <button onClick={function(){setZoomMode(!zoomMode);}}
+            onMouseEnter={function(e){if(!zoomMode){e.currentTarget.style.borderColor = NAVY; e.currentTarget.style.color = NAVY;}}}
+            onMouseLeave={function(e){if(!zoomMode){e.currentTarget.style.borderColor = "#d8dfeb"; e.currentTarget.style.color = "#30437a";}}}
+            style={{padding:"3px 10px",borderRadius:6,border:"1px solid "+(zoomMode?NAVY:"#d8dfeb"),background:zoomMode?NAVY:"#fff",color:zoomMode?"#fff":"#30437a",fontSize:10,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}}>
+            🔍 {zoomMode ? "Zoom: ON" : "Zoom"}
+          </button>
+        </div>
+      </div>
+      {renderODPlot || <div style={{padding:"30px 20px",textAlign:"center",fontSize:11,color:"#aeaeb2",fontStyle:"italic",border:"1px dashed #d8dfeb",borderRadius:8}}>Need at least 2 valid (time, OD) pairs.</div>}
+      <div style={{marginTop:6,display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:9,color:"#aeaeb2",gap:10,flexWrap:"wrap"}}>
+        <span style={{fontStyle:"italic"}}>{zoomMode ? "drag a region to zoom · scroll to zoom · pinch on touch · double-click to reset" : "click 🔍 Zoom to enable · or hold Shift+scroll · pinch on touch · double-click resets"}</span>
+        {zoomRange != null && enriched.length >= 2 && <span style={{display:"flex",alignItems:"center",gap:6}}>
+          <span style={{color:NAVY,fontWeight:700}}>zoomed {((dataTMax - dataTMin) / (zoomRange[1] - zoomRange[0])).toFixed(1)}× · {zoomRange[0].toFixed(1)}–{zoomRange[1].toFixed(1)} h</span>
+          <button onClick={resetZoom}
+            onMouseEnter={function(e){e.currentTarget.style.borderColor = NAVY; e.currentTarget.style.color = NAVY;}}
+            onMouseLeave={function(e){e.currentTarget.style.borderColor = "#d8dfeb"; e.currentTarget.style.color = "#30437a";}}
+            style={{padding:"2px 8px",borderRadius:4,border:"1px solid #d8dfeb",background:"#fff",color:"#30437a",fontSize:9,fontWeight:600,cursor:"pointer",fontFamily:"inherit"}}>reset zoom</button>
+        </span>}
+      </div>
+    </div>
+
+    {/* lnRatio plot card */}
+    <div style={{background:"#fafbfd",borderRadius:10,border:"1px solid "+BORDER,padding:"14px 14px 12px",marginBottom:14}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:8,gap:10,flexWrap:"wrap"}}>
+        <div style={{fontSize:11,fontWeight:700,color:NAVY,textTransform:"uppercase",letterSpacing:0.5}}>ln(OD / OD₀) vs time</div>
+        <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"center"}}>
+          {batch.manualSelection && <div style={{fontSize:10,color:"#bf7a1a",fontWeight:600}}>click points to toggle</div>}
+          <button onClick={function(){setZoomMode(!zoomMode);}}
+            onMouseEnter={function(e){if(!zoomMode){e.currentTarget.style.borderColor = NAVY; e.currentTarget.style.color = NAVY;}}}
+            onMouseLeave={function(e){if(!zoomMode){e.currentTarget.style.borderColor = "#d8dfeb"; e.currentTarget.style.color = "#30437a";}}}
+            style={{padding:"3px 10px",borderRadius:6,border:"1px solid "+(zoomMode?NAVY:"#d8dfeb"),background:zoomMode?NAVY:"#fff",color:zoomMode?"#fff":"#30437a",fontSize:10,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}}>
+            🔍 {zoomMode ? "Zoom: ON" : "Zoom"}
+          </button>
+        </div>
+      </div>
+      {renderLnPlot || <div style={{padding:"30px 20px",textAlign:"center",fontSize:11,color:"#aeaeb2",fontStyle:"italic",border:"1px dashed #d8dfeb",borderRadius:8}}>Need at least 2 valid (time, OD) pairs.</div>}
+      <div style={{marginTop:6,display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:9,color:"#aeaeb2",gap:10,flexWrap:"wrap"}}>
+        <span style={{fontStyle:"italic"}}>{zoomMode ? "drag a region to zoom (synced with OD plot)" : "shift+scroll to zoom · pinch on touch · synced with OD plot"}</span>
+        {zoomRange != null && enriched.length >= 2 && <span style={{display:"flex",alignItems:"center",gap:6}}>
+          <span style={{color:NAVY,fontWeight:700}}>zoomed {((dataTMaxL - dataTMinL) / (zoomRange[1] - zoomRange[0])).toFixed(1)}×</span>
+          <button onClick={resetZoom}
+            onMouseEnter={function(e){e.currentTarget.style.borderColor = NAVY; e.currentTarget.style.color = NAVY;}}
+            onMouseLeave={function(e){e.currentTarget.style.borderColor = "#d8dfeb"; e.currentTarget.style.color = "#30437a";}}
+            style={{padding:"2px 8px",borderRadius:4,border:"1px solid #d8dfeb",background:"#fff",color:"#30437a",fontSize:9,fontWeight:600,cursor:"pointer",fontFamily:"inherit"}}>reset zoom</button>
+        </span>}
+      </div>
+    </div>
+
+    {renderDerivPanel}
+
+    {renderMathReminder}
+
+    <div style={{display:"flex",gap:8,justifyContent:"space-between",marginTop:18,flexWrap:"wrap"}}>
+      <button onClick={function(){setStep(1);}}
+        onMouseEnter={function(e){e.currentTarget.style.borderColor = NAVY; e.currentTarget.style.color = NAVY;}}
+        onMouseLeave={function(e){e.currentTarget.style.borderColor = "#d8dfeb"; e.currentTarget.style.color = "#30437a";}}
+        style={{background:"#fff",color:"#30437a",border:"1px solid #d8dfeb",padding:"9px 18px",borderRadius:10,fontWeight:600,fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>← Back to Data Entry</button>
+      <button onClick={function(){setStep(3);}}
+        onMouseEnter={function(e){e.currentTarget.style.background = "#162d6e";}}
+        onMouseLeave={function(e){e.currentTarget.style.background = NAVY;}}
+        style={{background:NAVY,color:"#fff",border:"none",padding:"9px 22px",borderRadius:10,fontWeight:700,fontSize:12,cursor:"pointer",fontFamily:"inherit",boxShadow:"0 4px 14px rgba(11,42,111,0.10)"}}>Continue to Review →</button>
+    </div>
+  </div>;
+
+  // ── STEP 3: REVIEW ───────────────────────────────────────────────────
+  var renderMathReminder = instructor ? <details style={{marginBottom:14}} open>
+    <summary style={{cursor:"pointer",padding:"10px 14px",background:"linear-gradient(135deg, #f6fbff 0%, #ebf3fc 100%)",border:"1px solid #c7daf2",borderRadius:8,fontSize:12,fontWeight:700,color:NAVY,userSelect:"none"}}>
+      📚 What this is, in plain English (instructor mode)
+    </summary>
+    <div style={{marginTop:8,padding:"16px 18px",background:"#fafdff",border:"1px solid #e5e9f0",borderRadius:8,fontSize:12,color:"#1d1d1f",lineHeight:1.65}}>
+
+      {/* SECTION 1: The big picture */}
+      <div style={{marginBottom:18}}>
+        <div style={{fontSize:13,fontWeight:800,color:NAVY,marginBottom:6,textTransform:"uppercase",letterSpacing:0.5}}>1. What we're actually measuring</div>
+        <p style={{margin:"0 0 8px"}}>You have a tank ("bioreactor") full of cells (bacteria, yeast, mammalian cells — any kind that grows in liquid). The cells eat sugar and divide. We want to know <strong>how fast they're dividing</strong>, because that tells us how productive the batch is and whether the culture is healthy.</p>
+        <p style={{margin:"0 0 8px"}}>The trouble: you can't easily count millions of cells one by one. Instead, you measure how cloudy the liquid is (called <strong>optical density at 600 nm</strong>, or <strong>OD₆₀₀</strong>). More cells → more cloudy → higher OD reading. So OD is a stand-in for cell count.</p>
+        <p style={{margin:0}}>You take samples every hour or so, plot OD against time, and look at the curve.</p>
+      </div>
+
+      {/* SECTION 2: The 4 phases */}
+      <div style={{marginBottom:18}}>
+        <div style={{fontSize:13,fontWeight:800,color:NAVY,marginBottom:6,textTransform:"uppercase",letterSpacing:0.5}}>2. Cells grow in 4 phases</div>
+        <div style={{padding:"10px 14px",background:"#f5f7fb",border:"1px solid #e5e9f0",borderRadius:6,marginBottom:8}}>
+          <div style={{display:"grid",gridTemplateColumns:"100px 1fr",gap:"8px 14px"}}>
+            <div style={{fontWeight:700,color:"#1b7f6a"}}>① Lag phase</div>
+            <div>Cells are getting their bearings — fixing up their machinery, sensing the new environment. OD barely changes. They're not dividing yet.</div>
+            <div style={{fontWeight:700,color:NAVY}}>② Exponential phase</div>
+            <div>Each cell divides on a steady rhythm — every cell that exists has a roughly equal chance of dividing per unit time. So OD doubles, then doubles again, then doubles again. This is where we measure <strong>µ</strong> (the specific growth rate) — it's the only phase where the math is simple.</div>
+            <div style={{fontWeight:700,color:"#bf7a1a"}}>③ Stationary phase</div>
+            <div>Something runs out (food, oxygen) or something accumulates (waste, products). Cells stop dividing. OD plateaus.</div>
+            <div style={{fontWeight:700,color:"#a0492a"}}>④ Death phase</div>
+            <div>Cells start dying. OD drops. We usually don't measure this far.</div>
+          </div>
+        </div>
+        <p style={{margin:0,fontSize:11,color:"#5a6984",fontStyle:"italic"}}>Most analysis cares only about phases ① and ②. Lag duration tells you how stressful the start was. Exponential duration tells you how long the productive period lasted. µ tells you how fast cells were growing during that productive period.</p>
+      </div>
+
+      {/* SECTION 3: Why ln */}
+      <div style={{marginBottom:18}}>
+        <div style={{fontSize:13,fontWeight:800,color:NAVY,marginBottom:6,textTransform:"uppercase",letterSpacing:0.5}}>3. Why we plot ln(OD) — the doubling math</div>
+        <p style={{margin:"0 0 8px"}}>Imagine 100 cells, each doubling every hour:</p>
+        <div style={{padding:"8px 14px",background:"#f5f7fb",border:"1px solid #e5e9f0",borderRadius:6,marginBottom:8,fontFamily:"monospace",fontSize:11}}>
+          t=0h:   100 cells<br/>
+          t=1h:   200 cells<br/>
+          t=2h:   400 cells<br/>
+          t=3h:   800 cells<br/>
+          t=4h: 1,600 cells
+        </div>
+        <p style={{margin:"0 0 8px"}}>If you plot 100 → 1,600 on a normal graph, you get a curve that swoops upward. Hard to fit a line through it. But if you plot ln(N), you get:</p>
+        <div style={{padding:"8px 14px",background:"#f5f7fb",border:"1px solid #e5e9f0",borderRadius:6,marginBottom:8,fontFamily:"monospace",fontSize:11}}>
+          t=0h: ln(100/100) = 0.000<br/>
+          t=1h: ln(200/100) = 0.693<br/>
+          t=2h: ln(400/100) = 1.386<br/>
+          t=3h: ln(800/100) = 2.079<br/>
+          t=4h: ln(1600/100) = 2.773
+        </div>
+        <p style={{margin:0}}>Each point is exactly 0.693 higher than the one before. <strong>ln(OD) vs time becomes a straight line during exponential growth</strong>, and the slope of that line IS µ. (0.693 is ln(2), which is what you'd get for cells doubling every hour.)</p>
+      </div>
+
+      {/* SECTION 4: The growth equation */}
+      <div style={{marginBottom:18}}>
+        <div style={{fontSize:13,fontWeight:800,color:NAVY,marginBottom:6,textTransform:"uppercase",letterSpacing:0.5}}>4. The growth equation, derived</div>
+        <p style={{margin:"0 0 6px"}}><strong>The premise:</strong> the rate at which new cells appear (dN/dt) is proportional to how many cells exist (N). More cells means more dividing happening.</p>
+        <div style={{padding:"10px 14px",background:"#f5f7fb",border:"1px solid #e5e9f0",borderRadius:6,marginBottom:8,fontFamily:"monospace",fontSize:11,lineHeight:1.7}}>
+          dN/dt = µ · N<br/>
+          → dN/N = µ · dt&nbsp;&nbsp;&nbsp;<span style={{color:"#5a6984"}}>(separate variables)</span><br/>
+          → ∫dN/N = ∫µ dt&nbsp;&nbsp;<span style={{color:"#5a6984"}}>(integrate both sides)</span><br/>
+          → ln N − ln N₀ = µt&nbsp;<span style={{color:"#5a6984"}}>(use t=0, N=N₀ as the constant)</span><br/>
+          → <strong>ln(N/N₀) = µ · t</strong>&nbsp;&nbsp;<span style={{color:"#5a6984"}}>(the line we fit)</span><br/>
+          → N(t) = N₀ · e<sup>µt</sup>&nbsp;<span style={{color:"#5a6984"}}>(the curve in original units)</span>
+        </div>
+        <p style={{margin:"0 0 6px"}}>µ has units of 1/h (or 1/time). Read it as <em>"per hour"</em>. µ = 0.81/h means: at any instant, the population is growing by 81% per hour.</p>
+        <p style={{margin:0}}>Note that we can swap N for OD freely — they're proportional, so ln(OD/OD₀) = µt with the same slope.</p>
+      </div>
+
+      {/* SECTION 5: Doubling time */}
+      <div style={{marginBottom:18}}>
+        <div style={{fontSize:13,fontWeight:800,color:NAVY,marginBottom:6,textTransform:"uppercase",letterSpacing:0.5}}>5. Doubling time — turning µ into something intuitive</div>
+        <p style={{margin:"0 0 8px"}}>"µ = 0.81/h" doesn't mean much to most people. <strong>Doubling time</strong> is the same information in friendlier units: how long does it take for the population to double?</p>
+        <div style={{padding:"10px 14px",background:"#f5f7fb",border:"1px solid #e5e9f0",borderRadius:6,marginBottom:8,fontFamily:"monospace",fontSize:11,lineHeight:1.7}}>
+          Set N(t)/N₀ = 2 (population has doubled)<br/>
+          ln(2) = µ · t_d<br/>
+          → <strong>t_d = ln(2) / µ ≈ 0.693 / µ</strong>
+        </div>
+        <p style={{margin:0}}>For µ = 0.81/h: t_d = 0.693/0.81 ≈ 0.86 hours ≈ <strong>52 minutes</strong>. The cells are doubling roughly every 52 minutes.<br/>For comparison: <em>E. coli</em> at optimum is ~20 minutes, yeast ~90 minutes, CHO mammalian cells ~24 hours.</p>
+      </div>
+
+      {/* SECTION 6: How we find phase boundaries */}
+      <div style={{marginBottom:18}}>
+        <div style={{fontSize:13,fontWeight:800,color:NAVY,marginBottom:6,textTransform:"uppercase",letterSpacing:0.5}}>6. How we find where the lag phase ends and where exponential ends</div>
+        <p style={{margin:"0 0 8px"}}>Phases blend into each other — there's no exact moment cells "decide" to start dividing. We have to choose a definition. Different definitions give slightly different answers (10-20% variation is normal). Here are the conventions this calculator uses:</p>
+
+        <div style={{marginTop:10,marginBottom:6,fontWeight:700,color:"#1b7f6a"}}>Lag end — back-projection method</div>
+        <p style={{margin:"0 0 8px"}}>Imagine the OD curve. Find the spot where it bends most sharply upward — that's the inflection point, where growth is accelerating fastest. Now imagine drawing a tangent line at that point and extending it backwards down to OD = 0. The time at which that line crosses zero is the "back-projected lag end." <em>Mathematically</em>: find where d²(OD)/dt² crosses from positive to negative; that's the inflection time. Compute the local slope of OD there. Project back along that slope to OD=0.</p>
+        <p style={{margin:"0 0 8px",padding:"8px 12px",background:"#f4faf8",border:"1px solid #c8e6d8",borderRadius:6,fontSize:11}}>📐 <strong>Why this works:</strong> if cells were already growing exponentially from t=0, the tangent at any inflection point would extrapolate back to where the curve started. Cells delayed by the lag phase make this extrapolation hit zero LATER than t=0 — and that delay is the lag duration.</p>
+
+        <div style={{marginTop:10,marginBottom:6,fontWeight:700,color:"#bf7a1a"}}>Exp end — when growth rate drops below 10% of peak</div>
+        <p style={{margin:"0 0 8px"}}>The instantaneous growth rate is the slope of ln(OD) at any moment. During exponential phase that slope is constant (= µ). When the cells start running out of food, the slope drops. We define exp end as the time when the slope has fallen to 10% of its peak value — i.e., the cells are growing 10× slower than they were at peak.</p>
+        <p style={{margin:0,padding:"8px 12px",background:"#fef9f0",border:"1px solid #f0d6a0",borderRadius:6,fontSize:11}}>📐 <strong>Why 10%:</strong> a single threshold works across batch types. Lower thresholds (5%) often catch noise at the very end of the curve. Higher thresholds (20-30%) cut off too early, before the exponential phase has clearly transitioned. 10% is a common compromise.</p>
+      </div>
+
+      {/* SECTION 7: The derivative plots */}
+      <div style={{marginBottom:18}}>
+        <div style={{fontSize:13,fontWeight:800,color:NAVY,marginBottom:6,textTransform:"uppercase",letterSpacing:0.5}}>7. Reading the four derivative plots</div>
+        <p style={{margin:"0 0 8px"}}>The four small plots in the "Phase boundary derivatives" panel are visual checks for the math above. Each shows a derivative of either OD or ln(OD) over time. Here's what to look for:</p>
+
+        <div style={{marginBottom:6}}><strong style={{color:"#3478F6"}}>Lag Phase – 1st Der: d(OD)/dt</strong> — the rate of OD increase, in raw OD units per hour. Looks like a hill: low during lag, rises through exponential, peaks at the inflection, drops as the curve flattens. The PEAK of this curve corresponds to the steepest part of the OD curve.</div>
+
+        <div style={{marginBottom:6}}><strong style={{color:"#bf7a1a"}}>Lag Phase – 2nd Der: d²(OD)/dt²</strong> — the curvature of OD. Positive means concave-up (accelerating), negative means concave-down (decelerating), zero means inflection. The first crossing from + to − is the lag-to-exp inflection — that's where back-projection starts.</div>
+
+        <div style={{marginBottom:6}}><strong style={{color:"#3478F6"}}>Exponential Phase – 1st Der: d(lnOD)/dt</strong> — the instantaneous specific growth rate. During pure exponential phase, this should be FLAT and equal to µ. The 10%-of-peak threshold for exp end is read off this curve.</div>
+
+        <div style={{marginBottom:6}}><strong style={{color:"#bf7a1a"}}>Exponential Phase – 2nd Der: d²(lnOD)/dt²</strong> — how fast the growth rate is changing. Should be near zero during pure exponential. Big swings indicate the curve isn't really exponential there (which is OK — that's how we find phase transitions).</div>
+      </div>
+
+      {/* SECTION 8: R² and CI */}
+      <div style={{marginBottom:18}}>
+        <div style={{fontSize:13,fontWeight:800,color:NAVY,marginBottom:6,textTransform:"uppercase",letterSpacing:0.5}}>8. Trust your numbers — R² and 95% CI</div>
+        <p style={{margin:"0 0 8px"}}><strong>R² (coefficient of determination)</strong> measures how well the line fits the data points within the µ window. R²=1.0 means perfect fit. R²&gt;0.99 is what you want for biotech work — the data points lie almost exactly on the line. R²&lt;0.95 suggests either noisy measurements or a bad window choice (you've included data outside true exponential phase).</p>
+        <p style={{margin:"0 0 8px"}}><strong>95% Confidence Interval (CI)</strong> says: "if I repeated this experiment many times with the same biology and noise, 95% of the time my computed µ would fall within ± this much of my best estimate." Wider CI = less certain.</p>
+        <div style={{padding:"10px 14px",background:"#f5f7fb",border:"1px solid #e5e9f0",borderRadius:6,marginBottom:8,fontFamily:"monospace",fontSize:11,lineHeight:1.7}}>
+          ± CI half-width = t_critical × SE(slope)<br/>
+          &nbsp;&nbsp;where SE(slope) = √(Σresiduals² / (n−2)) ÷ √(Σ(t−t̄)²)<br/>
+          &nbsp;&nbsp;and t_critical comes from Student's t-table at 95%, n−2 degrees of freedom
+        </div>
+        <p style={{margin:"0 0 6px"}}><strong>What makes the CI tighter?</strong></p>
+        <ul style={{margin:"0 0 8px",paddingLeft:20}}>
+          <li>More points in the µ window (n=4 → t_critical=4.30 vs n=10 → t_critical=2.31 — half as wide just from n alone)</li>
+          <li>Less scatter (smaller residuals)</li>
+          <li>Wider time range covered by the window (samples spread further apart in time)</li>
+        </ul>
+        <p style={{margin:0,padding:"8px 12px",background:"#fdf0d9",border:"1px solid #f0d6a0",borderRadius:6,fontSize:11}}>⚠️ <strong>Common gotcha:</strong> with only 4 sample points, the CI is often quite wide (20-40% of µ) even when R² looks pristine. Don't be fooled — you need both: high R² AND many points to be confident in µ.</p>
+      </div>
+
+      {/* SECTION 9: How the µ window is picked */}
+      <div style={{marginBottom:18}}>
+        <div style={{fontSize:13,fontWeight:800,color:NAVY,marginBottom:6,textTransform:"uppercase",letterSpacing:0.5}}>9. How the calculator picks the µ window</div>
+        <p style={{margin:"0 0 8px"}}>The default method ("peak growth rate") works like this:</p>
+        <ol style={{margin:"0 0 8px",paddingLeft:20}}>
+          <li>Compute the instantaneous slope of ln(OD) at every sample (the rolling slope you see in the "1st Der: d(lnOD)/dt" plot).</li>
+          <li>Find the sample with the highest slope — call its index P.</li>
+          <li>Walk forward from P. Find the first index D where the slope has fallen to 70% of the peak. (This is "where deceleration is clearly happening".)</li>
+          <li>Use the 4 samples ending at D as the µ window. Fit a straight line to ln(OD) vs time across those 4 points. The slope is µ.</li>
+        </ol>
+        <p style={{margin:"0 0 8px"}}><strong>Why 4 points?</strong> Fewer than 3 and you can't compute R² or CI. More than 4 and you risk including non-exponential phases. 4 is the sweet spot bench scientists use.</p>
+        <p style={{margin:0}}>If you don't trust the auto-pick, switch to <strong>manual mode</strong>: drag the green/red boundary handles on the OD plot, or click points on either plot to toggle them in/out of the window. The fit recomputes live.</p>
+      </div>
+
+      {/* SECTION 10: Pitfalls */}
+      <div style={{marginBottom:0}}>
+        <div style={{fontSize:13,fontWeight:800,color:NAVY,marginBottom:6,textTransform:"uppercase",letterSpacing:0.5}}>10. Pitfalls and sanity checks</div>
+        <ul style={{margin:0,paddingLeft:20}}>
+          <li style={{marginBottom:4}}><strong>Diauxic shift:</strong> if the cells are using one sugar and switch to another mid-batch, you'll see a brief "second lag" — OD slows then resumes. Make sure your µ window is in just one phase.</li>
+          <li style={{marginBottom:4}}><strong>Aeration limits:</strong> if oxygen runs out, growth slows even though sugar is plentiful. Looks like an early stationary transition.</li>
+          <li style={{marginBottom:4}}><strong>OD saturation:</strong> spectrophotometers max out around OD≈30. Above that, cells block each other from light and the reading plateaus artificially. Dilute samples and re-measure if you're hitting saturation.</li>
+          <li style={{marginBottom:4}}><strong>Sampling too sparse:</strong> if your samples are 4 hours apart and the exponential phase only lasts 4 hours, you might have just 1-2 points in pure exp phase. The fit becomes meaningless.</li>
+          <li><strong>Sanity check µ against literature:</strong> E. coli LB ~0.7-1.5/h, yeast YPD ~0.3-0.5/h, CHO ~0.025-0.04/h. If yours is 10× off either direction, double-check the time units and OD₀ value.</li>
+        </ul>
+      </div>
+
+    </div>
+  </details> : null;
+
+  // ── CSV export (full schema with glucose + weight) ────────────────────
+  // ── Per-batch summary helper (used by Review table AND CSV export). Runs the
+  // same algorithm the live component uses so the export and the UI always agree.
+  var detectFmtForBatch = function(rows){
+    for (var i = 0; i < rows.length; i++) {
+      var t = rows[i] && rows[i].time;
+      if (t == null || (""+t).trim() === "") continue;
+      if (/^-?\d+(\.\d+)?$/.test((""+t).trim())) {
+        var n = parseFloat((""+t).trim());
+        if (!isNaN(n)) return n < 10000 ? "hours" : "timestamp";
+      }
+      if (parseAsDate(t)) return "timestamp";
+    }
+    return "timestamp";
+  };
+  var computeBatchSummary = function(b){
+    var fmt = detectFmtForBatch(b.rows);
+    var t0L = null;
+    if (fmt === "timestamp") {
+      var dates = [];
+      b.rows.forEach(function(r){var d = parseAsDate(r && r.time); if (d) dates.push(d);});
+      if (dates.length) t0L = new Date(Math.min.apply(null, dates.map(function(d){return d.getTime();})));
+    }
+    var totalRows = b.rows.filter(function(r){return r && (r.time || r.od);}).length;
+    var rowsP = b.rows.map(function(r, ii){
+      var od = parseFloat(r.od);
+      var glu = r.glucose !== "" && r.glucose != null ? parseFloat(r.glucose) : null;
+      var wt = r.weight !== "" && r.weight != null ? parseFloat(r.weight) : null;
+      var validBase = isFinite(od) && od > 0;
+      if (fmt === "timestamp") {
+        var sample = parseAsDate(r.time);
+        if (!sample || !t0L) return {idx:ii, valid:false};
+        var hours = (sample - t0L) / 3600000;
+        return {idx:ii, time:hours, od:od, glucose:glu, weight:wt, valid:isFinite(hours) && validBase};
+      }
+      var t = parseAsHours(r.time);
+      if (t == null) return {idx:ii, valid:false};
+      return {idx:ii, time:t, od:od, glucose:glu, weight:wt, valid:validBase};
+    });
+    var v = rowsP.filter(function(p){return p.valid;}).sort(function(a, c){return a.time - c.time;});
+    if (v.length < 2) return {batch:b, ok:false, totalRows:totalRows, validCount:v.length, timeFormat:fmt, t0:t0L};
+    var od00 = v[0].od;
+    var enr = v.map(function(p){return {idx:p.idx, time:p.time, od:p.od, lnRatio:od00 > 0 ? Math.log(p.od / od00) : null};});
+    var n = enr.length;
+    var tArr = enr.map(function(e){return e.time;});
+    var oArr = enr.map(function(e){return e.od;});
+    var lArr = enr.map(function(e){return e.lnRatio;});
+    var rs = function(tt, vv){
+      var out = new Array(tt.length);
+      for (var ii = 0; ii < tt.length; ii++) {
+        if (ii === 0 || ii === tt.length - 1) {out[ii] = null; continue;}
+        var x = [tt[ii-1], tt[ii], tt[ii+1]], y = [vv[ii-1], vv[ii], vv[ii+1]];
+        if (y.some(function(yy){return !isFinite(yy);})) {out[ii] = null; continue;}
+        out[ii] = linReg(x, y).slope;
+      }
+      return out;
+    };
+    var s1l = rs(tArr, lArr), s2l = rs(tArr, s1l);
+    var s1o = rs(tArr, oArr), s2o = rs(tArr, s1o);
+    var fmx = function(arr){var mi = -1, mv = -Infinity; for (var ii = 0; ii < arr.length; ii++) {if (arr[ii] == null) continue; if (arr[ii] > mv) {mv = arr[ii]; mi = ii;}} return mi >= 0 ? mi : null;};
+    var fsc = function(arr, fromNeg){for (var ii = 1; ii < arr.length - 2; ii++) {var a = arr[ii], b2 = arr[ii+1]; if (a == null || b2 == null) continue; if (fromNeg && a < 0 && b2 > 0) return ii; if (!fromNeg && a > 0 && b2 < 0) return ii;} return null;};
+    // Pick window using same method dispatch as live UI
+    var pick = null;
+    if (b.manualSelection && b.manualSelection.length >= 2) {
+      var s = b.manualSelection.slice().sort(function(a, c){return a - c;});
+      var ts = [], ys = [];
+      s.forEach(function(k){if (enr[k]) {ts.push(enr[k].time); ys.push(enr[k].lnRatio);}});
+      if (ts.length >= 2) {var f = linReg(ts, ys); pick = {start:s[0], end:s[s.length-1], slope:f.slope, intercept:f.intercept, r2:f.r2, length:s.length};}
+    } else if (b.autoMethod === "peak_rate" || !b.autoMethod) {
+      var iPk = fmx(s1l);
+      if (iPk != null && s1l[iPk] != null && s1l[iPk] > 0) {
+        var pkR = s1l[iPk], thr = 0.70 * pkR;
+        var dropI = null;
+        for (var ip = iPk + 1; ip < n; ip++) if (s1l[ip] != null && s1l[ip] < thr) {dropI = ip; break;}
+        if (dropI == null) for (var ip2 = n - 2; ip2 > iPk; ip2--) if (s1l[ip2] != null) {dropI = ip2; break;}
+        if (dropI == null) dropI = iPk + 1;
+        var wE = Math.min(dropI, n - 1), wS = Math.max(1, wE - 3);
+        if (wE - wS + 1 < 3) {if (wS > 0) wS--; else if (wE < n - 1) wE++;}
+        if (wE - wS + 1 >= 3) {
+          var ts2 = [], ys2 = [];
+          for (var kp = wS; kp <= wE; kp++) {ts2.push(enr[kp].time); ys2.push(enr[kp].lnRatio);}
+          var fp = linReg(ts2, ys2);
+          if (isFinite(fp.slope) && fp.slope > 0) pick = {start:wS, end:wE, slope:fp.slope, intercept:fp.intercept, r2:fp.r2, length:wE-wS+1};
+        }
+      }
+    } else if (b.autoMethod === "inflection") {
+      var iLg = fmx(s2o), lT = null;
+      if (iLg != null && iLg > 0 && iLg < n - 1) {
+        var t1L = tArr[iLg], t2L = tArr[iLg+1];
+        if (t2L - t1L !== 0) {
+          var lsL = (oArr[iLg+1] - oArr[iLg]) / (t2L - t1L);
+          if (lsL > 0) lT = t1L - oArr[iLg] / lsL;
+        }
+      }
+      var iEx = fsc(s2l, false), eT = null;
+      if (iEx != null) {
+        var te1 = tArr[iEx], te2 = tArr[iEx+1], a1e = s2l[iEx], a2e = s2l[iEx+1];
+        if (a2e - a1e !== 0) eT = te1 + (0 - a1e) / (a2e - a1e) * (te2 - te1);
+      }
+      if (lT != null && eT != null && lT < eT) {
+        var iS = -1, iE = -1;
+        for (var ii2 = 0; ii2 < n; ii2++) {if (enr[ii2].time >= lT && enr[ii2].time <= eT) {if (iS < 0) iS = ii2; iE = ii2;}}
+        while (iE - iS + 1 < 2 && (iS > 0 || iE < n - 1)) {if (iS > 0) iS--; else if (iE < n - 1) iE++;}
+        if (iS >= 0 && iE - iS + 1 >= 2) {
+          var ts3 = [], ys3 = [];
+          for (var ki = iS; ki <= iE; ki++) {ts3.push(enr[ki].time); ys3.push(enr[ki].lnRatio);}
+          var fi = linReg(ts3, ys3);
+          if (isFinite(fi.slope) && fi.slope > 0) pick = {start:iS, end:iE, slope:fi.slope, intercept:fi.intercept, r2:fi.r2, length:iE-iS+1};
+        }
+      }
+    } else {
+      // slope_r2 or best_r2 — exhaustive search
+      var be = null;
+      for (var ix = 0; ix <= n - 4; ix++) for (var jx = ix + 3; jx < n; jx++) {
+        var tsX = [], ysX = [];
+        for (var kx = ix; kx <= jx; kx++) {tsX.push(enr[kx].time); ysX.push(enr[kx].lnRatio);}
+        var ff = linReg(tsX, ysX);
+        if (!isFinite(ff.slope) || ff.slope <= 0) continue;
+        var sc = b.autoMethod === "best_r2" ? ff.r2 : ff.slope * ff.r2;
+        var ln = jx - ix + 1;
+        if (!be || sc > be.score || (sc === be.score && ln > be.length)) be = {start:ix, end:jx, slope:ff.slope, intercept:ff.intercept, r2:ff.r2, score:sc, length:ln};
+      }
+      pick = be;
+    }
+    var mu = pick ? pick.slope : null;
+    var r2 = pick ? pick.r2 : null;
+    var dt = (mu && mu > 0) ? Math.log(2) / mu : null;
+    // Inflection-method lag/exp end — match colleague's spreadsheet workflow
+    var s1odB = rollingSlope(tArr, oArr);
+    var s2odB = rollingSlope(tArr, s1odB);
+    var lnArrB = enr.map(function(e){return e.lnRatio;});
+    var s1lnB = rollingSlope(tArr, lnArrB);
+    var s2lnB = rollingSlope(tArr, s1lnB);
+    var lE = (function(){
+      if (s2odB.length < 2) return null;
+      var i = -1;
+      for (var k = 0; k < s2odB.length - 1; k++) {
+        if (s2odB[k] != null && s2odB[k+1] != null && s2odB[k] > 0 && s2odB[k+1] < 0) {i = k; break;}
+      }
+      if (i < 0) return null;
+      var t1 = enr[i].time, t2 = enr[i+1].time;
+      var s1 = s2odB[i], s2 = s2odB[i+1];
+      if (s2 === s1 || t2 === t1) return null;
+      var Z7 = t1 + (0 - s1) / (s2 - s1) * (t2 - t1);
+      var Z11 = (enr[i+1].od - enr[i].od) / (t2 - t1);
+      if (Z11 <= 0) return null;
+      var AA11 = Z11 * (Z7 - t1) + enr[i].od;
+      return Z7 - AA11 / Z11;
+    })();
+    var eE = (function(){
+      // Rate-decay algorithm: exp end = time when slope1(lnOD) drops to 10% of peak
+      if (s1lnB.length < 2) return pick ? enr[pick.end].time : null;
+      var peakV = null, peakIdx = -1;
+      for (var i = 0; i < s1lnB.length; i++) {
+        if (s1lnB[i] != null && s1lnB[i] > 0 && (peakV == null || s1lnB[i] > peakV)) {
+          peakV = s1lnB[i]; peakIdx = i;
+        }
+      }
+      if (peakIdx < 0) return pick ? enr[pick.end].time : null;
+      var threshold = 0.10 * peakV;
+      for (var j = peakIdx; j < s1lnB.length; j++) {
+        if (s1lnB[j] != null && s1lnB[j] < threshold) {
+          if (j === 0) return enr[0].time;
+          var sPrev = s1lnB[j-1];
+          if (sPrev == null) return enr[j].time;
+          var t1 = enr[j-1].time, t2 = enr[j].time;
+          if (sPrev === s1lnB[j]) return t2;
+          var frac = (sPrev - threshold) / (sPrev - s1lnB[j]);
+          return t1 + frac * (t2 - t1);
+        }
+      }
+      return enr[enr.length - 1].time;
+    })();
+    var expDur = (lE != null && eE != null) ? eE - lE : null;
+    // CI
+    var ciHalf = null;
+    if (pick && pick.length >= 3) {
+      var idxs = []; for (var kj = pick.start; kj <= pick.end; kj++) idxs.push(kj);
+      var ts4 = [], ys4 = [];
+      idxs.forEach(function(k){if (enr[k]) {ts4.push(enr[k].time); ys4.push(enr[k].lnRatio);}});
+      var nP = ts4.length;
+      if (nP > 2) {
+        var mT = ts4.reduce(function(a, x){return a + x;}, 0) / nP, ssXX = 0, ssRr = 0;
+        for (var kj2 = 0; kj2 < nP; kj2++) {ssXX += (ts4[kj2]-mT)*(ts4[kj2]-mT); var pr = pick.slope*ts4[kj2]+pick.intercept; ssRr += (ys4[kj2]-pr)*(ys4[kj2]-pr);}
+        if (ssXX > 0) {
+          var seS = Math.sqrt(ssRr / (nP-2)) / Math.sqrt(ssXX);
+          var tC = {1:12.706,2:4.303,3:3.182,4:2.776,5:2.571,6:2.447,7:2.365,8:2.306,9:2.262,10:2.228}[Math.min(10, nP-2)] || 1.96;
+          ciHalf = tC * seS;
+        }
+      }
+    }
+    var methodKey = b.manualSelection ? "manual" : (b.autoMethod || "peak_rate");
+    return {
+      batch:b, ok:true, mu:mu, ciHalf:ciHalf, r2:r2, doublingTime:dt,
+      lagEndTime:lE, expEndTime:eE, expDuration:expDur,
+      windowStart:pick?pick.start:null, windowEnd:pick?pick.end:null, n:pick?pick.length:0,
+      method:methodKey, methodLabel:METHOD_LABELS[methodKey] || methodKey,
+      t0:t0L, timeFormat:fmt, validCount:enr.length, totalRows:totalRows
+    };
+  };
+  var allBatchSummaries = batches.map(computeBatchSummary);
+
+
+  var doExport = function(){
+    var lines = [];
+    lines.push("# Specific Growth Rate Calculator — eSSF Curve Bio Tools");
+    lines.push("");
+    lines.push("## Per-batch summary");
+    lines.push(["batch_name","batch_id","run_type","cell_type","time_format","t0","mu_per_h","mu_ci95","r2","doubling_time_h","lag_end_h","exp_end_h","exp_duration_h","window_start_idx","window_end_idx","window_n","method","notes"].join(","));
+    var quote = function(s){return "\""+(s||"").toString().replace(/"/g,'""')+"\"";};
+    allBatchSummaries.forEach(function(s){
+      var b = s.batch;
+      lines.push([
+        quote(b.name), quote(b.metadata.batchId), quote(b.metadata.runType), quote(b.metadata.cellType),
+        s.timeFormat, quote(s.t0 ? s.t0.toISOString().replace("T"," ").replace(/\.\d+Z$/,"") : ""),
+        s.mu != null ? s.mu.toFixed(5) : "", s.ciHalf != null ? s.ciHalf.toFixed(5) : "", s.r2 != null ? s.r2.toFixed(5) : "",
+        s.doublingTime != null ? s.doublingTime.toFixed(3) : "",
+        s.lagEndTime != null ? s.lagEndTime.toFixed(3) : "",
+        s.expEndTime != null ? s.expEndTime.toFixed(3) : "",
+        s.expDuration != null ? s.expDuration.toFixed(3) : "",
+        s.windowStart != null ? s.windowStart : "",
+        s.windowEnd != null ? s.windowEnd : "",
+        s.n,
+        s.method,
+        quote(b.metadata.notes)
+      ].join(","));
+    });
+    lines.push("");
+    lines.push("## Per-batch raw data");
+    batches.forEach(function(b){
+      lines.push("");
+      lines.push("# Batch: " + b.name);
+      lines.push(["row","time_input","od","glucose","weight","elapsed_h","ln_ratio","in_window"].join(","));
+      var batchFmt2 = detectFmtForBatch(b.rows);
+      var t0L2 = null;
+      if (batchFmt2 === "timestamp") {
+        var dates2 = [];
+        b.rows.forEach(function(r){var d = parseAsDate(r && r.time); if (d) dates2.push(d);});
+        if (dates2.length) t0L2 = new Date(Math.min.apply(null, dates2.map(function(d){return d.getTime();})));
+      }
+      var rowsP2 = b.rows.map(function(r,idx){
+        if (batchFmt2 === "timestamp") {
+          var sample = parseAsDate(r.time);
+          if (!sample || !t0L2) return {idx:idx, valid:false, time:null, od:parseFloat(r.od)};
+          return {idx:idx, time:(sample-t0L2)/3600000, od:parseFloat(r.od), valid:true};
+        }
+        var t = parseAsHours(r.time);
+        return {idx:idx, time:t, od:parseFloat(r.od), valid:t!=null};
+      });
+      var v2 = rowsP2.filter(function(p){return p.valid && isFinite(p.time) && isFinite(p.od) && p.od > 0;}).sort(function(a,c){return a.time-c.time;});
+      var od02 = v2.length ? v2[0].od : null;
+      var enr2 = v2.map(function(p){return {idx:p.idx, time:p.time, od:p.od, lnRatio:od02>0?Math.log(p.od/od02):null};});
+      b.rows.forEach(function(r,idx){
+        var e2 = enr2.find(function(x){return x.idx===idx;});
+        var enrI = enr2.findIndex(function(x){return x.idx===idx;});
+        var inW = false;
+        if (b.manualSelection) inW = b.manualSelection.indexOf(enrI) >= 0;
+        lines.push([
+          idx+1,
+          "\""+(r.time||"")+"\"",
+          "\""+(r.od||"")+"\"",
+          "\""+(r.glucose||"")+"\"",
+          "\""+(r.weight||"")+"\"",
+          e2?e2.time.toFixed(3):"",
+          e2 && e2.lnRatio!=null ? e2.lnRatio.toFixed(4) : "",
+          inW?"yes":""
+        ].join(","));
+      });
+    });
+    var csv = lines.join("\n");
+    var blob = new Blob([csv], {type:"text/csv;charset=utf-8;"});
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url; a.download = "growth_rate_batches.csv";
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  var renderReview = <div>
+    {/* Banner */}
+    <div style={{background:"#edf9fb",borderRadius:14,padding:"12px 16px",marginBottom:"1rem",border:"1px solid #d9eef2"}}>
+      <p style={{margin:0,fontSize:13,color:"#0f5c4d",lineHeight:1.5}}>Summary of all batches. The active batch is highlighted. Export CSV captures every batch with full per-row data and method metadata. {instructor && "Toggle Instructor mode for the math derivation and derivatives panel."}</p>
+    </div>
+
+    {/* Multi-batch summary table */}
+    <div style={{background:"#fff",borderRadius:10,border:"1px solid "+BORDER,marginBottom:14,overflow:"hidden",boxShadow:"0 2px 8px rgba(11,42,111,0.04)"}}>
+      <div style={{padding:"10px 16px",background:"#fafafa",borderBottom:"1px solid #e5e5ea",fontSize:11,fontWeight:700,color:NAVY,textTransform:"uppercase",letterSpacing:0.5,display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}}>
+        <span>Batch summary ({batches.length} batch{batches.length===1?"":"es"})</span>
+        <span style={{fontSize:9,color:"#8e9bb5",fontWeight:500,textTransform:"none",letterSpacing:0,fontStyle:"italic"}}>click any row to make it the active batch</span>
+      </div>
+      <div style={{overflowX:"auto"}}>
+        <table style={{borderCollapse:"collapse",width:"100%",minWidth:1080,fontSize:11}}>
+          <thead>
+            <tr>
+              <th style={{padding:"8px 10px",fontSize:9,fontWeight:700,color:"#6e6e73",textTransform:"uppercase",letterSpacing:0.4,textAlign:"left",borderBottom:"2px solid #d8dfeb",background:"#fafafa",position:"sticky",top:0}}>Batch</th>
+              <th style={{padding:"8px 10px",fontSize:9,fontWeight:700,color:"#6e6e73",textTransform:"uppercase",letterSpacing:0.4,textAlign:"left",borderBottom:"2px solid #d8dfeb",background:"#fafafa"}}>ID</th>
+              <th style={{padding:"8px 10px",fontSize:9,fontWeight:700,color:"#6e6e73",textTransform:"uppercase",letterSpacing:0.4,textAlign:"left",borderBottom:"2px solid #d8dfeb",background:"#fafafa"}}>Run</th>
+              <th style={{padding:"8px 10px",fontSize:9,fontWeight:700,color:"#6e6e73",textTransform:"uppercase",letterSpacing:0.4,textAlign:"left",borderBottom:"2px solid #d8dfeb",background:"#fafafa"}}>Cell</th>
+              <th style={{padding:"8px 10px",fontSize:9,fontWeight:700,color:NAVY,textTransform:"uppercase",letterSpacing:0.4,textAlign:"right",borderBottom:"2px solid #d8dfeb",background:"#fafafa"}}>Growth Rate (1/h)</th>
+              <th style={{padding:"8px 10px",fontSize:9,fontWeight:700,color:"#6e6e73",textTransform:"uppercase",letterSpacing:0.4,textAlign:"right",borderBottom:"2px solid #d8dfeb",background:"#fafafa"}}>± 95% CI</th>
+              <th style={{padding:"8px 10px",fontSize:9,fontWeight:700,color:"#6e6e73",textTransform:"uppercase",letterSpacing:0.4,textAlign:"right",borderBottom:"2px solid #d8dfeb",background:"#fafafa"}}>R²</th>
+              <th style={{padding:"8px 10px",fontSize:9,fontWeight:700,color:"#6e6e73",textTransform:"uppercase",letterSpacing:0.4,textAlign:"right",borderBottom:"2px solid #d8dfeb",background:"#fafafa"}}>Doubling (h)</th>
+              <th style={{padding:"8px 10px",fontSize:9,fontWeight:700,color:"#1b7f6a",textTransform:"uppercase",letterSpacing:0.4,textAlign:"right",borderBottom:"2px solid #d8dfeb",background:"#fafafa"}}>Lag Duration (h)</th>
+              <th style={{padding:"8px 10px",fontSize:9,fontWeight:700,color:"#1b7f6a",textTransform:"uppercase",letterSpacing:0.4,textAlign:"right",borderBottom:"2px solid #d8dfeb",background:"#fafafa"}}>Lag End (h)</th>
+              <th style={{padding:"8px 10px",fontSize:9,fontWeight:700,color:"#bf7a1a",textTransform:"uppercase",letterSpacing:0.4,textAlign:"right",borderBottom:"2px solid #d8dfeb",background:"#fafafa"}}>Exp Duration (h)</th>
+              <th style={{padding:"8px 10px",fontSize:9,fontWeight:700,color:"#bf7a1a",textTransform:"uppercase",letterSpacing:0.4,textAlign:"right",borderBottom:"2px solid #d8dfeb",background:"#fafafa"}}>Exp End (h)</th>
+              <th style={{padding:"8px 10px",fontSize:9,fontWeight:700,color:"#6e6e73",textTransform:"uppercase",letterSpacing:0.4,textAlign:"center",borderBottom:"2px solid #d8dfeb",background:"#fafafa"}}>n</th>
+              <th style={{padding:"8px 10px",fontSize:9,fontWeight:700,color:"#6e6e73",textTransform:"uppercase",letterSpacing:0.4,textAlign:"left",borderBottom:"2px solid #d8dfeb",background:"#fafafa"}}>Method</th>
+            </tr>
+          </thead>
+          <tbody>
+            {allBatchSummaries.map(function(s){
+              var b = s.batch;
+              var isActive = b.id === activeIdResolved;
+              return <tr key={b.id} onClick={function(){setActiveId(b.id);}}
+                onMouseEnter={!isActive ? function(e){e.currentTarget.style.background = "rgba(11,42,111,0.03)";} : undefined}
+                onMouseLeave={!isActive ? function(e){e.currentTarget.style.background = "transparent";} : undefined}
+                style={{cursor:"pointer",background:isActive?"rgba(11,42,111,0.06)":"transparent"}}>
+                <td style={{padding:"10px 10px",borderBottom:"1px solid #f0f0f3",fontWeight:isActive?700:600,color:isActive?NAVY:"#30437a",whiteSpace:"nowrap"}}>
+                  {isActive && <span style={{display:"inline-block",width:6,height:6,borderRadius:"50%",background:NAVY,marginRight:6}} />}
+                  {b.name}
+                </td>
+                <td style={{padding:"10px 10px",borderBottom:"1px solid #f0f0f3",color:"#5a6984",fontFamily:"monospace",fontSize:10,whiteSpace:"nowrap"}}>{b.metadata.batchId || "—"}</td>
+                <td style={{padding:"10px 10px",borderBottom:"1px solid #f0f0f3",color:"#5a6984",fontSize:10,whiteSpace:"nowrap"}}>{b.metadata.runType || "—"}</td>
+                <td style={{padding:"10px 10px",borderBottom:"1px solid #f0f0f3",color:"#5a6984",fontSize:10,whiteSpace:"nowrap"}}>{b.metadata.cellType || "—"}</td>
+                <td style={{padding:"10px 10px",borderBottom:"1px solid #f0f0f3",fontFamily:"system-ui",fontWeight:800,color:NAVY,textAlign:"right",fontSize:13}}>{s.mu != null ? s.mu.toFixed(4) : "—"}</td>
+                <td style={{padding:"10px 10px",borderBottom:"1px solid #f0f0f3",fontFamily:"monospace",color:"#8e9bb5",textAlign:"right"}}>{s.ciHalf != null ? "± "+s.ciHalf.toFixed(4) : "—"}</td>
+                <td style={{padding:"10px 10px",borderBottom:"1px solid #f0f0f3",fontFamily:"monospace",color:"#5a6984",textAlign:"right"}}>{s.r2 != null ? s.r2.toFixed(4) : "—"}</td>
+                <td style={{padding:"10px 10px",borderBottom:"1px solid #f0f0f3",fontFamily:"monospace",color:"#5a6984",textAlign:"right"}}>{s.doublingTime != null ? s.doublingTime.toFixed(2) : "—"}</td>
+                <td style={{padding:"10px 10px",borderBottom:"1px solid #f0f0f3",fontFamily:"monospace",color:"#1b7f6a",fontWeight:700,textAlign:"right"}}>{s.lagEndTime != null ? s.lagEndTime.toFixed(2) : "—"}</td>
+                <td style={{padding:"10px 10px",borderBottom:"1px solid #f0f0f3",fontFamily:"monospace",color:"#1b7f6a",textAlign:"right",opacity:0.85}}>{s.lagEndTime != null ? s.lagEndTime.toFixed(2) : "—"}</td>
+                <td style={{padding:"10px 10px",borderBottom:"1px solid #f0f0f3",fontFamily:"monospace",color:"#bf7a1a",fontWeight:700,textAlign:"right"}}>{s.expDuration != null ? s.expDuration.toFixed(2) : "—"}</td>
+                <td style={{padding:"10px 10px",borderBottom:"1px solid #f0f0f3",fontFamily:"monospace",color:"#bf7a1a",textAlign:"right",opacity:0.85}}>{s.expEndTime != null ? s.expEndTime.toFixed(2) : "—"}</td>
+                <td style={{padding:"10px 10px",borderBottom:"1px solid #f0f0f3",textAlign:"center",fontFamily:"monospace",color:"#8e9bb5"}}>{s.n || "—"}</td>
+                <td style={{padding:"10px 10px",borderBottom:"1px solid #f0f0f3",fontSize:10,color:"#5a6984",whiteSpace:"nowrap"}}>{s.methodLabel}</td>
+              </tr>;
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    {/* Notes panel for active batch (if any) */}
+    {batch.metadata.notes && batch.metadata.notes.trim() && <div style={{background:"#fafbfd",borderRadius:10,border:"1px solid "+BORDER,padding:"12px 14px",marginBottom:14}}>
+      <div style={{fontSize:10,fontWeight:700,color:NAVY,textTransform:"uppercase",letterSpacing:0.5,marginBottom:5}}>Notes — {batch.name}</div>
+      <div style={{fontSize:11,color:"#5a6984",lineHeight:1.5,whiteSpace:"pre-wrap"}}>{batch.metadata.notes}</div>
+    </div>}
+
+    {renderMathReminder}
+
+    <div style={{display:"flex",gap:8,justifyContent:"space-between",marginTop:18,flexWrap:"wrap"}}>
+      <button onClick={function(){setStep(2);}}
+        onMouseEnter={function(e){e.currentTarget.style.borderColor = NAVY; e.currentTarget.style.color = NAVY;}}
+        onMouseLeave={function(e){e.currentTarget.style.borderColor = "#d8dfeb"; e.currentTarget.style.color = "#30437a";}}
+        style={{background:"#fff",color:"#30437a",border:"1px solid #d8dfeb",padding:"9px 18px",borderRadius:10,fontWeight:600,fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>← Back to Analysis</button>
+      <button onClick={doExport}
+        onMouseEnter={function(e){e.currentTarget.style.boxShadow = "0 6px 18px rgba(27,127,106,0.20)"; e.currentTarget.style.transform = "translateY(-1px)";}}
+        onMouseLeave={function(e){e.currentTarget.style.boxShadow = "0 4px 14px rgba(27,127,106,0.12)"; e.currentTarget.style.transform = "translateY(0)";}}
+        style={{background:"linear-gradient(135deg,#1b7f6a,#3478F6)",color:"#fff",border:"none",padding:"9px 22px",borderRadius:10,fontWeight:700,fontSize:12,cursor:"pointer",fontFamily:"inherit",boxShadow:"0 4px 14px rgba(27,127,106,0.12)"}}>Export CSV (all batches)</button>
+    </div>
+  </div>;
+
+  return <div style={{background:"#fff",borderRadius:14,border:"1px solid "+BORDER,padding:"1.25rem",boxShadow:SHADOW}}>
+    <div style={{marginBottom:14,paddingBottom:12,borderBottom:"1px solid "+BORDER}}>
+      <h4 style={{fontSize:16,fontWeight:800,margin:"0 0 4px 0",color:NAVY,letterSpacing:-0.2}}>Specific Growth Rate (µ) Calculator</h4>
+      <p style={{fontSize:12,color:"#6e6e73",margin:0,lineHeight:1.55}}>Computes µ from at-line OD samples by fitting ln(OD/OD₀) vs time. Auto-detects exponential phase, lag end, and exp-phase end. Each batch is independent.{instructor && " Instructor mode shows the math derivation and the derivatives panel used to find phase boundaries."}</p>
+    </div>
+
+    {renderBatchTabs}
+    {renderStepIndicator}
+
+    {step === 0 && renderSetup}
+    {step === 1 && renderDataEntry}
+    {step === 2 && renderAnalysis}
+    {step === 3 && renderReview}
+  </div>;
+}
+
+
+
+// Method Review Summary card.
+// Compact per-component verdict table at the top of Method Review tab. Each row reports the
+// status of one validation component (SST, linearity, spike recovery, robot QC) with a colored
+// badge and the most relevant single number. Clicking a row scrolls to the corresponding
+// detailed card below (which auto-opens if status is fail/caution).
+//
+// Verdict logic:
+//   SST: count standards passing back-fit within ±15% (or ±20% at LLOQ) — pass if ≥75%.
+//   Linearity: pass if R² ≥ 0.99 across all plates; caution 0.95-0.99; fail < 0.95.
+//   Spike recovery: pass = all recoveries 80-120%; fail = any outside; N/A = not configured.
+//   Robot QC: opt-in; status "not enabled" until user toggles inside the card.
+//
+// Verdicts here are computed inline (not lifted from the cards) for simplicity. Logic should
+// match what the cards report — if they ever drift, the summary is the canonical view.
+function MethodReviewSummary(props) {
+  var res = props.res;
+  if (!res || !res.length) return null;
+  var unit = props.unit;
+  var spikeRecovery = props.spikeRecovery;  // runQC() result, or null
+  var robotQCEnabled = !!props.robotQCEnabled;
+  var robotQCStatus = props.robotQCStatus || null;  // "pass"|"caution"|"fail"|null
+  var onRowClick = props.onRowClick || function(){};
+
+  // ── SST verdict: per-plate back-fit accuracy ─────────────────────
+  // Conventional rule: ≥75% of standards must fall within ±15% nominal (±20% at LLOQ).
+  var sstVerdict = (function(){
+    var plateOutcomes = res.map(function(p){
+      if (!p.sc || !p.sc.pts || !p.sc.pts.length || !p.iFn) return null;
+      var pts = p.sc.pts.slice().sort(function(a,b){return a.conc - b.conc;});
+      var n = pts.length;
+      var passCount = 0, evalCount = 0;
+      pts.forEach(function(pt, idx){
+        if (pt.conc <= 0 || pt.avg == null) return;
+        var measured = p.iFn(pt.avg);
+        if (measured == null || !isFinite(measured)) return;
+        var pctNom = (measured / pt.conc) * 100;
+        var isLLOQ = idx === 0;
+        var lo = isLLOQ ? 80 : 85;
+        var hi = isLLOQ ? 120 : 115;
+        evalCount++;
+        if (pctNom >= lo && pctNom <= hi) passCount++;
+      });
+      return {n:n, passCount:passCount, evalCount:evalCount};
+    }).filter(function(o){return o!=null;});
+    if (!plateOutcomes.length) return {status:"na", text:"No standard curve fitted"};
+    var totalPass = plateOutcomes.reduce(function(s,o){return s+o.passCount;}, 0);
+    var totalEval = plateOutcomes.reduce(function(s,o){return s+o.evalCount;}, 0);
+    if (totalEval === 0) return {status:"na", text:"No evaluable standards"};
+    var passFrac = totalPass / totalEval;
+    var status = passFrac >= 0.75 ? "pass" : (passFrac >= 0.5 ? "caution" : "fail");
+    return {status:status, text:totalPass + "/" + totalEval + " standards within ±15%"};
+  })();
+
+  // ── Linearity verdict: minimum R² across plates ──────────────────
+  var linVerdict = (function(){
+    var r2s = res.map(function(p){return p.sc && p.sc.r2 != null ? p.sc.r2 : null;}).filter(function(v){return v!=null;});
+    if (!r2s.length) return {status:"na", text:"No fit available"};
+    var minR2 = Math.min.apply(null, r2s);
+    var status = minR2 >= 0.99 ? "pass" : (minR2 >= 0.95 ? "caution" : "fail");
+    var text = res.length>1 ? "min R² = " + minR2.toFixed(4) + " across " + res.length + " plates" : "R² = " + minR2.toFixed(4);
+    return {status:status, text:text};
+  })();
+
+  // ── Spike recovery verdict ───────────────────────────────────────
+  var spikeVerdict = (function(){
+    if (!spikeRecovery) return {status:"na", text:"No spike sets configured"};
+    if (spikeRecovery.status === "no-data") return {status:"na", text:spikeRecovery.nSets + " set" + (spikeRecovery.nSets===1?"":"s") + ", recovery not computed"};
+    if (spikeRecovery.status === "pass") return {status:"pass", text:"All " + spikeRecovery.nWithRec + " set" + (spikeRecovery.nWithRec===1?"":"s") + " within 80–120% (mean " + spikeRecovery.meanR.toFixed(0) + "%)"};
+    if (spikeRecovery.status === "fail") return {status:"fail", text:"All " + spikeRecovery.nWithRec + " set" + (spikeRecovery.nWithRec===1?"":"s") + " outside 80–120% (mean " + spikeRecovery.meanR.toFixed(0) + "%)"};
+    if (spikeRecovery.status === "mixed") return {status:"caution", text:spikeRecovery.nWithRec + " set" + (spikeRecovery.nWithRec===1?"":"s") + ", recoveries " + spikeRecovery.minR.toFixed(0) + "–" + spikeRecovery.maxR.toFixed(0) + "%"};
+    return {status:"na", text:"—"};
+  })();
+
+  // ── Robot QC verdict ─────────────────────────────────────────────
+  var robotVerdict = (function(){
+    if (!robotQCEnabled) return {status:"na", text:"Not enabled — click to set up"};
+    return {status:"na", text:"Enabled — see details below"};
+  })();
+
+  // ── Render helpers ───────────────────────────────────────────────
+  var statusColor = function(s){
+    if (s === "pass") return {bg:"#e8f5ea", border:"#8fc4a1", text:"#1b5a4d", icon:"✓", label:"pass"};
+    if (s === "caution") return {bg:"#fff6e8", border:"#d4a76a", text:"#8a6420", icon:"⚠", label:"caution"};
+    if (s === "fail") return {bg:"#ffeaed", border:"#d98a8f", text:"#7a2620", icon:"✗", label:"fail"};
+    return {bg:"#f4f4f6", border:"#d8dfeb", text:"#6e6e73", icon:"–", label:"n/a"};
+  };
+
+  var rows = [
+    {key:"sst", label:"System suitability", verdict:sstVerdict, anchor:"mr-sst"},
+    {key:"linearity", label:"Linearity & range", verdict:linVerdict, anchor:"mr-mvc"},
+    {key:"spike", label:"Spike recovery", verdict:spikeVerdict, anchor:"mr-spike"},
+    {key:"robot", label:"Robot QC", verdict:robotVerdict, anchor:"mr-robot"}
+  ];
+
+  var thS = {padding:"7px 12px",fontSize:10,fontWeight:700,color:"#30437a",textTransform:"uppercase",letterSpacing:0.4,textAlign:"left",borderBottom:"2px solid #d8dfeb",background:"#fafafa"};
+  var tdS = {padding:"10px 12px",fontSize:12,color:"#1d1d1f",borderBottom:"1px solid #f0f0f3"};
+
+  return <div style={{background:"#fff",borderRadius:14,border:"1px solid #e5e5ea",padding:"1.25rem",marginBottom:"1.25rem"}}>
+    <div style={{marginBottom:"0.85rem"}}>
+      <h4 style={{fontSize:14,fontWeight:700,margin:"0 0 4px 0",color:"#30437a"}}>Method validation summary</h4>
+      <p style={{fontSize:11,color:"#6e6e73",margin:0,lineHeight:1.55}}>Per-component verdicts. Click any row to jump to its full details below. Failures and cautions auto-expand.</p>
+    </div>
+    <div style={{overflowX:"auto"}}>
+      <table style={{width:"100%",borderCollapse:"collapse"}}>
+        <thead><tr>
+          <th style={thS}>Component</th>
+          <th style={thS}>Status</th>
+          <th style={thS}>Detail</th>
+          <th style={Object.assign({},thS,{textAlign:"right"})}></th>
+        </tr></thead>
+        <tbody>
+          {rows.map(function(r){
+            var sc = statusColor(r.verdict.status);
+            return <tr key={r.key} onClick={function(){onRowClick(r.anchor);}} style={{cursor:"pointer"}}>
+              <td style={Object.assign({},tdS,{fontWeight:700})}>{r.label}</td>
+              <td style={tdS}>
+                <span style={{display:"inline-flex",alignItems:"center",gap:5,fontSize:11,fontWeight:700,padding:"3px 9px",background:sc.bg,border:"1px solid "+sc.border,color:sc.text,borderRadius:12}}>
+                  <span>{sc.icon}</span>
+                  <span style={{textTransform:"uppercase",letterSpacing:0.3}}>{sc.label}</span>
+                </span>
+              </td>
+              <td style={Object.assign({},tdS,{color:"#5a6984"})}>{r.verdict.text}</td>
+              <td style={Object.assign({},tdS,{textAlign:"right",color:"#3478F6",fontSize:11,fontStyle:"italic",fontWeight:600})}>jump to details ↓</td>
+            </tr>;
+          })}
+        </tbody>
+      </table>
+    </div>
+  </div>;
+}
+
 // Robot QC: Replicate Reproducibility card.
 // Treats EACH selected sample as its own dilution series. For each sample independently:
 //   - Builds (response, 1/DF) points — same form as the standard curve.
@@ -3691,7 +6202,11 @@ function RobotQCCard(props) {
   // Gate: this analysis only applies to robot-validation experiments where samples are theoretical
   // replicates from one stock. Default off so the card doesn't auto-run on regular analytical runs
   // (where the slope-CV interpretation would be misleading).
-  var _enabled = useState(false), enabled = _enabled[0], setEnabled = _enabled[1];
+  // Controlled mode: if parent passes enabled + setEnabled, the card uses those (so summary row
+  // "click to enable" can toggle this state). Otherwise fall back to local state.
+  var _enabledLocal = useState(false), enabledLocal = _enabledLocal[0], setEnabledLocal = _enabledLocal[1];
+  var enabled = props.enabled != null ? props.enabled : enabledLocal;
+  var setEnabled = props.setEnabled || setEnabledLocal;
 
   // Dropdown picker open state — replaces the wall-of-checkboxes UI for runs with many samples.
   var _pickerOpen = useState(false), pickerOpen = _pickerOpen[0], setPickerOpen = _pickerOpen[1];
@@ -6766,7 +9281,7 @@ function ValidationDesignerEntry(props) {
 }
 
 
-export default function App() {
+function App() {
   var _s=useState(false),on=_s[0],setOn=_s[1];
   var _t=useState(0),tab=_t[0],setTab=_t[1];
   var _ae=useState(""),analyzeError=_ae[0],setAnalyzeError=_ae[1];
@@ -6810,6 +9325,56 @@ export default function App() {
   // Toggle for drawing solid horizontal lines between plates in flat-listed result tables (multi-plate runs only).
   // Makes it easier to visually scan where one plate's samples end and another's begin. Default ON.
   var _showPlateSep = useState(true), showPlateSeparators = _showPlateSep[0], setShowPlateSeparators = _showPlateSep[1];
+  // Robot QC opt-in: lifted from inside RobotQCCard so the Method Review summary can read it and
+  // expose a "click to enable" affordance on the summary row. Default OFF.
+  var _robotQCEnabled = useState(false), robotQCEnabled = _robotQCEnabled[0], setRobotQCEnabled = _robotQCEnabled[1];
+  // Per-card open state for Method Review collapsible details. Initial values get set from
+  // verdict logic when results first appear; user can toggle freely after that.
+  var _openCards = useState({sst:false, mvc:false, robot:false}), openCards = _openCards[0], setOpenCards = _openCards[1];
+  // ── Bio Tools: Specific Growth Rate (µ) Calculator state ────────────────────────
+  // Multi-batch design: each batch has its own metadata, time mode, rows, and method choice.
+  // Batches are independent; tabs at the top of the calculator switch between them.
+  // No comparison table — users compare visually via tab switching, or via CSV export.
+  var _btBatches = useState([{
+    id: "batch-"+Date.now(),
+    name: "Batch 1",
+    metadata: {batchId:"", runType:"", cellType:"", notes:""},
+    rows: [{time:"", od:"", glucose:"", weight:""}, {time:"", od:"", glucose:"", weight:""}, {time:"", od:"", glucose:"", weight:""}, {time:"", od:"", glucose:"", weight:""}, {time:"", od:"", glucose:"", weight:""}],
+    autoMethod: "peak_rate",
+    manualSelection: null,
+    metadataOpen: false
+  }]), btBatches = _btBatches[0], setBtBatches = _btBatches[1];
+  var _btActiveId = useState(null), btActiveId = _btActiveId[0], setBtActiveId = _btActiveId[1];
+  // Current step in the calculator's multi-step flow (Setup → Data Entry → Analysis → Review)
+  var _btStep = useState(0), btStep = _btStep[0], setBtStep = _btStep[1];
+  // When res becomes available (or changes), auto-set the initial open states from verdicts.
+  // The user can manually toggle after this initial set; subsequent re-renders won't override
+  // their choice since this effect only fires on res reference changes.
+  useEffect(function(){
+    if (!res || !res.length) return;
+    // Compute verdicts inline (lightweight)
+    var sstPass = 0, sstEval = 0;
+    res.forEach(function(p){
+      if (!p.sc || !p.sc.pts || !p.sc.pts.length || !p.iFn) return;
+      var pts = p.sc.pts.slice().sort(function(a,b){return a.conc - b.conc;});
+      pts.forEach(function(pt, idx){
+        if (pt.conc <= 0 || pt.avg == null) return;
+        var measured = p.iFn(pt.avg);
+        if (measured == null || !isFinite(measured)) return;
+        var pctNom = (measured / pt.conc) * 100;
+        var isLLOQ = idx === 0;
+        var lo = isLLOQ ? 80 : 85;
+        var hi = isLLOQ ? 120 : 115;
+        sstEval++;
+        if (pctNom >= lo && pctNom <= hi) sstPass++;
+      });
+    });
+    var sstOK = sstEval > 0 && (sstPass / sstEval) >= 0.75;
+    var r2s = res.map(function(p){return p.sc && p.sc.r2 != null ? p.sc.r2 : null;}).filter(function(v){return v!=null;});
+    var minR2 = r2s.length ? Math.min.apply(null, r2s) : 0;
+    var linOK = minR2 >= 0.99;
+    setOpenCards({sst:!sstOK, mvc:!linOK, robot:false});
+  }, [res]);
   // Sync display units when input unit changes (e.g. user switches from mg/mL to ng/mL in General Info)
   useEffect(function(){ setDisplayUnitChart(unit); setDisplayUnitResults(unit); }, [unit]);
   // Dilution display format: "ratio" (default, "1:N") or "factor" ("N×"). Affects landing-page series previews
@@ -8015,13 +10580,12 @@ export default function App() {
     <div style={{padding:"1.25rem 0 2.5rem",maxWidth:1060}}>
       <div style={{background:"linear-gradient(180deg,#f4f9fd,#eef5fb)",border:"1px solid "+BORDER,borderRadius:20,marginBottom:"1rem",boxShadow:SHADOW,overflow:"hidden"}}>
         <PageHeader instructor={instructor} setInstructor={setInstructor} large={true} />
-        <div style={{padding:"6px 20px 16px",fontSize:14,color:"#5a6984",fontStyle:"italic"}}>Curve, qualify, validate.</div>
       </div>
       <div style={{background:"linear-gradient(180deg,#ffffff,#fbfdff)",borderRadius:24,border:"1px solid "+BORDER,padding:"1.5rem",boxShadow:"0 18px 44px rgba(11,42,111,0.08)",marginBottom:"1.25rem"}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,marginBottom:"1rem",flexWrap:"wrap"}}>
           <div>
             <div style={{fontSize:21,fontWeight:800,color:"#18233f",marginBottom:5}}>Assay setup</div>
-            <div style={{fontSize:13,color:"#6f7fa0"}}>{cfg.layout==="autosampler"?"Vial-based assay (LC-MS, intact mass, LC quant).":"Plate-based assay — pick plate count and replicate layout."}</div>
+            <div style={{fontSize:13,color:"#6f7fa0"}}>{cfg.layout==="autosampler"?"Vials and injections — each row in your data is one injection.":"Pick your format, plate count, and replicate layout."}</div>
           </div>
         </div>
         {/* ── Step 1: Assay mode toggle ──
@@ -8543,7 +11107,7 @@ export default function App() {
   );
 
   return (
-    <div style={{padding:"1rem 0",maxWidth:1040}}>
+      <div style={{padding:"1rem 0",maxWidth:1040}}>
       <div style={{background:"linear-gradient(180deg,#f4f9fd,#eef5fb)",border:"1px solid "+BORDER,borderRadius:20,marginBottom:"1rem",boxShadow:SHADOW,overflow:"hidden"}}>
         <PageHeader instructor={instructor} setInstructor={setInstructor} onReset={reset} onSecretTap={htc} />
       </div>
@@ -10359,26 +12923,32 @@ export default function App() {
           var lloq = deFactoLLOQs[r.plateIdx];
           return lloq != null && r.analystConc != null && r.analystConc < lloq;
         }).length;
+        var spikeQCResult = runQC();
+        // Click handler for summary rows — opens the corresponding details card via state
+        // (so React stays in sync) and scrolls to it.
+        var jumpToCard = function(anchor){
+          var stateKey = anchor === "mr-sst" ? "sst" : (anchor === "mr-mvc" ? "mvc" : (anchor === "mr-robot" ? "robot" : null));
+          if (stateKey) {
+            var n = Object.assign({}, openCards);
+            n[stateKey] = true;
+            setOpenCards(n);
+          }
+          // Scroll on next tick so the details has time to expand
+          setTimeout(function(){
+            var el = document.getElementById(anchor);
+            if (el) el.scrollIntoView({behavior:"smooth", block:"start"});
+          }, 50);
+        };
+
         return (<div>
           <div style={{marginBottom:"1.25rem"}}>
             <h3 style={{fontSize:18,fontWeight:800,color:"#0b2a6f",marginBottom:4}}>Method Review</h3>
-            <p style={{fontSize:13,color:"#6e6e73",margin:0,lineHeight:1.6}}>Run-level QC, validation parameters, and strategy comparison. Active strategy: <strong style={{color:"#0b2a6f"}}>{SM.find(function(m){return m.id===sm;}).name}</strong>.{instructor ? " Compare strategies below." : " Toggle Instructor mode to compare strategies."}</p>
+            <p style={{fontSize:13,color:"#6e6e73",margin:0,lineHeight:1.6}}>Reportable results at the top, validation breakdown below. Active strategy: <strong style={{color:"#0b2a6f"}}>{SM.find(function(m){return m.id===sm;}).name}</strong>.{instructor ? " Compare strategies further down the page." : " Toggle Instructor mode to compare strategies."}</p>
           </div>
 
-          {/* System Suitability + Standard Curve Quality — moved here from Results in v5cj */}
-          <SystemSuitabilityCard res={res} unit={unit} displayUnit={displayUnitResults} instructor={instructor} stdDisplayName={stdDisplayName} sstExpected={sstExpectedDict} setSSTExpected={setSSTExpected} sstFlags={sstFlagsDict} toggleSSTFlag={toggleSSTFlag} analystPickFor={analystPickFor} />
-
-          {/* ICH Q2(R2) Method Validation Parameters — moved here from Results in v5cj */}
-          <MethodValidationCard res={res} unit={unit} displayUnit={displayUnitResults} instructor={instructor} sstSamples={detectSSTSamples(res, sstFlagsDict)} sstExpected={sstExpectedDict} analystPickFor={analystPickFor} spikeRecovery={runQC()} />
-
-          {/* Robot QC: Replicate Reproducibility — added v5d3. Per-level CV across selected
-              "should-be-identical" samples reveals robot dispense reproducibility separately from
-              the assay/curve quality. Default selects all samples; user toggles as needed. */}
-          <RobotQCCard res={res} instructor={instructor} />
-
-          {/* Analyst summary: side-by-side concentrations (algorithm vs analyst), dilution as small gray subscript,
-              analyst column rendered in red when overridden. Per the v5bd spec — drop the dilution columns and
-              keep just the concentrations side-by-side, with disagreement signaled via red text on the analyst cell. */}
+          {/* === REPORTABLE: Reported concentrations table (moved to top of Method Review per v5d4 redesign).
+              Always visible. This is the deliverable — algorithm vs analyst picks for each sample, with
+              BLOQ flags, override badges, and CSV export. */}
           <div style={{background:"#fff",borderRadius:14,border:"1px solid #e5e5ea",padding:"1.25rem",marginBottom:"1.25rem"}}>
             <div style={{display:"flex",alignItems:"baseline",justifyContent:"space-between",gap:12,marginBottom:10,flexWrap:"wrap"}}>
               <h4 style={{fontSize:14,fontWeight:700,margin:0,color:"#30437a"}}>Reported concentrations</h4>
@@ -10408,16 +12978,11 @@ export default function App() {
                 </tr></thead>
                 <tbody>
                   {summaryRows.map(function(r,i){
-                    // Disagreement: row gets a faint pink wash; analyst-conc rendered in red.
-                    // BLOQ check: if a de-facto LLOQ exists for this plate AND the analyst's reported
-                    // concentration is below it, flag the row. The de-facto LLOQ is the lowest passing
-                    // calibrator standard; below that the curve doesn't reliably quantitate.
                     var rowBg = r.disagrees ? "rgba(180,51,46,0.07)" : "transparent";
                     var analystColor = r.disagrees ? "#b4332e" : "#0b2a6f";
                     var lloq = deFactoLLOQs[r.plateIdx];
                     var isBLOQ = lloq != null && r.analystConc != null && r.analystConc < lloq;
                     if (isBLOQ && !r.disagrees) rowBg = "rgba(154,106,0,0.07)";
-                    // Plate separator: solid line on top of row when previous row was a different plate
                     var prevPi = i>0 ? summaryRows[i-1].pi : null;
                     var isPlateBoundary = res.length>1 && showPlateSeparators && prevPi != null && prevPi !== r.pi;
                     var rowStyle = {background:rowBg};
@@ -10460,6 +13025,49 @@ export default function App() {
             </details>}
             <button onClick={doExport} style={{marginTop:12,background:"linear-gradient(135deg,#1b7f6a,#3478F6)",color:"#fff",border:"none",padding:"10px 24px",borderRadius:10,fontWeight:700,fontSize:13,cursor:"pointer"}}>Export CSV</button>
           </div>
+
+          {/* === VERDICT SUMMARY: Per-component statuses with click-to-expand. === */}
+          <MethodReviewSummary
+            res={res}
+            unit={unit}
+            spikeRecovery={spikeQCResult}
+            robotQCEnabled={robotQCEnabled}
+            onRowClick={function(anchor){
+              if (anchor === "mr-robot" && !robotQCEnabled) setRobotQCEnabled(true);
+              jumpToCard(anchor);
+            }}
+          />
+
+          {/* === DETAIL CARDS: each wrapped in <details> for collapsible behavior. ===
+              Auto-opened when verdict is fail or caution; closed when pass.
+              The id on each <details> matches the anchor on its summary row so click-to-jump works. */}
+
+          <details id="mr-sst" open={openCards.sst} onToggle={function(e){var n=Object.assign({},openCards);n.sst=e.target.open;setOpenCards(n);}} style={{marginBottom:"1.25rem"}}>
+            <summary style={{cursor:"pointer",padding:"10px 14px",background:"#f7faff",border:"1px solid #d7e7fb",borderRadius:10,fontSize:13,fontWeight:700,color:"#30437a",userSelect:"none"}}>System Suitability — full details</summary>
+            <div style={{marginTop:10}}>
+              <SystemSuitabilityCard res={res} unit={unit} displayUnit={displayUnitResults} instructor={instructor} stdDisplayName={stdDisplayName} sstExpected={sstExpectedDict} setSSTExpected={setSSTExpected} sstFlags={sstFlagsDict} toggleSSTFlag={toggleSSTFlag} analystPickFor={analystPickFor} />
+            </div>
+          </details>
+
+          <details id="mr-mvc" open={openCards.mvc} onToggle={function(e){var n=Object.assign({},openCards);n.mvc=e.target.open;setOpenCards(n);}} style={{marginBottom:"1.25rem"}}>
+            <summary style={{cursor:"pointer",padding:"10px 14px",background:"#f7faff",border:"1px solid #d7e7fb",borderRadius:10,fontSize:13,fontWeight:700,color:"#30437a",userSelect:"none"}}>ICH Q2(R2) Method Validation — full details</summary>
+            <div style={{marginTop:10}}>
+              <MethodValidationCard res={res} unit={unit} displayUnit={displayUnitResults} instructor={instructor} sstSamples={detectSSTSamples(res, sstFlagsDict)} sstExpected={sstExpectedDict} analystPickFor={analystPickFor} spikeRecovery={spikeQCResult} />
+            </div>
+          </details>
+
+          <details id="mr-robot" open={openCards.robot} onToggle={function(e){var n=Object.assign({},openCards);n.robot=e.target.open;setOpenCards(n);}} style={{marginBottom:"1.25rem"}}>
+            <summary style={{cursor:"pointer",padding:"10px 14px",background:"#f7faff",border:"1px solid #d7e7fb",borderRadius:10,fontSize:13,fontWeight:700,color:"#30437a",userSelect:"none"}}>Robot QC: Replicate Reproducibility — full details</summary>
+            <div style={{marginTop:10}}>
+              <RobotQCCard res={res} instructor={instructor} enabled={robotQCEnabled} setEnabled={setRobotQCEnabled} />
+            </div>
+          </details>
+
+          {/* Spike-recovery detail anchor (so summary can scroll to it). MVC card already shows the
+              recovery banner at the top of Results — no separate spike-detail card today. The anchor
+              just lands the user on the MVC card. */}
+          <div id="mr-spike"></div>
+
 
 
           {/* INSTRUCTOR-ONLY: full strategy comparison and statistical analysis */}
@@ -10679,44 +13287,63 @@ export default function App() {
             <line x1="7" y1="6" x2="15" y2="6" stroke="#fff" strokeWidth="1.2" strokeLinecap="round" opacity="0.6"/>
             <line x1="7" y1="16" x2="13" y2="16" stroke="#fff" strokeWidth="1.2" strokeLinecap="round" opacity="0.6"/>
           </svg>;
-          var tools = [
+          // Bio Tools icon: a flask + a small upward exponential-growth curve overlay. Suggests
+          // bench-side biology (flask) plus quantitative growth analysis.
+          var iconGrowth = <svg width="22" height="22" viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M9 2 L9 8 L5 17 Q5 19 7 19 L15 19 Q17 19 17 17 L13 8 L13 2" stroke="#fff" strokeWidth="1.4" fill="none" strokeLinejoin="round"/>
+            <line x1="8" y1="2" x2="14" y2="2" stroke="#fff" strokeWidth="1.6" strokeLinecap="round"/>
+            <path d="M6 16 Q9 13 11 11 Q14 8 16 5" stroke="#fff" strokeWidth="1.3" fill="none" strokeLinecap="round"/>
+            <circle cx="6" cy="16" r="0.9" fill="#fff"/>
+            <circle cx="11" cy="11" r="0.9" fill="#fff"/>
+            <circle cx="16" cy="5" r="0.9" fill="#fff"/>
+          </svg>;
+          var methodTools = [
             {id:"unit",  title:"Unit Converter",          desc:"Convert mg/mL ↔ ug/mL ↔ ng/mL etc.",  icon:iconConv,  color:"#0F8AA2"},
             {id:"spike", title:"Spike Recovery Planner",   desc:"Plan spike volumes and check expected recovery.", icon:iconSpike, color:"#6337b9"},
             {id:"elisa", title:"Dilution Planner",        desc:"Plan tube pre-dilutions and plate serial dilutions for any assay.", icon:iconElisa, color:"#BF7A1A"},
             {id:"validation", title:"Validation Designer", desc:"Design simple ICH Q2-aligned validation experiments — linearity, accuracy, precision, LLOQ, spike recovery.", icon:iconValidation, color:"#6337b9"},
           ];
+          var bioTools = [
+            {id:"growth_rate", title:"Specific Growth Rate (µ)", desc:"Compute µ, doubling time, lag/exp phase from at-line OD samples. Auto-detects exponential phase. Multi-batch.", icon:iconGrowth, color:"#1b7f6a"},
+          ];
+          var tools = methodTools.concat(bioTools);
           if(!selectedTool){
+            var renderTile = function(t){
+              var tileBase = {
+                background:"#fff",
+                border:"1px solid "+BORDER,
+                borderRadius:14,
+                padding:"18px 18px",
+                textAlign:"left",
+                cursor:t.disabled?"not-allowed":"pointer",
+                boxShadow:"0 4px 10px rgba(11,42,111,0.04)",
+                display:"flex",
+                gap:14,
+                alignItems:"center",
+                transition:"all 0.15s",
+                fontFamily:"inherit",
+                opacity:t.disabled?0.55:1,
+                position:"relative"
+              };
+              return <button key={t.id} disabled={t.disabled} onClick={t.disabled?undefined:function(){setSelectedTool(t.id);}} style={tileBase} onMouseEnter={t.disabled?undefined:function(e){e.currentTarget.style.borderColor=t.color;e.currentTarget.style.transform="translateY(-2px)";e.currentTarget.style.boxShadow="0 8px 18px rgba(11,42,111,0.08)";}} onMouseLeave={t.disabled?undefined:function(e){e.currentTarget.style.borderColor=BORDER;e.currentTarget.style.transform="translateY(0)";e.currentTarget.style.boxShadow="0 4px 10px rgba(11,42,111,0.04)";}}>
+                <div style={{width:46,height:46,borderRadius:12,background:t.color,color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>{t.icon}</div>
+                <div style={{minWidth:0,flex:1}}>
+                  <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:2}}>
+                    <span style={{fontSize:14,fontWeight:800,color:"#0b2a6f"}}>{t.title}</span>
+                    {t.comingSoon && <span style={{fontSize:9,fontWeight:700,padding:"2px 6px",borderRadius:4,background:"#fff7e0",color:"#8a6420",letterSpacing:0.4,textTransform:"uppercase"}}>Coming soon</span>}
+                  </div>
+                  <div style={{fontSize:12,color:"#6e6e73",lineHeight:1.4}}>{t.desc}</div>
+                </div>
+              </button>;
+            };
             return <div>
-              <div style={{fontSize:11,fontWeight:700,color:"#6e6e73",textTransform:"uppercase",letterSpacing:0.5,marginBottom:10}}>Choose a tool</div>
+              <div style={{fontSize:11,fontWeight:700,color:"#6e6e73",textTransform:"uppercase",letterSpacing:0.5,marginBottom:10}}>Method Tools</div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(260px, 1fr))",gap:12,marginBottom:"1.5rem"}}>
+                {methodTools.map(renderTile)}
+              </div>
+              <div style={{fontSize:11,fontWeight:700,color:"#6e6e73",textTransform:"uppercase",letterSpacing:0.5,marginBottom:10}}>Bio Tools <span style={{fontSize:9,fontWeight:600,padding:"2px 6px",borderRadius:4,background:"#e8f5ea",color:"#1b5a4d",marginLeft:4,letterSpacing:0.3,textTransform:"none"}}>cell culture · fermentation</span></div>
               <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(260px, 1fr))",gap:12,marginBottom:"1rem"}}>
-                {tools.map(function(t){
-                  var tileBase = {
-                    background:"#fff",
-                    border:"1px solid "+BORDER,
-                    borderRadius:14,
-                    padding:"18px 18px",
-                    textAlign:"left",
-                    cursor:t.disabled?"not-allowed":"pointer",
-                    boxShadow:"0 4px 10px rgba(11,42,111,0.04)",
-                    display:"flex",
-                    gap:14,
-                    alignItems:"center",
-                    transition:"all 0.15s",
-                    fontFamily:"inherit",
-                    opacity:t.disabled?0.55:1,
-                    position:"relative"
-                  };
-                  return <button key={t.id} disabled={t.disabled} onClick={t.disabled?undefined:function(){setSelectedTool(t.id);}} style={tileBase} onMouseEnter={t.disabled?undefined:function(e){e.currentTarget.style.borderColor=t.color;e.currentTarget.style.transform="translateY(-2px)";e.currentTarget.style.boxShadow="0 8px 18px rgba(11,42,111,0.08)";}} onMouseLeave={t.disabled?undefined:function(e){e.currentTarget.style.borderColor=BORDER;e.currentTarget.style.transform="translateY(0)";e.currentTarget.style.boxShadow="0 4px 10px rgba(11,42,111,0.04)";}}>
-                    <div style={{width:46,height:46,borderRadius:12,background:t.color,color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>{t.icon}</div>
-                    <div style={{minWidth:0,flex:1}}>
-                      <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:2}}>
-                        <span style={{fontSize:14,fontWeight:800,color:"#0b2a6f"}}>{t.title}</span>
-                        {t.comingSoon && <span style={{fontSize:9,fontWeight:700,padding:"2px 6px",borderRadius:4,background:"#fff7e0",color:"#8a6420",letterSpacing:0.4,textTransform:"uppercase"}}>Coming soon</span>}
-                      </div>
-                      <div style={{fontSize:12,color:"#6e6e73",lineHeight:1.4}}>{t.desc}</div>
-                    </div>
-                  </button>;
-                })}
+                {bioTools.map(renderTile)}
               </div>
             </div>;
           }
@@ -10736,11 +13363,24 @@ export default function App() {
               setTab(0);
             }} />}
             {selectedTool==="validation" && <ValidationDesignerEntry instructor={instructor} unit={unit} />}
+            {selectedTool==="growth_rate" && <GrowthRateCalculatorCard batches={btBatches} setBatches={setBtBatches} activeId={btActiveId} setActiveId={setBtActiveId} instructor={instructor} step={btStep} setStep={setBtStep} />}
           </div>;
         })()}
       </div>)}
 
       {tab===5&&dbg&&res&&(<div><h3 style={{fontSize:16,fontWeight:800,color:"#a05a00"}}>Debug</h3>{res.map(function(pp,pi){return <div key={pi} style={{marginBottom:"2rem"}}><h4 style={{fontSize:13,fontWeight:700}}>Plate {pi+1} | Blank: {fm4(pp.bA)}</h4><details><summary style={{fontSize:12,cursor:"pointer",color:"#6e6e73"}}>Standard</summary><table style={{borderCollapse:"collapse",width:"100%",marginTop:6,fontSize:10,fontFamily:"monospace"}}><thead><tr>{["Row","Conc","Raw","Blank","Corr","Avg","SD","CV (%)"].map(function(h){return <th key={h} style={thS}>{h}</th>;})}</tr></thead><tbody>{(pp.dbS||[]).map(function(d,i){return <tr key={i}><td style={tdS}>{d.row}</td><td style={tdS}>{sig3(d.conc)}</td><td style={tdS}>{d.raw.map(function(v){return v.toFixed(3);}).join(", ")}</td><td style={tdS}>{fm4(d.blank)}</td><td style={tdS}>{d.cor.map(function(v){return v.toFixed(4);}).join(", ")}</td><td style={tdS}>{fm4(d.avg)}</td><td style={tdS}>{fm4(d.sd)}</td><td style={tdS}><CVB val={d.cv} /></td></tr>;})}</tbody></table></details>{pp.samps.map(function(s,si){return <details key={si} style={{marginBottom:6}}><summary style={{fontSize:12,cursor:"pointer",color:"#6e6e73"}}>{s.name}</summary><table style={{borderCollapse:"collapse",width:"100%",marginTop:6,fontSize:10,fontFamily:"monospace"}}><thead><tr>{["Dil","Raw","Blank","Corr","Avg","CV (%)","IR","Well","DilF","Smp"].map(function(h){return <th key={h} style={thS}>{h}</th>;})}</tr></thead><tbody>{(s.dbD||[]).map(function(d,i){return <tr key={i}><td style={tdS}>{d.di}</td><td style={tdS}>{d.raw.map(function(v){return v.toFixed(3);}).join(", ")}</td><td style={tdS}>{fm4(d.blank)}</td><td style={tdS}>{d.cor.map(function(v){return v.toFixed(4);}).join(", ")}</td><td style={tdS}>{fmtResponse(d.avgA)}</td><td style={tdS}><CVB val={d.cv} /></td><td style={tdS}>{d.ir?"Y":"N"}</td><td style={tdS}>{sig3(d.cW)}</td><td style={tdS}>{fm4(d.df)}</td><td style={tdS}>{sig3(d.cS)}</td></tr>;})}</tbody></table></details>;})}</div>;})}</div>)}
-    </div>
+      </div>
+  );
+}
+
+// ── Auth wrapper ─────────────────────────────────────────────────────────
+// LoginGate wraps the entire App, so BOTH return paths inside App (the
+// setup-landing early return and the workspace main return) are auth-gated.
+// This is the actual default export.
+export default function AppWithAuth() {
+  return (
+    <LoginGate logoSrc={ESSF_LOGO_B64}>
+      <App />
+    </LoginGate>
   );
 }
