@@ -2592,6 +2592,7 @@ function SpikePlannerCard(props){
   var _spkVolOv = useState(null), spkVolUnitOv = _spkVolOv[0], setSpkVolUnitOv = _spkVolOv[1];
   var _spkAmtOv = useState(null), spkAmtUnitOv = _spkAmtOv[0], setSpkAmtUnitOv = _spkAmtOv[1];
   var _finalOv = useState(null), finalUnitOv = _finalOv[0], setFinalUnitOv = _finalOv[1];
+  var _finalProtOv = useState(null), finalProtUnitOv = _finalProtOv[0], setFinalProtUnitOv = _finalProtOv[1];
 
   var VOL_UNITS_TABLE = ["nL", "µL", "mL"];
   var FMOL_UNITS_TABLE = ["amol", "fmol", "pmol", "nmol"];
@@ -2642,6 +2643,132 @@ function SpikePlannerCard(props){
   function cycleUT(list, current){
     var i = list.indexOf(current);
     return list[(i + 1) % list.length];
+  }
+
+  // Mass units (for protein concentration / mass-conc displays)
+  var MASS_UNITS_TABLE = ["ng", "µg", "mg"];
+  var MASS_CONC_UNITS_TABLE = ["mg/mL", "µg/µL", "µg/mL", "ng/µL"];
+  function autoMassUnitT(ng){
+    if (ng == null || !isFinite(ng)) return "ng";
+    var a = Math.abs(ng);
+    if (a >= 1e6) return "mg";
+    if (a >= 1000) return "µg";
+    return "ng";
+  }
+  function ngToMassUnitT(ng, unit){
+    if (ng == null || !isFinite(ng)) return null;
+    if (unit === "ng") return ng;
+    if (unit === "µg") return ng / 1000;
+    if (unit === "mg") return ng / 1e6;
+    return ng;
+  }
+  function autoMassConcUnitT(mgPerML){
+    if (mgPerML == null || !isFinite(mgPerML)) return "mg/mL";
+    var a = Math.abs(mgPerML);
+    if (a >= 0.1) return "mg/mL";  // 0.1 mg/mL = 100 µg/mL — still readable as mg/mL
+    if (a >= 0.001) return "µg/mL"; // 1 µg/mL — show as µg
+    return "ng/µL";
+  }
+  function mgPerMLToConcUnitT(mgPerML, unit){
+    if (mgPerML == null || !isFinite(mgPerML)) return null;
+    if (unit === "mg/mL") return mgPerML;
+    if (unit === "µg/µL") return mgPerML;       // mathematically identical
+    if (unit === "µg/mL") return mgPerML * 1000;
+    if (unit === "ng/µL") return mgPerML * 1000; // identical to µg/mL
+    return mgPerML;
+  }
+
+  // Smart number formatter — sensible decimal places by magnitude
+  function smartNum(x){
+    if (x == null || !isFinite(x)) return "—";
+    var a = Math.abs(x);
+    if (a === 0) return "0";
+    if (a >= 1000) return x.toFixed(1);
+    if (a >= 100)  return x.toFixed(1);
+    if (a >= 10)   return x.toFixed(2);
+    if (a >= 1)    return x.toFixed(2);
+    if (a >= 0.1)  return x.toFixed(3);
+    if (a >= 0.01) return x.toFixed(3);
+    return x.toExponential(2);
+  }
+
+  // ClickableValue — renders a value with auto-picked or overridden unit.
+  // Click to cycle through alternatives. Used everywhere a number+unit is
+  // displayed, both in the table and in callouts/recipes.
+  //
+  // Props:
+  //   base: numeric value in the CANONICAL unit (µL for volume, fmol for fmol,
+  //         ng for mass, mg/mL or equivalent fmol/µL for conc)
+  //   family: "vol" | "fmol" | "mass" | "concFmol" | "concMass"
+  //   override: optional unit string override (used by table-shared overrides)
+  //   onCycle: optional callback when clicked (gets next unit). If absent,
+  //            we manage local state inside the component.
+  //   bold: render large+bold? (for callouts vs cells)
+  //   inline: render as inline span (default true) vs block
+  function ClickableValueInline(props){
+    var base = props.base;
+    var family = props.family;
+    var providedOverride = props.override;
+    var onCycle = props.onCycle;
+
+    // Local override state for instances without a parent-controlled override.
+    var localOv = useState(null);
+    var localOverride = localOv[0], setLocalOverride = localOv[1];
+    var effectiveOverride = (providedOverride !== undefined && providedOverride !== null) ? providedOverride : localOverride;
+
+    // Pick auto unit by family
+    function getAutoUnit(){
+      if (base == null || !isFinite(base)) return "";
+      if (family === "vol") return autoVolUnitT(base);
+      if (family === "fmol") return autoFmolUnitT(base);
+      if (family === "mass") return autoMassUnitT(base);
+      if (family === "concFmol") return autoConcFmolUnitT(base);
+      if (family === "concMass") return autoMassConcUnitT(base);
+      return "";
+    }
+    function getList(){
+      if (family === "vol") return VOL_UNITS_TABLE;
+      if (family === "fmol") return FMOL_UNITS_TABLE;
+      if (family === "mass") return MASS_UNITS_TABLE;
+      if (family === "concFmol") return CONC_FMOL_UNITS_TABLE;
+      if (family === "concMass") return MASS_CONC_UNITS_TABLE;
+      return [];
+    }
+    function convert(val, unit){
+      if (val == null || !isFinite(val)) return null;
+      if (family === "vol") return uLToVolUnitT(val, unit);
+      if (family === "fmol") return fmolToFmolUnitT(val, unit);
+      if (family === "mass") return ngToMassUnitT(val, unit);
+      if (family === "concFmol") return concToConcUnitT(val, unit);
+      if (family === "concMass") return mgPerMLToConcUnitT(val, unit);
+      return val;
+    }
+
+    var unit = effectiveOverride || getAutoUnit();
+    var displayVal = convert(base, unit);
+
+    function handleClick(){
+      var list = getList();
+      var next = cycleUT(list, unit);
+      if (onCycle) onCycle(next);
+      else setLocalOverride(next);
+    }
+
+    if (base == null || !isFinite(base)) return <span style={{color:"#8e9bb5"}}>—</span>;
+
+    var sizeStyle = props.bold ? { fontSize:18, fontWeight:700 } :
+                    props.large ? { fontSize:32, fontWeight:700 } : { fontWeight:600 };
+
+    return <span
+      onClick={handleClick}
+      style={Object.assign({
+        cursor:"pointer", userSelect:"none",
+        fontFamily:"ui-monospace, monospace",
+      }, sizeStyle, props.style || {})}
+      title="Click to change units"
+    >
+      {smartNum(displayVal)} <span style={{fontWeight:500, color:"#5a6984", fontSize: props.large ? 14 : (props.bold ? 12 : "0.85em")}}>{unit}</span>
+    </span>;
   }
 
   // Update one field of one sample row
@@ -2885,7 +3012,7 @@ function SpikePlannerCard(props){
     if (!s.include) {
       return {
         sample_vol: sample_vol,
-        spike_vol: null, spike_fmol: null, final_spike_conc: null, dil_pct: null,
+        spike_vol: null, spike_fmol: null, final_spike_conc: null, final_protein_mgmL: null, dil_pct: null,
         status: "excluded", statusMsg: "excluded",
         thisStock: null,
       };
@@ -2895,7 +3022,7 @@ function SpikePlannerCard(props){
     if (st.stockMode === "auto" && thisStock == null) {
       return {
         sample_vol: sample_vol,
-        spike_vol: null, spike_fmol: null, final_spike_conc: null, dil_pct: null,
+        spike_vol: null, spike_fmol: null, final_spike_conc: null, final_protein_mgmL: null, dil_pct: null,
         status: "infeasible", statusMsg: "no stock fits",
         thisStock: null,
       };
@@ -2914,12 +3041,17 @@ function SpikePlannerCard(props){
         var final_vol = sample_vol + spike_vol;
         final_spike_conc = spike_fmol / final_vol;
         dil_pct = (spike_vol / sample_vol) * 100;
+        // Final protein conc after spike addition: µg / µL = mg/mL
+        var protein_ug = parseFloat(s.proteinUg);
+        var final_protein_mgmL_inner = isFinite(protein_ug) ? protein_ug / final_vol : null;
 
         if (spike_vol < minSpikeVol) {
           status = "warn"; statusMsg = "<" + minSpikeVol + " µL";
         } else if (dil_pct > maxDilPct) {
           status = "warn"; statusMsg = ">" + maxDilPct + "% dilution";
         }
+        // Stash for return below — declare outside the conditional path
+        var final_protein_mgmL_out = final_protein_mgmL_inner;
       }
     }
     return {
@@ -2927,6 +3059,7 @@ function SpikePlannerCard(props){
       spike_vol: spike_vol,
       spike_fmol: spike_fmol,
       final_spike_conc: final_spike_conc,
+      final_protein_mgmL: typeof final_protein_mgmL_out !== "undefined" ? final_protein_mgmL_out : null,
       dil_pct: dil_pct,
       status: status, statusMsg: statusMsg,
       thisStock: thisStock,
@@ -2971,7 +3104,7 @@ function SpikePlannerCard(props){
   // ── Export to CSV (clipboard) ─────────────────────────────────────
   function copyAsCsv(){
     var lines = [];
-    lines.push("ID,Name,Include,Sample conc (mg/mL),Vol pulled (µL),Protein (µg),Resus vol (µL),Spike vol (µL),Spike (fmol),Final spike (fmol/µL),Dilution (%),Stock used (fmol/µL),Status");
+    lines.push("ID,Name,Include,Sample conc (mg/mL),Vol pulled (µL),Protein (µg),Resus vol (µL),Spike vol (µL),Spike (fmol),Final spike (fmol/µL),Final protein (mg/mL),Dilution (%),Stock used (fmol/µL),Status");
     st.samples.forEach(function(s){
       var m = rowMath(s);
       lines.push([
@@ -2984,6 +3117,7 @@ function SpikePlannerCard(props){
         m.spike_vol != null ? m.spike_vol.toFixed(2) : "",
         m.spike_fmol != null ? m.spike_fmol.toFixed(1) : "",
         m.final_spike_conc != null ? m.final_spike_conc.toFixed(2) : "",
+        m.final_protein_mgmL != null ? m.final_protein_mgmL.toFixed(3) : "",
         m.dil_pct != null ? m.dil_pct.toFixed(1) : "",
         m.thisStock != null ? m.thisStock : "",
         m.statusMsg,
@@ -3233,41 +3367,110 @@ function SpikePlannerCard(props){
         Note: {selectedStandard.note}. Use a single representative if you'll pick one peptide as your spike, or treat each protein separately.
       </div>}
 
-      {/* Reconstitution recipe — auto or user override */}
-      {pmolPerVial != null && isFinite(pmolPerVial) && pmolPerVial > 0 && (
-        <div style={{padding:"10px 12px",background:"#f7fbff",border:"1px solid #d7e7fb",borderRadius:6}}>
-          {autoReconstVol_uL != null && targetStockForRecon != null ? <div style={{fontSize:12,color:NAVY,lineHeight:1.7}}>
-            <strong>Recipe:</strong> Dissolve the <span style={{fontFamily:"ui-monospace, monospace",fontWeight:700}}>{pmolPerVial} pmol</span> {selectedStandard.id === "custom" ? "" : selectedStandard.label.split(" ")[0]} vial in <span style={{fontFamily:"ui-monospace, monospace",fontWeight:700}}>
-            {actualStockFromUserRecon != null ? fmt2(userReconstVol) : fmt2(autoReconstVol_uL)} µL
-            </span> of 0.1% TFA (or 0.1% formic acid) → <span style={{fontFamily:"ui-monospace, monospace",fontWeight:700,color:TEAL}}>
-            {actualStockFromUserRecon != null ? fmt0(actualStockFromUserRecon) : fmt0(targetStockForRecon)} fmol/µL stock
-            </span>
-            {/* Practical-alternative hint when direct recon volume is impractical */}
-            {actualStockFromUserRecon == null && autoReconstVol_uL > 2000 && pmolPerVial >= 1000 && targetStockForRecon > 0 && (function(){
-              // Standard recipe: dissolve in 1 mL → 1 pmol/µL stock. Then dilute aliquot:
-              // To go from 1 pmol/µL (1000 fmol/µL) → targetStockForRecon fmol/µL:
-              // dilution factor = 1000 / targetStockForRecon. e.g., target 125 → 8x dilution → 20 µL + 140 µL water (1:8).
-              var dilFactor = 1000 / targetStockForRecon;
-              var aliquotUL = 20;
-              var addWater = aliquotUL * (dilFactor - 1);
-              return <div style={{marginTop:8,padding:"8px 10px",background:"#fff8ed",border:"1px solid #f0d8a8",borderRadius:5,fontSize:11,color:"#7a5012",lineHeight:1.55}}>
-                <strong>Practical alternative:</strong> The direct recipe above asks for {(autoReconstVol_uL/1000).toFixed(1)} mL — impractically large. Use Waters' standard 2-step recipe instead:
-                <ol style={{margin:"6px 0 0 18px",padding:0}}>
-                  <li>Dissolve vial in <strong>1.0 mL</strong> of 0.1% TFA/10% ACN → 1 pmol/µL stock</li>
-                  <li>Take <strong>{aliquotUL} µL</strong> aliquot, add <strong>{addWater.toFixed(0)} µL</strong> water → {fmt0(targetStockForRecon)} fmol/µL working stock</li>
-                </ol>
-              </div>;
-            })()}
-            {actualStockFromUserRecon == null && autoReconstVol_uL < 10 && (
-              <div style={{marginTop:8,padding:"8px 10px",background:"#fef0ee",border:"1px solid #f5d4cf",borderRadius:5,fontSize:11,color:WARN,lineHeight:1.55}}>
-                <strong>Tight recipe:</strong> Direct recon volume is under 10 µL — hard to dissolve a lyophilized pellet in. Consider increasing your target stock so the recon volume is more practical, or use a smaller vial.
-              </div>
-            )}
-          </div> : <div style={{fontSize:12,color:SLATE,fontStyle:"italic"}}>Set a target stock concentration above to see a reconstitution recipe.</div>}
+      {/* Reconstitution recipe — clean bench-style format */}
+      {pmolPerVial != null && isFinite(pmolPerVial) && pmolPerVial > 0 && targetStockForRecon != null && (function(){
+        // Decide which recipe to show:
+        //   - 1-step: direct dissolution in N µL of buffer → target stock
+        //   - 2-step: dissolve in 1 mL first → 1 pmol/µL, then aliquot+dilute
+        // Use 2-step when direct recon volume is impractical (>2 mL) AND the
+        // standard 1-step Waters reconstitution (1 mL → 1 pmol/µL = 1000 fmol/µL)
+        // overshoots the target.
+        var directReconUL = (actualStockFromUserRecon != null) ? userReconstVol : autoReconstVol_uL;
+        var directStock = (actualStockFromUserRecon != null) ? actualStockFromUserRecon : targetStockForRecon;
+        var use2Step = (actualStockFromUserRecon == null) &&
+                       directReconUL > 2000 &&
+                       pmolPerVial >= 1000 &&
+                       targetStockForRecon < 1000;
+        var tooTight = (actualStockFromUserRecon == null) && directReconUL < 10;
 
-          {/* Override field */}
-          <div style={{display:"flex",alignItems:"center",gap:8,marginTop:10,flexWrap:"wrap"}}>
-            <span style={{fontSize:11,color:SLATE,fontWeight:600}}>Override volume:</span>
+        // Standard name (first word of label, e.g. "ADH" from "ADH (yeast alcohol dehydrogenase)")
+        var standardName = (selectedStandard.id === "custom" || selectedStandard.isMix)
+          ? (selectedStandard.id === "custom" ? "Spike" : selectedStandard.label.split(" ")[0] + " " + selectedStandard.label.split(" ")[1])
+          : selectedStandard.label.split(" ")[0];
+
+        // Bullet style — matches user's bench notes (· + amount {source})
+        var bulletWrap = {fontSize:13, color:NAVY, lineHeight:1.7, marginLeft:18, marginTop:6};
+        var bulletItem = {display:"flex", alignItems:"baseline", gap:6};
+        var bulletDot = {color:SLATE, marginRight:4};
+        var sourceItalic = {fontStyle:"italic", color:"#6b3aa7", fontSize:12};
+
+        function RecipeTitle(name, finalConc, finalUnit){
+          return <div style={{fontSize:14,fontWeight:800,color:NAVY,marginTop:8}}>
+            {name} stock (<ClickableValueInline base={finalConc} family={finalUnit === "fmolPerUL" ? "concFmol" : "concMass"} bold={false} />)
+          </div>;
+        }
+
+        if (use2Step) {
+          // 2-step: dissolve vial in 1 mL → 1 pmol/µL = 1000 fmol/µL.
+          // Then aliquot 20 µL + (20 * (1000/target - 1)) µL water → target fmol/µL.
+          var stock1_fmolPerUL = 1000; // 1 pmol/µL
+          var dilFactor = stock1_fmolPerUL / targetStockForRecon;
+          var aliquotUL = 20;
+          var waterUL = aliquotUL * (dilFactor - 1);
+
+          return <div>
+            {/* STEP 1: 1 pmol/µL stock */}
+            <RecipeTitle name={standardName + " stock"} finalConc={stock1_fmolPerUL} finalUnit="fmolPerUL" />
+            <div style={bulletWrap}>
+              <div style={bulletItem}>
+                <span style={bulletDot}>○</span>
+                <ClickableValueInline base={pmolPerVial * 1e-9 * 1e9} family="vol" override={null}
+                  /* show "1 mg lyophilized" — actually, this is the dry vial, not a volume.
+                     We'll just render the pmol amount text directly. */
+                /><span style={{display:"none"}}/>
+                <span><strong>+ 1 vial lyophilized</strong> <span style={sourceItalic}>{"{" + selectedStandard.label + (selectedStandard.partNo ? ", Waters " + selectedStandard.partNo : "") + " — " + (pmolPerVial >= 1000 ? (pmolPerVial/1000) + " nmol" : pmolPerVial + " pmol") + "}"}</span></span>
+              </div>
+              <div style={bulletItem}>
+                <span style={bulletDot}>○</span>
+                <span><strong>+ <ClickableValueInline base={1000} family="vol" /></strong> <span style={sourceItalic}>{"{0.1% TFA / 10% ACN}"}</span></span>
+              </div>
+            </div>
+
+            {/* STEP 2: working stock at target */}
+            <div style={{marginTop:14}}>
+              <RecipeTitle name={standardName + " working"} finalConc={targetStockForRecon} finalUnit="fmolPerUL" />
+              <div style={bulletWrap}>
+                <div style={bulletItem}>
+                  <span style={bulletDot}>○</span>
+                  <span><ClickableValueInline base={aliquotUL} family="vol" /> <span style={sourceItalic}>{"{" + standardName + " stock " + stock1_fmolPerUL + " fmol/µL}"}</span></span>
+                </div>
+                <div style={bulletItem}>
+                  <span style={bulletDot}>○</span>
+                  <span><strong>+ <ClickableValueInline base={waterUL} family="vol" /></strong> <span style={sourceItalic}>{"{water (or 0.1% TFA)}"}</span></span>
+                </div>
+              </div>
+            </div>
+          </div>;
+        } else if (tooTight) {
+          // Too small to dissolve practically
+          return <div>
+            <div style={{padding:"8px 10px",background:"#fef0ee",border:"1px solid #f5d4cf",borderRadius:5,fontSize:12,color:WARN,lineHeight:1.55}}>
+              <strong>Recon volume too small.</strong> Direct dissolution would need <ClickableValueInline base={autoReconstVol_uL} family="vol" style={{color:WARN}} /> — hard to wet a lyophilized pellet. Lower your target stock concentration, or pre-dissolve in 100 µL then aliquot/dilute.
+            </div>
+          </div>;
+        } else {
+          // 1-step: direct dissolution in N µL of buffer → target stock
+          return <div>
+            <RecipeTitle name={standardName + " stock"} finalConc={directStock} finalUnit="fmolPerUL" />
+            <div style={bulletWrap}>
+              <div style={bulletItem}>
+                <span style={bulletDot}>○</span>
+                <span><strong>+ 1 vial lyophilized</strong> <span style={sourceItalic}>{"{" + selectedStandard.label + (selectedStandard.partNo ? ", Waters " + selectedStandard.partNo : "") + " — " + (pmolPerVial >= 1000 ? (pmolPerVial/1000) + " nmol" : pmolPerVial + " pmol") + "}"}</span></span>
+              </div>
+              <div style={bulletItem}>
+                <span style={bulletDot}>○</span>
+                <span><strong>+ <ClickableValueInline base={directReconUL} family="vol" /></strong> <span style={sourceItalic}>{"{0.1% TFA (or 0.1% formic acid)}"}</span></span>
+              </div>
+            </div>
+          </div>;
+        }
+      })()}
+
+      {/* Override field for reconstitution volume */}
+      {pmolPerVial != null && isFinite(pmolPerVial) && pmolPerVial > 0 && (
+        <div style={{padding:"10px 12px",background:"#f7fbff",border:"1px solid #d7e7fb",borderRadius:6,marginTop:10}}>
+          <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+            <span style={{fontSize:11,color:SLATE,fontWeight:600}}>Reconstitute vial in:</span>
             <input
               type="number"
               placeholder={autoReconstVol_uL != null ? fmt2(autoReconstVol_uL) : "auto"}
@@ -3281,9 +3484,9 @@ function SpikePlannerCard(props){
             <span style={{fontSize:11,color:SLATE}}>µL</span>
             {st.reconstitutionVol && <button type="button" onClick={function(){ u("reconstitutionVol", ""); }} style={{
               background:"none",border:"none",color:TEAL,fontSize:11,fontWeight:600,cursor:"pointer",padding:0,fontFamily:"inherit",
-            }}>↻ use auto</button>}
-            <span style={{fontSize:11,color:"#8e9bb5",marginLeft:"auto"}}>
-              Standard Waters recipe: 1.0 mL → 1 pmol/µL stock; dilute 20 µL aliquot in 180 µL water → 100 fmol/µL working solution.
+            }}>↻ auto</button>}
+            <span style={{fontSize:11,color:"#8e9bb5",marginLeft:"auto",lineHeight:1.4}}>
+              Override to make a different stock concentration. Auto picks the recipe shown above.
             </span>
           </div>
 
@@ -3297,11 +3500,12 @@ function SpikePlannerCard(props){
             fontWeight:600,lineHeight:1.5,
           }}>
             {vialFractionUsed > 1
-              ? "⚠ Need " + totalSpikeUsed_pmol.toFixed(2) + " pmol total for " + nValidRows + " samples — exceeds the " + pmolPerVial + " pmol in one vial. Need " + Math.ceil(vialFractionUsed) + " vials, or reduce sample count."
-              : "✓ Using ~" + totalSpikeUsed_pmol.toFixed(2) + " pmol of " + pmolPerVial + " pmol vial (" + (vialFractionUsed * 100).toFixed(0) + "%). One vial is plenty for " + nValidRows + " samples."
+              ? <span>⚠ Need <ClickableValueInline base={totalSpikeUsed_fmol} family="fmol" style={{color:WARN}} /> total for {nValidRows} samples — exceeds the {pmolPerVial} pmol in one vial. Need {Math.ceil(vialFractionUsed)} vials.</span>
+              : <span>✓ Using <ClickableValueInline base={totalSpikeUsed_fmol} family="fmol" style={{color:"#1b7f6a"}} /> of the {pmolPerVial >= 1000 ? (pmolPerVial/1000) + " nmol" : pmolPerVial + " pmol"} vial ({(vialFractionUsed * 100).toFixed(1)}%). Plenty for {nValidRows} samples.</span>
             }
           </div>}
         </div>
+      )}
       )}
     </div>
 
@@ -3311,19 +3515,20 @@ function SpikePlannerCard(props){
       Enter your sample concentration (mg/mL) and the volume pulled into digest (µL). The protein µg in tube is computed for you, or you can edit it directly. Sample vol below is what's needed to resuspend at the target protein concentration.
     </div>
     <div style={{overflowX:"auto",border:"1px solid " + BORDER,borderRadius:8}}>
-      <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,minWidth:880}}>
+      <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,minWidth:980}}>
         <thead>
           <tr style={{background:"#dbe6f4",borderBottom:"1px solid " + BORDER}}>
             <th style={{padding:"8px 6px",textAlign:"center",color:NAVY,fontSize:10,fontWeight:700,letterSpacing:0.5,width:32}}>✓</th>
-            <th style={{padding:"8px 6px",textAlign:"left",color:NAVY,fontSize:10,fontWeight:700,letterSpacing:0.5,width:60}}>ID</th>
+            <th style={{padding:"8px 6px",textAlign:"center",color:NAVY,fontSize:10,fontWeight:700,letterSpacing:0.5,width:60}}>ID</th>
             <th style={{padding:"8px 6px",textAlign:"left",color:NAVY,fontSize:10,fontWeight:700,letterSpacing:0.5}}>Name</th>
-            <th style={{padding:"8px 6px",textAlign:"right",color:NAVY,fontSize:10,fontWeight:700,letterSpacing:0.5}} title="Concentration of your protein stock (e.g. from A280 reading)">Sample conc<br/><span style={{fontWeight:500,color:SLATE,fontSize:9}}>mg/mL</span></th>
-            <th style={{padding:"8px 6px",textAlign:"right",color:NAVY,fontSize:10,fontWeight:700,letterSpacing:0.5}} title="Volume pulled from your sample stock into the digest">Vol pulled<br/><span style={{fontWeight:500,color:SLATE,fontSize:9}}>µL</span></th>
-            <th style={{padding:"8px 6px",textAlign:"right",color:NAVY,fontSize:10,fontWeight:700,letterSpacing:0.5}} title="Protein/peptide mass in tube (conc × vol pulled). Editable.">Protein<br/><span style={{fontWeight:500,color:SLATE,fontSize:9}}>µg</span></th>
-            <th style={{padding:"8px 6px",textAlign:"right",color:NAVY,fontSize:10,fontWeight:700,letterSpacing:0.5}} title="Buffer volume to add to hit target final protein concentration">Resus vol<br/><span style={{fontWeight:500,color:SLATE,fontSize:9}}>µL</span></th>
-            <th style={{padding:"8px 6px",textAlign:"right",color:NAVY,fontSize:10,fontWeight:700,letterSpacing:0.5}} title="Volume of spike to add per sample (click to cycle units)">Spike<br/><span style={{fontWeight:500,color:SLATE,fontSize:9}}>µL</span></th>
-            <th style={{padding:"8px 6px",textAlign:"right",color:NAVY,fontSize:10,fontWeight:700,letterSpacing:0.5}} title="Total fmol of spike going into this sample (click to cycle units)">Spike<br/><span style={{fontWeight:500,color:SLATE,fontSize:9}}>fmol</span></th>
-            <th style={{padding:"8px 6px",textAlign:"right",color:NAVY,fontSize:10,fontWeight:700,letterSpacing:0.5}} title="Final spike concentration in the injection (should equal target)">Final<br/><span style={{fontWeight:500,color:SLATE,fontSize:9}}>fmol/µL</span></th>
+            <th style={{padding:"8px 6px",textAlign:"center",color:NAVY,fontSize:10,fontWeight:700,letterSpacing:0.5}} title="Concentration of your protein stock (e.g. from A280 reading)">Sample conc<br/><span style={{fontWeight:500,color:SLATE,fontSize:9}}>mg/mL</span></th>
+            <th style={{padding:"8px 6px",textAlign:"center",color:NAVY,fontSize:10,fontWeight:700,letterSpacing:0.5}} title="Volume pulled from your sample stock into the digest">Vol pulled<br/><span style={{fontWeight:500,color:SLATE,fontSize:9}}>µL</span></th>
+            <th style={{padding:"8px 6px",textAlign:"center",color:NAVY,fontSize:10,fontWeight:700,letterSpacing:0.5}} title="Protein/peptide mass in tube (conc × vol pulled). Editable.">Protein<br/><span style={{fontWeight:500,color:SLATE,fontSize:9}}>µg</span></th>
+            <th style={{padding:"8px 6px",textAlign:"center",color:NAVY,fontSize:10,fontWeight:700,letterSpacing:0.5}} title="Buffer volume to add to hit target final protein concentration. Click value to change units.">Resus vol<br/><span style={{fontWeight:500,color:SLATE,fontSize:9}}>µL</span></th>
+            <th style={{padding:"8px 6px",textAlign:"center",color:NAVY,fontSize:10,fontWeight:700,letterSpacing:0.5}} title="Volume of spike to add per sample. Click value to change units.">Spike<br/><span style={{fontWeight:500,color:SLATE,fontSize:9}}>µL</span></th>
+            <th style={{padding:"8px 6px",textAlign:"center",color:NAVY,fontSize:10,fontWeight:700,letterSpacing:0.5}} title="Total fmol of spike going into this sample. Click to change units.">Spike<br/><span style={{fontWeight:500,color:SLATE,fontSize:9}}>fmol</span></th>
+            <th style={{padding:"8px 6px",textAlign:"center",color:NAVY,fontSize:10,fontWeight:700,letterSpacing:0.5}} title="Final spike concentration in the injection (should equal target). Click to change units.">Final spike<br/><span style={{fontWeight:500,color:SLATE,fontSize:9}}>fmol/µL</span></th>
+            <th style={{padding:"8px 6px",textAlign:"center",color:NAVY,fontSize:10,fontWeight:700,letterSpacing:0.5}} title="Protein concentration in the final spiked solution. Lower than target because spike addition dilutes the sample.">Final protein<br/><span style={{fontWeight:500,color:SLATE,fontSize:9}}>mg/mL</span></th>
             <th style={{padding:"8px 6px",textAlign:"center",color:NAVY,fontSize:10,fontWeight:700,letterSpacing:0.5,width:60}}>Stock</th>
             <th style={{padding:"8px 6px",textAlign:"center",color:NAVY,fontSize:10,fontWeight:700,letterSpacing:0.5,width:90}}>Status</th>
             <th style={{padding:"8px 6px",width:24}}></th>
@@ -3338,10 +3543,11 @@ function SpikePlannerCard(props){
             var spkVolUnit = spkVolUnitOv || autoVolUnitT(m.spike_vol);
             var spkAmtUnit = spkAmtUnitOv || autoFmolUnitT(m.spike_fmol);
             var finalUnit = finalUnitOv || autoConcFmolUnitT(m.final_spike_conc);
-            // Clickable result cell — cycles unit on click
+            var finalProtUnit = finalProtUnitOv || autoMassConcUnitT(m.final_protein_mgmL);
+            // Clickable result cell — cycles unit on click, centered to match header
             function ClickableUnitCell(displayValue, unit, onCycle, isComputed){
               return <td onClick={onCycle} style={{
-                padding:"6px 6px",textAlign:"right",
+                padding:"6px 6px",textAlign:"center",
                 fontFamily:"ui-monospace, monospace",color:NAVY,
                 background: isComputed ? "#f7fbff" : "#fff",
                 fontWeight:600,
@@ -3362,37 +3568,43 @@ function SpikePlannerCard(props){
                 <td style={{padding:"4px 6px"}}>
                   <input value={s.name} onChange={function(e){ updateSample(idx, "name", e.target.value); }} style={cellTextInput} />
                 </td>
-                <td style={{padding:"4px 6px",textAlign:"right"}}>
-                  <input type="number" value={s.sampleConc} onChange={function(e){ updateSample(idx, "sampleConc", e.target.value); }} style={cellNumInput} />
+                <td style={{padding:"4px 6px",textAlign:"center"}}>
+                  <input type="number" value={s.sampleConc} onChange={function(e){ updateSample(idx, "sampleConc", e.target.value); }} style={Object.assign({}, cellNumInput, {textAlign:"center"})} />
                 </td>
-                <td style={{padding:"4px 6px",textAlign:"right"}}>
-                  <input type="number" value={s.sampleVolPulled} onChange={function(e){ updateSample(idx, "sampleVolPulled", e.target.value); }} style={cellNumInput} />
+                <td style={{padding:"4px 6px",textAlign:"center"}}>
+                  <input type="number" value={s.sampleVolPulled} onChange={function(e){ updateSample(idx, "sampleVolPulled", e.target.value); }} style={Object.assign({}, cellNumInput, {textAlign:"center"})} />
                 </td>
-                <td style={{padding:"4px 6px",textAlign:"right",background:"#fffdf7"}}>
-                  <input type="number" value={s.proteinUg} onChange={function(e){ updateSample(idx, "proteinUg", e.target.value); }} style={cellNumInput} title="Auto-computed from conc × vol pulled. You can override." />
+                <td style={{padding:"4px 6px",textAlign:"center",background:"#fffdf7"}}>
+                  <input type="number" value={s.proteinUg} onChange={function(e){ updateSample(idx, "proteinUg", e.target.value); }} style={Object.assign({}, cellNumInput, {textAlign:"center"})} title="Auto-computed from conc × vol pulled. You can override." />
                 </td>
                 {ClickableUnitCell(
-                  m.sample_vol != null ? fmt2(uLToVolUnitT(m.sample_vol, resusUnit)) : null,
+                  m.sample_vol != null ? smartNum(uLToVolUnitT(m.sample_vol, resusUnit)) : null,
                   resusUnit,
                   function(){ setResusUnitOv(cycleUT(VOL_UNITS_TABLE, resusUnit)); },
                   true
                 )}
                 {ClickableUnitCell(
-                  m.spike_vol != null ? fmt2(uLToVolUnitT(m.spike_vol, spkVolUnit)) : null,
+                  m.spike_vol != null ? smartNum(uLToVolUnitT(m.spike_vol, spkVolUnit)) : null,
                   spkVolUnit,
                   function(){ setSpkVolUnitOv(cycleUT(VOL_UNITS_TABLE, spkVolUnit)); },
                   true
                 )}
                 {ClickableUnitCell(
-                  m.spike_fmol != null ? (spkAmtUnit === "amol" || spkAmtUnit === "fmol" ? fmt0(fmolToFmolUnitT(m.spike_fmol, spkAmtUnit)) : fmt2(fmolToFmolUnitT(m.spike_fmol, spkAmtUnit))) : null,
+                  m.spike_fmol != null ? smartNum(fmolToFmolUnitT(m.spike_fmol, spkAmtUnit)) : null,
                   spkAmtUnit,
                   function(){ setSpkAmtUnitOv(cycleUT(FMOL_UNITS_TABLE, spkAmtUnit)); },
                   true
                 )}
                 {ClickableUnitCell(
-                  m.final_spike_conc != null ? fmt2(concToConcUnitT(m.final_spike_conc, finalUnit)) : null,
+                  m.final_spike_conc != null ? smartNum(concToConcUnitT(m.final_spike_conc, finalUnit)) : null,
                   finalUnit,
                   function(){ setFinalUnitOv(cycleUT(CONC_FMOL_UNITS_TABLE, finalUnit)); },
+                  true
+                )}
+                {ClickableUnitCell(
+                  m.final_protein_mgmL != null ? smartNum(mgPerMLToConcUnitT(m.final_protein_mgmL, finalProtUnit)) : null,
+                  finalProtUnit,
+                  function(){ setFinalProtUnitOv(cycleUT(MASS_CONC_UNITS_TABLE, finalProtUnit)); },
                   true
                 )}
                 <td style={{padding:"6px 6px",textAlign:"center",background:"#f7fbff"}}>
