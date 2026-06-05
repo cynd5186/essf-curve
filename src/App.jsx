@@ -3702,6 +3702,1016 @@ function SpikePlannerCard(props){
   </div>;
 }
 
+
+// ── Queue Builder ────────────────────────────────────────────────────
+// Generates a MassLynx-compatible sample list. Builds a structured TopN
+// protocol (equilibration blanks → SSTs → samples × replicates → bracket)
+// and emits tab-delimited rows ready for paste into MassLynx Sample List.
+//
+// Column layout matches the user's actual MassLynx setup (per screenshot
+// 2026-06-05): File Name | File Text | Inject Volume | Bottle | Inlet File
+// | MS File | MS Tune File. Bottle format is "tray.row,col" (e.g., 2.A,3).
+//
+// Replicates share a vial position (one physical vial, multiple injections).
+function QueueBuilderCard(props){
+  // ── Default state ─────────────────────────────────────────────────
+  function todayPrefix(){
+    var d = new Date();
+    var yyyy = d.getFullYear();
+    var mm = String(d.getMonth() + 1).padStart(2, "0");
+    var dd = String(d.getDate()).padStart(2, "0");
+    return "" + yyyy + mm + dd + "_CGS_";
+  }
+
+  // Default sample set — same IDs as the Spike Planner's defaults.
+  // Editable in this card; no live sync with the planner. If you change
+  // samples in the planner you'll need to update this list too.
+  var defaultQSamples = [
+    { id: "S1",   description: "Sample 1 MWCO Ret" },
+    { id: "S1+",  description: "Sample 1+BLG MWCO Ret" },
+    { id: "S2",   description: "Sample 2 MWCO Ret" },
+    { id: "S3",   description: "Sample 3 MWCO Ret" },
+  ];
+
+  var _q = useState({
+    // Header defaults
+    filePrefix: todayPrefix(),
+    inletFile: "20230314_CGSGKB10-2pctB(1min)-40pctB(20min)_Run30min",
+    msFile: "20230315_peptidemapping_30min",
+    msTuneFile: "05092025_CGS_PosTune",
+
+    // Vial positions
+    blankPositionOptima: "2.F,1",   // Optima water blank
+    blankPositionMPA: "2.F,2",      // MPA blank
+    sst1Position: "2.A,1",          // BSA SST
+    sst2Position: "2.A,2",          // bLG SST (when used)
+    sampleStartPosition: "2.A,3",   // first sample; subsequent positions auto-increment
+
+    // Equilibration
+    equilibrationBlanks: "2",
+    equilibrationInjVol: "2",
+
+    // SSTs (bench SST descriptor matches user's notation)
+    sst1Count: "1",
+    sst1Name: "MassPrepBSADigest",
+    sst1Description: "0.066 mg/ml (1 pmole/uL); 2 uL injxn",
+    sst1InjVol: "2",
+    sst2Enabled: false,
+    sst2Count: "1",
+    sst2Name: "MassPrepADH",
+    sst2Description: "0.066 mg/ml (1 pmole/uL); 2 uL injxn",
+    sst2InjVol: "2",
+
+    // Samples (pulled from sample list, see defaultQSamples)
+    sampleReplicates: "1",
+    sampleInjVol: "10",
+
+    // Bracket close (end of run)
+    bracketBlanks: "1",
+    bracketInjVol: "10",
+    bracketSSTAfter: true,
+
+    // Sample list
+    samples: defaultQSamples,
+  });
+  var qst = _q[0], setQst = _q[1];
+  var uq = function(k, v){ setQst(function(p){ var n={}; for(var x in p) n[x]=p[x]; n[k]=v; return n; }); };
+
+  function updateQSample(idx, field, value){
+    setQst(function(prev){
+      var copy = {}; for (var x in prev) copy[x] = prev[x];
+      copy.samples = prev.samples.map(function(s, i){
+        if (i !== idx) return s;
+        var ns = {}; for (var k in s) ns[k] = s[k];
+        ns[field] = value;
+        return ns;
+      });
+      return copy;
+    });
+  }
+  function addQSample(){
+    setQst(function(prev){
+      var copy = {}; for (var x in prev) copy[x] = prev[x];
+      var n = prev.samples.length + 1;
+      copy.samples = prev.samples.concat([{
+        id: "S" + n, description: "Sample " + n,
+      }]);
+      return copy;
+    });
+  }
+  function removeQSample(idx){
+    setQst(function(prev){
+      var copy = {}; for (var x in prev) copy[x] = prev[x];
+      copy.samples = prev.samples.filter(function(_, i){ return i !== idx; });
+      return copy;
+    });
+  }
+
+  // ── Vial position math ────────────────────────────────────────────
+  // Format: "tray.row,col" → {tray, row, col}
+  // Example: "2.A,3" → {tray:2, row:"A", col:3}
+  function parsePosition(str){
+    var m = String(str).match(/^(\d+)\.([A-Za-z]),(\d+)$/);
+    if (!m) return null;
+    return { tray: parseInt(m[1], 10), row: m[2].toUpperCase(), col: parseInt(m[3], 10) };
+  }
+  function formatPosition(p){
+    if (!p) return "";
+    return p.tray + "." + p.row + "," + p.col;
+  }
+  // Increment position by 1: A1 → A2 → … → A12 → B1 → … → H12 → next tray A1
+  function incrementPosition(p, colsPerRow){
+    var cols = colsPerRow || 12;
+    if (!p) return null;
+    var next = { tray: p.tray, row: p.row, col: p.col + 1 };
+    if (next.col > cols) {
+      next.col = 1;
+      var rowCode = next.row.charCodeAt(0) + 1;
+      if (rowCode > "H".charCodeAt(0)) {
+        next.tray += 1;
+        next.row = "A";
+      } else {
+        next.row = String.fromCharCode(rowCode);
+      }
+    }
+    return next;
+  }
+
+  // Assign sample positions starting from sampleStartPosition, avoiding the
+  // reserved blank and SST positions. Returns a map from sample.id → position string.
+  function assignSamplePositions(){
+    var reserved = {};
+    [qst.blankPositionOptima, qst.blankPositionMPA, qst.sst1Position, qst.sst2Position].forEach(function(p){
+      reserved[p] = true;
+    });
+    var start = parsePosition(qst.sampleStartPosition);
+    if (!start) return {};
+    var assignments = {};
+    var cur = start;
+    qst.samples.forEach(function(s){
+      // Skip reserved positions
+      while (reserved[formatPosition(cur)]) cur = incrementPosition(cur);
+      assignments[s.id] = formatPosition(cur);
+      cur = incrementPosition(cur);
+    });
+    return assignments;
+  }
+
+  // ── Build the queue rows ──────────────────────────────────────────
+  // Returns array of {fileName, fileText, injVol, bottle, inletFile, msFile, msTuneFile, kind}.
+  function buildQueue(){
+    var rows = [];
+    var fileSeq = 1;   // running file number
+    function nextSeq(){ var s = String(fileSeq).padStart(3, "0"); fileSeq++; return s; }
+    function blank(vialPos, label, injVol){
+      rows.push({
+        fileName: qst.filePrefix + "Blank_" + label + "_" + nextSeq(),
+        fileText: "",
+        injVol: injVol,
+        bottle: vialPos,
+        inletFile: qst.inletFile,
+        msFile: qst.msFile,
+        msTuneFile: qst.msTuneFile,
+        kind: "blank",
+      });
+    }
+
+    var samplePositions = assignSamplePositions();
+
+    // 1. Equilibration blanks — alternate Optima/MPA
+    var nBlanks = parseInt(qst.equilibrationBlanks, 10) || 0;
+    for (var i = 0; i < nBlanks; i++) {
+      var useOptima = (i % 2 === 0);
+      blank(
+        useOptima ? qst.blankPositionOptima : qst.blankPositionMPA,
+        useOptima ? "Optima" : "MPA",
+        qst.equilibrationInjVol
+      );
+    }
+
+    // 2. SST1
+    var nSST1 = parseInt(qst.sst1Count, 10) || 0;
+    for (var i = 0; i < nSST1; i++) {
+      rows.push({
+        fileName: qst.filePrefix + "SST_" + qst.sst1Name + "_" + nextSeq(),
+        fileText: qst.sst1Description,
+        injVol: qst.sst1InjVol,
+        bottle: qst.sst1Position,
+        inletFile: qst.inletFile,
+        msFile: qst.msFile,
+        msTuneFile: qst.msTuneFile,
+        kind: "sst",
+      });
+      // Bracket SST runs with a blank (Optima between SSTs, MPA after last)
+      var lastSST = (i === nSST1 - 1);
+      blank(
+        lastSST ? qst.blankPositionMPA : qst.blankPositionOptima,
+        lastSST ? "MPA" : "Optima",
+        qst.equilibrationInjVol
+      );
+    }
+
+    // 3. SST2 (optional)
+    if (qst.sst2Enabled) {
+      var nSST2 = parseInt(qst.sst2Count, 10) || 0;
+      for (var i = 0; i < nSST2; i++) {
+        rows.push({
+          fileName: qst.filePrefix + "SST_" + qst.sst2Name + "_" + nextSeq(),
+          fileText: qst.sst2Description,
+          injVol: qst.sst2InjVol,
+          bottle: qst.sst2Position,
+          inletFile: qst.inletFile,
+          msFile: qst.msFile,
+          msTuneFile: qst.msTuneFile,
+          kind: "sst",
+        });
+        var lastSST2 = (i === nSST2 - 1);
+        blank(
+          lastSST2 ? qst.blankPositionMPA : qst.blankPositionOptima,
+          lastSST2 ? "MPA" : "Optima",
+          qst.equilibrationInjVol
+        );
+      }
+    }
+
+    // 4. Samples × replicates
+    var nReps = parseInt(qst.sampleReplicates, 10) || 1;
+    qst.samples.forEach(function(s){
+      var pos = samplePositions[s.id] || "?";
+      for (var r = 0; r < nReps; r++) {
+        var repSuffix = nReps > 1 ? "_rep" + (r + 1) : "";
+        rows.push({
+          fileName: qst.filePrefix + s.id + repSuffix + "_" + nextSeq(),
+          fileText: s.description,
+          injVol: qst.sampleInjVol,
+          bottle: pos,
+          inletFile: qst.inletFile,
+          msFile: qst.msFile,
+          msTuneFile: qst.msTuneFile,
+          kind: "sample",
+        });
+      }
+    });
+
+    // 5. Bracket close: SST1 (optional) + blank
+    if (qst.bracketSSTAfter) {
+      rows.push({
+        fileName: qst.filePrefix + "SST_" + qst.sst1Name + "_" + nextSeq(),
+        fileText: qst.sst1Description,
+        injVol: qst.sst1InjVol,
+        bottle: qst.sst1Position,
+        inletFile: qst.inletFile,
+        msFile: qst.msFile,
+        msTuneFile: qst.msTuneFile,
+        kind: "sst",
+      });
+    }
+    var nBracketBlanks = parseInt(qst.bracketBlanks, 10) || 0;
+    for (var i = 0; i < nBracketBlanks; i++) {
+      blank(qst.blankPositionOptima, "Optima", qst.bracketInjVol);
+    }
+
+    return rows;
+  }
+
+  var queueRows = buildQueue();
+
+  // ── Export to clipboard (tab-delimited, MassLynx-paste-ready) ────
+  function copyForMassLynx(){
+    var lines = [];
+    // Header row matches MassLynx Sample List columns
+    lines.push(["File Name", "File Text", "Inject Volume", "Bottle", "Inlet File", "MS File", "MS Tune File"].join("\t"));
+    queueRows.forEach(function(r){
+      lines.push([r.fileName, r.fileText, r.injVol, r.bottle, r.inletFile, r.msFile, r.msTuneFile].join("\t"));
+    });
+    var text = lines.join("\n");
+    if (typeof navigator !== "undefined" && navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function(){}, function(){});
+    }
+  }
+  function copyAsCsv(){
+    var lines = [];
+    lines.push(["File Name", "File Text", "Inject Volume", "Bottle", "Inlet File", "MS File", "MS Tune File"].map(function(h){ return '"' + h + '"'; }).join(","));
+    queueRows.forEach(function(r){
+      lines.push([r.fileName, r.fileText, r.injVol, r.bottle, r.inletFile, r.msFile, r.msTuneFile].map(function(v){ return '"' + String(v).replace(/"/g, '""') + '"'; }).join(","));
+    });
+    var text = lines.join("\n");
+    if (typeof navigator !== "undefined" && navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function(){}, function(){});
+    }
+  }
+
+  // ── Styles ────────────────────────────────────────────────────────
+  var NAVY = "#0b2a6f", TEAL = "#139cb6", BORDER = "#dfe7f2", SLATE = "#5a6984", AMBER = "#bf7a1a";
+  var sectionLabel = { fontSize: 11, color: SLATE, fontWeight: 600, marginTop: 18, marginBottom: 10, letterSpacing: 0.5 };
+  var smallInput = {
+    width: "100%", padding: "6px 8px", border: "1px solid " + BORDER, borderRadius: 4,
+    fontSize: 13, fontFamily: "ui-monospace, monospace", color: NAVY, outline: "none",
+  };
+  var smallInputText = Object.assign({}, smallInput, {fontFamily: "inherit"});
+  var fieldLabel = { display: "block", fontSize: 11, color: SLATE, fontWeight: 600, marginBottom: 4 };
+
+  return <div>
+    <h2 style={{fontSize:20,fontWeight:700,color:NAVY,margin:"0 0 4px",letterSpacing:"-0.01em"}}>Queue builder</h2>
+    <div style={{fontSize:12,color:SLATE,marginBottom:18}}>
+      Generate a MassLynx Sample List for your TopN run. Edit defaults below; the queue preview updates live. Paste into MassLynx with <strong>📋 Copy for MassLynx</strong>.
+    </div>
+
+    {/* DEFAULTS */}
+    <div style={sectionLabel}>RUN DEFAULTS</div>
+    <div style={{display:"grid",gridTemplateColumns:"1fr",gap:10,marginBottom:14}}>
+      <div>
+        <label style={fieldLabel}>File name prefix</label>
+        <input type="text" value={qst.filePrefix} onChange={function(e){ uq("filePrefix", e.target.value); }} style={smallInputText} />
+      </div>
+      <div>
+        <label style={fieldLabel}>Inlet File (LC method)</label>
+        <input type="text" value={qst.inletFile} onChange={function(e){ uq("inletFile", e.target.value); }} style={smallInputText} />
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+        <div>
+          <label style={fieldLabel}>MS File</label>
+          <input type="text" value={qst.msFile} onChange={function(e){ uq("msFile", e.target.value); }} style={smallInputText} />
+        </div>
+        <div>
+          <label style={fieldLabel}>MS Tune File</label>
+          <input type="text" value={qst.msTuneFile} onChange={function(e){ uq("msTuneFile", e.target.value); }} style={smallInputText} />
+        </div>
+      </div>
+    </div>
+
+    {/* VIAL POSITIONS */}
+    <div style={sectionLabel}>VIAL POSITIONS (tray.row,col)</div>
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}}>
+      <div>
+        <label style={fieldLabel}>Blank — Optima</label>
+        <input type="text" value={qst.blankPositionOptima} onChange={function(e){ uq("blankPositionOptima", e.target.value); }} style={smallInput} />
+      </div>
+      <div>
+        <label style={fieldLabel}>Blank — MPA</label>
+        <input type="text" value={qst.blankPositionMPA} onChange={function(e){ uq("blankPositionMPA", e.target.value); }} style={smallInput} />
+      </div>
+      <div>
+        <label style={fieldLabel}>SST1 vial</label>
+        <input type="text" value={qst.sst1Position} onChange={function(e){ uq("sst1Position", e.target.value); }} style={smallInput} />
+      </div>
+      <div>
+        <label style={fieldLabel}>SST2 vial (if used)</label>
+        <input type="text" value={qst.sst2Position} onChange={function(e){ uq("sst2Position", e.target.value); }} style={smallInput} />
+      </div>
+      <div style={{gridColumn:"span 2"}}>
+        <label style={fieldLabel}>Sample start (auto-increments from here, skipping reserved positions)</label>
+        <input type="text" value={qst.sampleStartPosition} onChange={function(e){ uq("sampleStartPosition", e.target.value); }} style={smallInput} />
+      </div>
+    </div>
+
+    {/* PROTOCOL */}
+    <div style={sectionLabel}>PROTOCOL SECTIONS</div>
+
+    <div style={{padding:"10px 12px",background:"#fafcfe",border:"1px solid " + BORDER,borderRadius:6,marginBottom:8}}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6}}>
+        <span style={{fontWeight:700,color:NAVY,fontSize:12}}>1. Equilibration blanks</span>
+      </div>
+      <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",fontSize:12,color:SLATE}}>
+        <span>×</span>
+        <input type="number" value={qst.equilibrationBlanks} onChange={function(e){ uq("equilibrationBlanks", e.target.value); }} style={{width:50,padding:"4px 6px",border:"1px solid " + BORDER,borderRadius:4,fontSize:12,fontFamily:"ui-monospace, monospace",color:NAVY,outline:"none",textAlign:"center"}} />
+        <span>blanks</span>
+        <span>·</span>
+        <input type="number" value={qst.equilibrationInjVol} onChange={function(e){ uq("equilibrationInjVol", e.target.value); }} style={{width:50,padding:"4px 6px",border:"1px solid " + BORDER,borderRadius:4,fontSize:12,fontFamily:"ui-monospace, monospace",color:NAVY,outline:"none",textAlign:"center"}} />
+        <span>µL inj</span>
+        <span style={{marginLeft:"auto",fontSize:11,color:"#8e9bb5"}}>alternates Optima/MPA blanks</span>
+      </div>
+    </div>
+
+    <div style={{padding:"10px 12px",background:"#fafcfe",border:"1px solid " + BORDER,borderRadius:6,marginBottom:8}}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6}}>
+        <span style={{fontWeight:700,color:NAVY,fontSize:12}}>2. SST1 (system suitability)</span>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:6}}>
+        <div>
+          <label style={fieldLabel}>Name (in filename)</label>
+          <input type="text" value={qst.sst1Name} onChange={function(e){ uq("sst1Name", e.target.value); }} style={smallInputText} />
+        </div>
+        <div>
+          <label style={fieldLabel}>Description (File Text)</label>
+          <input type="text" value={qst.sst1Description} onChange={function(e){ uq("sst1Description", e.target.value); }} style={smallInputText} />
+        </div>
+      </div>
+      <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",fontSize:12,color:SLATE}}>
+        <span>×</span>
+        <input type="number" value={qst.sst1Count} onChange={function(e){ uq("sst1Count", e.target.value); }} style={{width:50,padding:"4px 6px",border:"1px solid " + BORDER,borderRadius:4,fontSize:12,fontFamily:"ui-monospace, monospace",color:NAVY,outline:"none",textAlign:"center"}} />
+        <span>injections</span>
+        <span>·</span>
+        <input type="number" value={qst.sst1InjVol} onChange={function(e){ uq("sst1InjVol", e.target.value); }} style={{width:50,padding:"4px 6px",border:"1px solid " + BORDER,borderRadius:4,fontSize:12,fontFamily:"ui-monospace, monospace",color:NAVY,outline:"none",textAlign:"center"}} />
+        <span>µL each</span>
+        <span style={{marginLeft:"auto",fontSize:11,color:"#8e9bb5"}}>blank after each SST</span>
+      </div>
+    </div>
+
+    <div style={{padding:"10px 12px",background:"#fafcfe",border:"1px solid " + BORDER,borderRadius:6,marginBottom:8}}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6}}>
+        <span style={{fontWeight:700,color:NAVY,fontSize:12}}>3. SST2 (optional)</span>
+        <label style={{fontSize:11,color:SLATE,cursor:"pointer"}}>
+          <input type="checkbox" checked={qst.sst2Enabled} onChange={function(e){ uq("sst2Enabled", e.target.checked); }} style={{marginRight:4}} />
+          include
+        </label>
+      </div>
+      {qst.sst2Enabled && <span>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:6}}>
+          <div>
+            <label style={fieldLabel}>Name (in filename)</label>
+            <input type="text" value={qst.sst2Name} onChange={function(e){ uq("sst2Name", e.target.value); }} style={smallInputText} />
+          </div>
+          <div>
+            <label style={fieldLabel}>Description (File Text)</label>
+            <input type="text" value={qst.sst2Description} onChange={function(e){ uq("sst2Description", e.target.value); }} style={smallInputText} />
+          </div>
+        </div>
+        <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",fontSize:12,color:SLATE}}>
+          <span>×</span>
+          <input type="number" value={qst.sst2Count} onChange={function(e){ uq("sst2Count", e.target.value); }} style={{width:50,padding:"4px 6px",border:"1px solid " + BORDER,borderRadius:4,fontSize:12,fontFamily:"ui-monospace, monospace",color:NAVY,outline:"none",textAlign:"center"}} />
+          <span>injections</span>
+          <span>·</span>
+          <input type="number" value={qst.sst2InjVol} onChange={function(e){ uq("sst2InjVol", e.target.value); }} style={{width:50,padding:"4px 6px",border:"1px solid " + BORDER,borderRadius:4,fontSize:12,fontFamily:"ui-monospace, monospace",color:NAVY,outline:"none",textAlign:"center"}} />
+          <span>µL each</span>
+        </div>
+      </span>}
+    </div>
+
+    <div style={{padding:"10px 12px",background:"#f4f9fd",border:"1px solid #d7e7fb",borderRadius:6,marginBottom:8}}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6}}>
+        <span style={{fontWeight:700,color:NAVY,fontSize:12}}>4. Samples</span>
+        <span style={{fontSize:11,color:SLATE}}>{qst.samples.length} sample{qst.samples.length !== 1 ? "s" : ""}</span>
+      </div>
+      <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",fontSize:12,color:SLATE,marginBottom:8}}>
+        <span>×</span>
+        <input type="number" value={qst.sampleReplicates} onChange={function(e){ uq("sampleReplicates", e.target.value); }} style={{width:50,padding:"4px 6px",border:"1px solid " + BORDER,borderRadius:4,fontSize:12,fontFamily:"ui-monospace, monospace",color:NAVY,outline:"none",textAlign:"center"}} />
+        <span>replicate{parseInt(qst.sampleReplicates,10) > 1 ? "s" : ""} each (same vial)</span>
+        <span>·</span>
+        <input type="number" value={qst.sampleInjVol} onChange={function(e){ uq("sampleInjVol", e.target.value); }} style={{width:50,padding:"4px 6px",border:"1px solid " + BORDER,borderRadius:4,fontSize:12,fontFamily:"ui-monospace, monospace",color:NAVY,outline:"none",textAlign:"center"}} />
+        <span>µL inj</span>
+      </div>
+      <div style={{overflowX:"auto"}}>
+        <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+          <thead><tr style={{background:"#dbe6f4"}}>
+            <th style={{padding:"4px 6px",textAlign:"left",color:NAVY,fontSize:10,fontWeight:700}}>ID</th>
+            <th style={{padding:"4px 6px",textAlign:"left",color:NAVY,fontSize:10,fontWeight:700}}>Description</th>
+            <th style={{padding:"4px 6px",textAlign:"center",color:NAVY,fontSize:10,fontWeight:700,width:80}}>Vial</th>
+            <th style={{padding:"4px 6px",width:24}}></th>
+          </tr></thead>
+          <tbody>
+            {qst.samples.map(function(s, idx){
+              var pos = assignSamplePositions()[s.id] || "?";
+              return <tr key={idx} style={{borderBottom:"1px solid #ecf0f6"}}>
+                <td style={{padding:"3px 4px"}}>
+                  <input type="text" value={s.id} onChange={function(e){ updateQSample(idx, "id", e.target.value); }} style={{width:"100%",border:"none",background:"transparent",fontSize:12,fontFamily:"inherit",color:NAVY,outline:"none",padding:"2px 4px"}} />
+                </td>
+                <td style={{padding:"3px 4px"}}>
+                  <input type="text" value={s.description} onChange={function(e){ updateQSample(idx, "description", e.target.value); }} style={{width:"100%",border:"none",background:"transparent",fontSize:12,fontFamily:"inherit",color:NAVY,outline:"none",padding:"2px 4px"}} />
+                </td>
+                <td style={{padding:"3px 4px",textAlign:"center",fontFamily:"ui-monospace, monospace",color:TEAL,fontWeight:600,fontSize:11}}>{pos}</td>
+                <td style={{padding:"3px 4px",textAlign:"center"}}>
+                  <button type="button" onClick={function(){ removeQSample(idx); }} style={{background:"none",border:"none",color:"#b4332e",fontSize:14,cursor:"pointer",padding:0,fontFamily:"inherit"}}>×</button>
+                </td>
+              </tr>;
+            })}
+          </tbody>
+        </table>
+      </div>
+      <button type="button" onClick={addQSample} style={{
+        background:"none",border:"none",color:TEAL,fontSize:12,cursor:"pointer",
+        padding:"4px 0",fontFamily:"inherit",fontWeight:600,marginTop:4,
+      }}>+ Add sample</button>
+    </div>
+
+    <div style={{padding:"10px 12px",background:"#fafcfe",border:"1px solid " + BORDER,borderRadius:6,marginBottom:14}}>
+      <div style={{fontWeight:700,color:NAVY,fontSize:12,marginBottom:6}}>5. Bracket close</div>
+      <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",fontSize:12,color:SLATE}}>
+        <label style={{cursor:"pointer"}}>
+          <input type="checkbox" checked={qst.bracketSSTAfter} onChange={function(e){ uq("bracketSSTAfter", e.target.checked); }} style={{marginRight:4}} />
+          SST1 after samples
+        </label>
+        <span>·</span>
+        <input type="number" value={qst.bracketBlanks} onChange={function(e){ uq("bracketBlanks", e.target.value); }} style={{width:50,padding:"4px 6px",border:"1px solid " + BORDER,borderRadius:4,fontSize:12,fontFamily:"ui-monospace, monospace",color:NAVY,outline:"none",textAlign:"center"}} />
+        <span>end blank{parseInt(qst.bracketBlanks,10) > 1 ? "s" : ""}</span>
+        <span>·</span>
+        <input type="number" value={qst.bracketInjVol} onChange={function(e){ uq("bracketInjVol", e.target.value); }} style={{width:50,padding:"4px 6px",border:"1px solid " + BORDER,borderRadius:4,fontSize:12,fontFamily:"ui-monospace, monospace",color:NAVY,outline:"none",textAlign:"center"}} />
+        <span>µL each</span>
+      </div>
+    </div>
+
+    {/* PREVIEW */}
+    <div style={sectionLabel}>QUEUE PREVIEW ({queueRows.length} injection{queueRows.length !== 1 ? "s" : ""})</div>
+    <div style={{overflowX:"auto",border:"1px solid " + BORDER,borderRadius:8,marginBottom:8}}>
+      <table style={{width:"100%",borderCollapse:"collapse",fontSize:11,minWidth:920}}>
+        <thead><tr style={{background:"#dbe6f4",borderBottom:"1px solid " + BORDER}}>
+          <th style={{padding:"6px 8px",textAlign:"left",color:NAVY,fontSize:10,fontWeight:700,letterSpacing:0.3}}>File Name</th>
+          <th style={{padding:"6px 8px",textAlign:"left",color:NAVY,fontSize:10,fontWeight:700,letterSpacing:0.3}}>File Text</th>
+          <th style={{padding:"6px 8px",textAlign:"center",color:NAVY,fontSize:10,fontWeight:700,letterSpacing:0.3}}>Inj Vol</th>
+          <th style={{padding:"6px 8px",textAlign:"center",color:NAVY,fontSize:10,fontWeight:700,letterSpacing:0.3}}>Bottle</th>
+          <th style={{padding:"6px 8px",textAlign:"left",color:NAVY,fontSize:10,fontWeight:700,letterSpacing:0.3}}>Inlet File</th>
+          <th style={{padding:"6px 8px",textAlign:"left",color:NAVY,fontSize:10,fontWeight:700,letterSpacing:0.3}}>MS File</th>
+          <th style={{padding:"6px 8px",textAlign:"left",color:NAVY,fontSize:10,fontWeight:700,letterSpacing:0.3}}>MS Tune File</th>
+        </tr></thead>
+        <tbody>
+          {queueRows.map(function(r, i){
+            var rowBg = r.kind === "blank" ? "#fafcfe" : (r.kind === "sst" ? "#fff8ed" : "#fff");
+            var sstBorder = r.kind === "sst" ? {borderLeft: "3px solid " + AMBER} : {};
+            return <tr key={i} style={Object.assign({background: rowBg, borderBottom:"1px solid #ecf0f6"})}>
+              <td style={Object.assign({padding:"4px 8px",fontFamily:"ui-monospace, monospace",color: r.kind === "sample" ? TEAL : (r.kind === "sst" ? "#7a5012" : SLATE),fontWeight: r.kind === "sample" ? 700 : 600,fontSize:11,whiteSpace:"nowrap"}, sstBorder)}>{r.fileName}</td>
+              <td style={{padding:"4px 8px",fontSize:11,color:NAVY,whiteSpace:"nowrap"}}>{r.fileText}</td>
+              <td style={{padding:"4px 8px",textAlign:"center",fontFamily:"ui-monospace, monospace",color:NAVY,fontSize:11}}>{r.injVol}</td>
+              <td style={{padding:"4px 8px",textAlign:"center",fontFamily:"ui-monospace, monospace",color:NAVY,fontWeight:600,fontSize:11}}>{r.bottle}</td>
+              <td style={{padding:"4px 8px",fontFamily:"ui-monospace, monospace",color:"#5a6984",fontSize:10,whiteSpace:"nowrap"}}>{r.inletFile}</td>
+              <td style={{padding:"4px 8px",fontFamily:"ui-monospace, monospace",color:"#5a6984",fontSize:10,whiteSpace:"nowrap"}}>{r.msFile}</td>
+              <td style={{padding:"4px 8px",fontFamily:"ui-monospace, monospace",color:"#5a6984",fontSize:10,whiteSpace:"nowrap"}}>{r.msTuneFile}</td>
+            </tr>;
+          })}
+        </tbody>
+      </table>
+    </div>
+
+    {/* ACTIONS */}
+    <div style={{display:"flex",gap:8,marginTop:14,flexWrap:"wrap"}}>
+      <button type="button" onClick={copyForMassLynx} style={{
+        background:TEAL,color:"#fff",border:"none",
+        padding:"10px 16px",borderRadius:6,
+        fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:"inherit",
+      }}>📋 Copy for MassLynx</button>
+      <button type="button" onClick={copyAsCsv} style={{
+        background:"transparent",color:SLATE,border:"1px solid " + BORDER,
+        padding:"10px 16px",borderRadius:6,
+        fontSize:13,fontWeight:600,cursor:"pointer",fontFamily:"inherit",
+      }}>📋 Copy as CSV</button>
+      <span style={{marginLeft:"auto",fontSize:11,color:SLATE,alignSelf:"center",lineHeight:1.5}}>
+        Paste into MassLynx Sample List — tab-delimited, columns auto-match.
+      </span>
+    </div>
+  </div>;
+}
+
+
+// ── Gradient Calculator (placeholder for now) ────────────────────────
+// User mentioned they'd send their gradient as an example before this
+// gets fleshed out. This is a deliberate stub — when the gradient example
+// arrives, replace this with the real tool. Living here in the same tile
+// per user request (no separate LC tile).
+
+// ── Gradient Calculator ──────────────────────────────────────────────
+// Edit an LC gradient table (Waters/MassLynx-style columns: Time, Flow,
+// %A, %B, Curve). Three quick adjustments:
+//   1. Main gradient slope (%B/min) — primary control. Updates time.
+//   2. Main gradient duration (min) — same operation, different param.
+//   3. Total method time — proportional scale of every segment.
+//
+// "Main gradient" is auto-detected as the longest segment (≥2 min) with
+// the largest %B change. Adjustments to it shift subsequent rows by the
+// delta, preserving wash/hold/re-equilibration durations.
+//
+// SVG plot shows original (faint slate) overlaid with current (bold teal),
+// with the main gradient segment shaded.
+function GradientCalculatorCard(props){
+  // ── Default gradient — from user's screenshot 2026-06-05 ──────────
+  // 30-min method: 1 min hold @ 2%B → ramp to 40%B over 20 min → ramp
+  // to 90%B over 1 min → hold 3 min → ramp back to 2%B over 1 min →
+  // re-equilibration 4 min. Flow constant 0.300 mL/min.
+  var defaultGradient = [
+    { time: "Initial", flow: "0.300", pctB: "2.0",  curve: "Initial" },
+    { time: "1.00",    flow: "0.300", pctB: "2.0",  curve: "6" },
+    { time: "21.00",   flow: "0.300", pctB: "40.0", curve: "6" },
+    { time: "22.00",   flow: "0.300", pctB: "90.0", curve: "6" },
+    { time: "25.00",   flow: "0.300", pctB: "90.0", curve: "6" },
+    { time: "26.00",   flow: "0.300", pctB: "2.0",  curve: "6" },
+    { time: "30.00",   flow: "0.300", pctB: "2.0",  curve: "6" },
+  ];
+
+  var _g = useState({
+    gradient: defaultGradient,
+    // Keep an immutable snapshot for the before/after plot
+    original: defaultGradient.map(function(r){ return Object.assign({}, r); }),
+  });
+  var gst = _g[0], setGst = _g[1];
+
+  function updateRow(idx, field, value){
+    setGst(function(prev){
+      var ng = prev.gradient.map(function(r, i){
+        if (i !== idx) return r;
+        var nr = {}; for (var k in r) nr[k] = r[k];
+        nr[field] = value;
+        return nr;
+      });
+      return { gradient: ng, original: prev.original };
+    });
+  }
+  function addRow(){
+    setGst(function(prev){
+      var last = prev.gradient[prev.gradient.length - 1] || { time:"0", flow:"0.300", pctB:"2.0", curve:"6" };
+      var ng = prev.gradient.concat([{ time: String((parseFloat(last.time) || 0) + 1), flow: last.flow, pctB: last.pctB, curve: "6" }]);
+      return { gradient: ng, original: prev.original };
+    });
+  }
+  function removeRow(idx){
+    setGst(function(prev){
+      var ng = prev.gradient.filter(function(_, i){ return i !== idx; });
+      return { gradient: ng, original: prev.original };
+    });
+  }
+  function resetToOriginal(){
+    setGst(function(prev){
+      return { gradient: prev.original.map(function(r){ return Object.assign({}, r); }), original: prev.original };
+    });
+  }
+  function snapshotAsOriginal(){
+    setGst(function(prev){
+      return { gradient: prev.gradient, original: prev.gradient.map(function(r){ return Object.assign({}, r); }) };
+    });
+  }
+
+  // ── Helpers: parse the gradient into numeric segments ─────────────
+  function rowToNumeric(r){
+    // "Initial" → time 0
+    var t = (String(r.time).toLowerCase() === "initial") ? 0 : parseFloat(r.time);
+    var b = parseFloat(r.pctB);
+    return { time: t, pctB: b };
+  }
+  function buildSegments(rows){
+    // Returns array of {start_t, end_t, start_b, end_b, dur, dB, slope}
+    var segs = [];
+    for (var i = 1; i < rows.length; i++) {
+      var a = rowToNumeric(rows[i-1]);
+      var b = rowToNumeric(rows[i]);
+      if (!isFinite(a.time) || !isFinite(b.time) || !isFinite(a.pctB) || !isFinite(b.pctB)) continue;
+      var dur = b.time - a.time;
+      var dB = b.pctB - a.pctB;
+      segs.push({
+        idx: i,           // the row that ENDS this segment
+        start_t: a.time, end_t: b.time,
+        start_b: a.pctB, end_b: b.pctB,
+        dur: dur, dB: dB,
+        slope: dur > 0 ? dB / dur : 0,
+      });
+    }
+    return segs;
+  }
+
+  // Auto-detect main gradient: longest segment (≥2 min) with largest |%B change|
+  function findMainSegment(segs){
+    var candidates = segs.filter(function(s){ return s.dur >= 2 && Math.abs(s.dB) > 0; });
+    if (candidates.length === 0) return null;
+    candidates.sort(function(a, b){ return Math.abs(b.dB) - Math.abs(a.dB); });
+    return candidates[0];
+  }
+
+  var segments = buildSegments(gst.gradient);
+  var mainSeg = findMainSegment(segments);
+  var origSegments = buildSegments(gst.original);
+  var origMainSeg = findMainSegment(origSegments);
+
+  // Total method time
+  function totalTime(rows){
+    var last = rows[rows.length - 1];
+    var t = rowToNumeric(last).time;
+    return isFinite(t) ? t : 0;
+  }
+  var totalT = totalTime(gst.gradient);
+  var origTotalT = totalTime(gst.original);
+
+  // ── Adjustments ───────────────────────────────────────────────────
+  // Stretch the main gradient segment to a new duration. All subsequent
+  // rows shift by the delta. Wash/hold/re-equilibration durations stay
+  // the same — they're column-physical constants.
+  function setMainDuration(newDur){
+    if (!mainSeg) return;
+    var delta = newDur - mainSeg.dur;
+    setGst(function(prev){
+      var ng = prev.gradient.map(function(r, i){
+        // mainSeg.idx is the row index that ENDS the main segment.
+        // Rows at idx AND after should shift by delta.
+        if (i < mainSeg.idx) return r;
+        var nr = {}; for (var k in r) nr[k] = r[k];
+        if (i === 0 && String(r.time).toLowerCase() === "initial") return nr; // never shift "Initial"
+        var t = parseFloat(r.time);
+        if (isFinite(t)) nr.time = (t + delta).toFixed(2);
+        return nr;
+      });
+      return { gradient: ng, original: prev.original };
+    });
+  }
+
+  // Proportional scale: scale every time value by factor
+  function scaleTotal(newTotal){
+    if (!isFinite(newTotal) || newTotal <= 0 || totalT <= 0) return;
+    var factor = newTotal / totalT;
+    setGst(function(prev){
+      var ng = prev.gradient.map(function(r, i){
+        var nr = {}; for (var k in r) nr[k] = r[k];
+        if (i === 0 && String(r.time).toLowerCase() === "initial") return nr;
+        var t = parseFloat(r.time);
+        if (isFinite(t)) nr.time = (t * factor).toFixed(2);
+        return nr;
+      });
+      return { gradient: ng, original: prev.original };
+    });
+  }
+
+  // ── Adjustment input state ────────────────────────────────────────
+  var _adj = useState({ mode: "slope" }); // "slope" | "duration" | "total"
+  var adjMode = _adj[0].mode;
+  var setAdjMode = function(m){ _adj[1]({ mode: m }); };
+
+  // ── SVG plot ──────────────────────────────────────────────────────
+  function buildPlotPath(rows){
+    var pts = [];
+    rows.forEach(function(r){
+      var n = rowToNumeric(r);
+      if (isFinite(n.time) && isFinite(n.pctB)) pts.push({ t: n.time, b: n.pctB });
+    });
+    return pts;
+  }
+  var currentPts = buildPlotPath(gst.gradient);
+  var origPts = buildPlotPath(gst.original);
+  var xMax = Math.max(totalT, origTotalT, 1);
+  var yMax = 100;
+
+  var W = 540, H = 200;
+  var PADL = 36, PADR = 12, PADT = 8, PADB = 28;
+  var PW = W - PADL - PADR, PH = H - PADT - PADB;
+  function xS(t){ return PADL + (t / xMax) * PW; }
+  function yS(b){ return PADT + PH - (b / yMax) * PH; }
+  function ptsToPath(pts){
+    if (pts.length === 0) return "";
+    return "M " + pts.map(function(p){ return xS(p.t) + " " + yS(p.b); }).join(" L ");
+  }
+
+  // ── Styles ────────────────────────────────────────────────────────
+  var NAVY = "#0b2a6f", TEAL = "#139cb6", BORDER = "#dfe7f2", SLATE = "#5a6984", AMBER = "#bf7a1a";
+  var sectionLabel = { fontSize: 11, color: SLATE, fontWeight: 600, marginTop: 18, marginBottom: 10, letterSpacing: 0.5 };
+  var smallInput = {
+    width: "100%", padding: "6px 8px", border: "1px solid " + BORDER, borderRadius: 4,
+    fontSize: 13, fontFamily: "ui-monospace, monospace", color: NAVY, outline: "none",
+    textAlign: "center",
+  };
+  var cellInput = {
+    width: "100%", border: "none", background: "transparent", padding: "4px 6px",
+    fontSize: 12, fontFamily: "ui-monospace, monospace", color: NAVY, outline: "none",
+    textAlign: "center",
+  };
+  function fmt2(x){ return isFinite(x) ? x.toFixed(2) : "—"; }
+  function fmt1(x){ return isFinite(x) ? x.toFixed(1) : "—"; }
+  function fmt3(x){ return isFinite(x) ? x.toFixed(3) : "—"; }
+
+  // ── Copy to clipboard (MassLynx tab-delimited) ───────────────────
+  function copyForMassLynx(){
+    var lines = [];
+    lines.push(["Time (min)", "Flow (mL/min)", "%A", "%B", "Curve"].join("\t"));
+    gst.gradient.forEach(function(r){
+      var pctB = parseFloat(r.pctB);
+      var pctA = isFinite(pctB) ? (100 - pctB).toFixed(1) : "";
+      lines.push([r.time, r.flow, pctA, r.pctB, r.curve].join("\t"));
+    });
+    var text = lines.join("\n");
+    if (typeof navigator !== "undefined" && navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function(){}, function(){});
+    }
+  }
+
+  return <div>
+    <h2 style={{fontSize:20,fontWeight:700,color:NAVY,margin:"0 0 4px",letterSpacing:"-0.01em"}}>Gradient calculator</h2>
+    <div style={{fontSize:12,color:SLATE,marginBottom:18}}>
+      Edit your LC gradient. Adjust the main gradient slope or duration; wash/equilibration stay fixed. Plot shows original (slate) vs current (teal).
+    </div>
+
+    {/* QUICK ADJUSTMENTS */}
+    <div style={sectionLabel}>QUICK ADJUSTMENTS</div>
+    <div style={{padding:"14px 16px",background:"#f7fbff",border:"1px solid #d7e7fb",borderRadius:10,marginBottom:14}}>
+      {/* Main gradient — primary control */}
+      {mainSeg ? <div style={{marginBottom:14}}>
+        <div style={{fontSize:11,color:SLATE,fontWeight:600,marginBottom:6,letterSpacing:0.3}}>
+          MAIN GRADIENT
+          <span style={{fontWeight:400,color:"#8e9bb5",marginLeft:8,fontSize:10}}>
+            ({fmt1(mainSeg.start_b)}% → {fmt1(mainSeg.end_b)}% B · auto-detected)
+          </span>
+        </div>
+        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8,flexWrap:"wrap"}}>
+          <button type="button" onClick={function(){ setAdjMode("slope"); }} style={{
+            background: adjMode === "slope" ? TEAL : "transparent",
+            color: adjMode === "slope" ? "#fff" : SLATE,
+            border: "1px solid " + (adjMode === "slope" ? TEAL : BORDER),
+            padding:"4px 10px",borderRadius:5,fontSize:11,fontWeight:600,cursor:"pointer",fontFamily:"inherit",
+          }}>Slope (%B/min)</button>
+          <button type="button" onClick={function(){ setAdjMode("duration"); }} style={{
+            background: adjMode === "duration" ? TEAL : "transparent",
+            color: adjMode === "duration" ? "#fff" : SLATE,
+            border: "1px solid " + (adjMode === "duration" ? TEAL : BORDER),
+            padding:"4px 10px",borderRadius:5,fontSize:11,fontWeight:600,cursor:"pointer",fontFamily:"inherit",
+          }}>Duration (min)</button>
+        </div>
+        {adjMode === "slope" ? <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+          <span style={{fontSize:12,color:SLATE}}>Set slope to</span>
+          <input
+            type="number"
+            step="0.1"
+            value={fmt2(mainSeg.slope)}
+            onChange={function(e){
+              var newSlope = parseFloat(e.target.value);
+              if (isFinite(newSlope) && newSlope !== 0) {
+                var newDur = mainSeg.dB / newSlope;
+                setMainDuration(newDur);
+              }
+            }}
+            style={{
+              width:80,padding:"6px 8px",border:"1.5px solid " + TEAL, borderRadius:5,
+              fontSize:16,fontFamily:"ui-monospace, monospace",color:NAVY,outline:"none",textAlign:"center",fontWeight:700,
+            }}
+          />
+          <span style={{fontSize:12,color:SLATE}}>%B/min</span>
+          <span style={{marginLeft:"auto",fontSize:11,color:"#8e9bb5"}}>
+            Currently: {fmt2(mainSeg.slope)} %B/min over {fmt1(mainSeg.dur)} min
+          </span>
+        </div> : <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+          <span style={{fontSize:12,color:SLATE}}>Set duration to</span>
+          <input
+            type="number"
+            step="0.5"
+            value={fmt1(mainSeg.dur)}
+            onChange={function(e){
+              var newDur = parseFloat(e.target.value);
+              if (isFinite(newDur) && newDur > 0) setMainDuration(newDur);
+            }}
+            style={{
+              width:80,padding:"6px 8px",border:"1.5px solid " + TEAL, borderRadius:5,
+              fontSize:16,fontFamily:"ui-monospace, monospace",color:NAVY,outline:"none",textAlign:"center",fontWeight:700,
+            }}
+          />
+          <span style={{fontSize:12,color:SLATE}}>min</span>
+          <span style={{marginLeft:"auto",fontSize:11,color:"#8e9bb5"}}>
+            Currently: {fmt1(mainSeg.dur)} min ({fmt2(mainSeg.slope)} %B/min)
+          </span>
+        </div>}
+      </div> : <div style={{fontSize:12,color:"#8e9bb5",fontStyle:"italic",marginBottom:14}}>
+        Can't auto-detect a main gradient segment (need a segment ≥ 2 min with a %B change).
+      </div>}
+
+      {/* Total time scale — secondary */}
+      <details style={{marginTop:4}}>
+        <summary style={{cursor:"pointer",fontSize:11,color:TEAL,fontWeight:600,letterSpacing:0.3}}>
+          + Scale all segments proportionally
+        </summary>
+        <div style={{marginTop:8,paddingLeft:8}}>
+          <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+            <span style={{fontSize:12,color:SLATE}}>Set total run time to</span>
+            <input
+              type="number"
+              step="1"
+              value={fmt1(totalT)}
+              onChange={function(e){
+                var newTotal = parseFloat(e.target.value);
+                if (isFinite(newTotal) && newTotal > 0) scaleTotal(newTotal);
+              }}
+              style={{
+                width:80,padding:"6px 8px",border:"1px solid " + BORDER, borderRadius:5,
+                fontSize:14,fontFamily:"ui-monospace, monospace",color:NAVY,outline:"none",textAlign:"center",fontWeight:600,
+              }}
+            />
+            <span style={{fontSize:12,color:SLATE}}>min</span>
+            <span style={{marginLeft:"auto",fontSize:11,color:"#8e9bb5"}}>
+              Scales every segment by the same factor (column transfer, instrument move, etc.)
+            </span>
+          </div>
+        </div>
+      </details>
+    </div>
+
+    {/* PLOT */}
+    <div style={sectionLabel}>%B vs TIME</div>
+    <div style={{padding:"12px",background:"#fff",border:"1px solid " + BORDER,borderRadius:8,marginBottom:14,overflowX:"auto"}}>
+      <svg width={W} height={H} style={{display:"block",maxWidth:"100%",height:"auto"}}>
+        {/* Y-axis gridlines */}
+        {[0, 25, 50, 75, 100].map(function(b){
+          return <g key={"yg"+b}>
+            <line x1={PADL} y1={yS(b)} x2={W - PADR} y2={yS(b)} stroke="#ecf0f6" strokeWidth="1" strokeDasharray={b === 0 || b === 100 ? "0" : "2,3"} />
+            <text x={PADL - 6} y={yS(b) + 4} fontSize="9" fill={SLATE} textAnchor="end">{b}%</text>
+          </g>;
+        })}
+        {/* X-axis gridlines */}
+        {[0, 10, 20, 30, 40, 50, 60].filter(function(t){ return t <= xMax; }).map(function(t){
+          return <g key={"xg"+t}>
+            <line x1={xS(t)} y1={PADT} x2={xS(t)} y2={PADT + PH} stroke="#ecf0f6" strokeWidth="1" strokeDasharray={t === 0 ? "0" : "2,3"} />
+            <text x={xS(t)} y={H - PADB + 14} fontSize="9" fill={SLATE} textAnchor="middle">{t}</text>
+          </g>;
+        })}
+        <text x={PADL + PW/2} y={H - 4} fontSize="10" fill={SLATE} textAnchor="middle">time (min)</text>
+        <text x={10} y={PADT + PH/2} fontSize="10" fill={SLATE} textAnchor="middle" transform={"rotate(-90, 10, " + (PADT + PH/2) + ")"}>%B</text>
+
+        {/* Shaded main gradient segment of CURRENT */}
+        {mainSeg && <rect
+          x={xS(mainSeg.start_t)}
+          y={PADT}
+          width={xS(mainSeg.end_t) - xS(mainSeg.start_t)}
+          height={PH}
+          fill="#139cb6"
+          opacity="0.06"
+        />}
+
+        {/* Original gradient — faint slate */}
+        <path d={ptsToPath(origPts)} fill="none" stroke={SLATE} strokeWidth="1.5" strokeDasharray="4,3" opacity="0.5" />
+        {origPts.map(function(p, i){
+          return <circle key={"op"+i} cx={xS(p.t)} cy={yS(p.b)} r="2.5" fill={SLATE} opacity="0.4" />;
+        })}
+
+        {/* Current gradient — bold teal */}
+        <path d={ptsToPath(currentPts)} fill="none" stroke={TEAL} strokeWidth="2.5" />
+        {currentPts.map(function(p, i){
+          return <circle key={"cp"+i} cx={xS(p.t)} cy={yS(p.b)} r="3.5" fill={TEAL} />;
+        })}
+      </svg>
+      <div style={{display:"flex",alignItems:"center",gap:14,marginTop:6,fontSize:11,color:SLATE,justifyContent:"center",flexWrap:"wrap"}}>
+        <span style={{display:"flex",alignItems:"center",gap:5}}>
+          <span style={{display:"inline-block",width:18,borderTop:"2px solid " + TEAL}} />
+          Current ({fmt1(totalT)} min)
+        </span>
+        <span style={{display:"flex",alignItems:"center",gap:5}}>
+          <span style={{display:"inline-block",width:18,borderTop:"1.5px dashed " + SLATE,opacity:0.6}} />
+          Original ({fmt1(origTotalT)} min)
+        </span>
+        {mainSeg && <span style={{display:"flex",alignItems:"center",gap:5}}>
+          <span style={{display:"inline-block",width:14,height:10,background:TEAL,opacity:0.15}} />
+          Main gradient
+        </span>}
+      </div>
+    </div>
+
+    {/* TABLE EDITOR */}
+    <div style={sectionLabel}>GRADIENT TABLE</div>
+    <div style={{overflowX:"auto",border:"1px solid " + BORDER,borderRadius:8,marginBottom:8}}>
+      <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,minWidth:520}}>
+        <thead><tr style={{background:"#dbe6f4",borderBottom:"1px solid " + BORDER}}>
+          <th style={{padding:"6px 8px",textAlign:"center",color:NAVY,fontSize:10,fontWeight:700,letterSpacing:0.3,width:36}}>#</th>
+          <th style={{padding:"6px 8px",textAlign:"center",color:NAVY,fontSize:10,fontWeight:700,letterSpacing:0.3}}>Time<br/><span style={{fontWeight:500,color:SLATE,fontSize:9}}>min</span></th>
+          <th style={{padding:"6px 8px",textAlign:"center",color:NAVY,fontSize:10,fontWeight:700,letterSpacing:0.3}}>Flow<br/><span style={{fontWeight:500,color:SLATE,fontSize:9}}>mL/min</span></th>
+          <th style={{padding:"6px 8px",textAlign:"center",color:NAVY,fontSize:10,fontWeight:700,letterSpacing:0.3}}>%A</th>
+          <th style={{padding:"6px 8px",textAlign:"center",color:NAVY,fontSize:10,fontWeight:700,letterSpacing:0.3}}>%B</th>
+          <th style={{padding:"6px 8px",textAlign:"center",color:NAVY,fontSize:10,fontWeight:700,letterSpacing:0.3,width:60}}>Curve</th>
+          <th style={{padding:"6px 8px",width:24}}></th>
+        </tr></thead>
+        <tbody>
+          {gst.gradient.map(function(r, idx){
+            var pctBNum = parseFloat(r.pctB);
+            var pctA = isFinite(pctBNum) ? (100 - pctBNum).toFixed(1) : "";
+            var isMainEnd = mainSeg && idx === mainSeg.idx;
+            return <tr key={idx} style={{borderBottom:"1px solid #ecf0f6", background: isMainEnd ? "#f0f9fb" : "#fff"}}>
+              <td style={{padding:"4px 6px",textAlign:"center",color:SLATE,fontSize:11}}>{idx + 1}</td>
+              <td style={{padding:"2px 4px"}}>
+                <input type="text" value={r.time} onChange={function(e){ updateRow(idx, "time", e.target.value); }} style={cellInput} />
+              </td>
+              <td style={{padding:"2px 4px"}}>
+                <input type="text" value={r.flow} onChange={function(e){ updateRow(idx, "flow", e.target.value); }} style={cellInput} />
+              </td>
+              <td style={{padding:"4px 6px",textAlign:"center",fontFamily:"ui-monospace, monospace",color:"#8e9bb5",fontSize:11,background:"#fafcfe"}}>{pctA}</td>
+              <td style={{padding:"2px 4px"}}>
+                <input type="text" value={r.pctB} onChange={function(e){ updateRow(idx, "pctB", e.target.value); }} style={cellInput} />
+              </td>
+              <td style={{padding:"2px 4px"}}>
+                <input type="text" value={r.curve} onChange={function(e){ updateRow(idx, "curve", e.target.value); }} style={cellInput} />
+              </td>
+              <td style={{padding:"4px 6px",textAlign:"center"}}>
+                <button type="button" onClick={function(){ removeRow(idx); }} style={{background:"none",border:"none",color:"#b4332e",fontSize:14,cursor:"pointer",padding:0,fontFamily:"inherit"}}>×</button>
+              </td>
+            </tr>;
+          })}
+        </tbody>
+      </table>
+    </div>
+    <div style={{fontSize:11,color:"#8e9bb5",marginBottom:14}}>
+      %A auto-computed as 100 − %B. The main gradient row (where %B reaches its peak ramp endpoint) is highlighted faint teal.
+    </div>
+
+    {/* ACTIONS */}
+    <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+      <button type="button" onClick={addRow} style={{
+        background:"none",border:"none",color:TEAL,fontSize:12,cursor:"pointer",
+        padding:"4px 8px",fontFamily:"inherit",fontWeight:600,
+      }}>+ Add row</button>
+      <button type="button" onClick={copyForMassLynx} style={{
+        background:TEAL,color:"#fff",border:"none",
+        padding:"8px 14px",borderRadius:6,
+        fontSize:12,fontWeight:700,cursor:"pointer",fontFamily:"inherit",
+      }}>📋 Copy for MassLynx</button>
+      <span style={{marginLeft:"auto",display:"flex",gap:10,alignItems:"center"}}>
+        <button type="button" onClick={resetToOriginal} style={{
+          background:"none",border:"1px solid " + BORDER,color:SLATE,
+          padding:"6px 10px",borderRadius:5,
+          fontSize:11,fontWeight:600,cursor:"pointer",fontFamily:"inherit",
+        }} title="Revert to the original (snapshot) gradient">↺ Reset to original</button>
+        <button type="button" onClick={snapshotAsOriginal} style={{
+          background:"none",border:"1px solid " + BORDER,color:SLATE,
+          padding:"6px 10px",borderRadius:5,
+          fontSize:11,fontWeight:600,cursor:"pointer",fontFamily:"inherit",
+        }} title="Save the current gradient as the new 'original' baseline for the plot">⊕ Set as baseline</button>
+      </span>
+    </div>
+  </div>;
+}
 // ── Mass Spec Tools wrapper ──────────────────────────────────────────
 // Single entry point on the Tools tab that opens a tabbed UI with the
 // four MS calculators as sub-tabs. Owns the sub-tab state and the
@@ -3748,6 +4758,8 @@ function LCMSCalculatorsCard(props){
       <button type="button" onClick={function(){ setSubTab("mass_col"); }} style={subTabBtn(subTab === "mass_col")}>Mass on Column</button>
       <button type="button" onClick={function(){ setSubTab("solution_maker"); }} style={subTabBtn(subTab === "solution_maker")}>Solution Maker</button>
       <button type="button" onClick={function(){ setSubTab("spike_planner"); }} style={subTabBtn(subTab === "spike_planner")}>Spike Planner</button>
+      <button type="button" onClick={function(){ setSubTab("queue_builder"); }} style={subTabBtn(subTab === "queue_builder")}>Queue Builder</button>
+      <button type="button" onClick={function(){ setSubTab("gradient"); }} style={subTabBtn(subTab === "gradient")}>Gradient</button>
       <button type="button" onClick={function(){ setSubTab("mass_moles"); }} style={subTabBtn(subTab === "mass_moles")}>Mass ↔ Moles</button>
     </div>
 
@@ -3772,6 +4784,12 @@ function LCMSCalculatorsCard(props){
       instructor={instructor}
       customProteins={customProteins}
       saveProtein={saveProtein}
+    />}
+    {subTab === "queue_builder" && <QueueBuilderCard
+      instructor={instructor}
+    />}
+    {subTab === "gradient" && <GradientCalculatorCard
+      instructor={instructor}
     />}
     {subTab === "mass_moles" && <MassMolesConverterCard
       instructor={instructor}
