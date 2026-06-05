@@ -2502,6 +2502,79 @@ function SolutionMakerCard(props){
   </div>;
 }
 
+// ── Mass Spec Tools wrapper ──────────────────────────────────────────
+// Single entry point on the Tools tab that opens a tabbed UI with the
+// four MS calculators as sub-tabs. Owns the sub-tab state and the
+// "Send to Solution Maker" handoff from Peptide Prep (now intra-component).
+function LCMSCalculatorsCard(props){
+  var instructor = !!props.instructor;
+  var customProteins = props.customProteins || [];
+  var saveProtein = props.saveProtein;
+
+  // Default sub-tab: Peptide Mapping Prep (per user choice — most common
+  // bench-math workflow they reach for).
+  var _t = useState("peptide_prep"), subTab = _t[0], setSubTab = _t[1];
+
+  // Intra-component handoff: when Peptide Prep computes a yield and the user
+  // taps "Send X µg to Solution Maker," we stash the value here and switch
+  // sub-tab. Solution Maker reads-and-clears it on mount.
+  var _ph = useState(null), pendingHandoff = _ph[0], setPendingHandoff = _ph[1];
+  function sendToSolutionMaker(amount, unit, source) {
+    setPendingHandoff({ amount: String(amount), unit: unit, source: source });
+    setSubTab("solution_maker");
+  }
+  function consumeHandoff() {
+    var v = pendingHandoff;
+    setPendingHandoff(null);
+    return v;
+  }
+
+  var NAVY = "#0b2a6f", TEAL = "#139cb6", BORDER = "#dfe7f2", SLATE = "#5a6984";
+  function subTabBtn(active) {
+    return {
+      flex: 1, padding: "10px 6px",
+      background: active ? "#fff" : "transparent",
+      color: active ? NAVY : SLATE, border: "none",
+      borderBottom: active ? "3px solid " + TEAL : "3px solid transparent",
+      fontSize: 12, fontWeight: active ? 800 : 600,
+      cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap",
+    };
+  }
+
+  return <div>
+    {/* Sub-tab strip — same pattern as the Peptide Prep card's internal sub-tabs */}
+    <div style={{display:"flex",background:"#eaf1fb",borderRadius:8,overflow:"hidden",borderBottom:"1px solid " + BORDER, marginBottom: 20}}>
+      <button type="button" onClick={function(){ setSubTab("peptide_prep"); }} style={subTabBtn(subTab === "peptide_prep")}>Peptide Prep</button>
+      <button type="button" onClick={function(){ setSubTab("mass_col"); }} style={subTabBtn(subTab === "mass_col")}>Mass on Column</button>
+      <button type="button" onClick={function(){ setSubTab("solution_maker"); }} style={subTabBtn(subTab === "solution_maker")}>Solution Maker</button>
+      <button type="button" onClick={function(){ setSubTab("mass_moles"); }} style={subTabBtn(subTab === "mass_moles")}>Mass ↔ Moles</button>
+    </div>
+
+    {/* Active sub-tab panel — render only the selected one */}
+    {subTab === "peptide_prep" && <PeptidePrepCard
+      instructor={instructor}
+      sendToSolutionMaker={sendToSolutionMaker}
+    />}
+    {subTab === "mass_col" && <MassOnColumnCard
+      instructor={instructor}
+      customProteins={customProteins}
+      saveProtein={saveProtein}
+    />}
+    {subTab === "solution_maker" && <SolutionMakerCard
+      instructor={instructor}
+      customProteins={customProteins}
+      saveProtein={saveProtein}
+      pendingHandoff={pendingHandoff}
+      consumeHandoff={consumeHandoff}
+    />}
+    {subTab === "mass_moles" && <MassMolesConverterCard
+      instructor={instructor}
+      customProteins={customProteins}
+      saveProtein={saveProtein}
+    />}
+  </div>;
+}
+
 function UnitConverterCard(){
   var _s=useState({input:"1", fromUnit:"mg/mL", toUnit:"ug/mL"});
   var st=_s[0], setSt=_s[1];
@@ -10774,20 +10847,6 @@ function App() {
     setCustomProteins(function(prev){ return prev.filter(function(p){ return p.id !== id; }); });
   }
 
-  // ── Cross-tab handoff (Peptide Prep → Solution Maker) ─────────────────
-  // When user taps "Send X µg to Solution Maker" in Peptide Prep, we stash
-  // the amount + switch to Solution Maker. Solution Maker reads-and-clears
-  // on mount via consumeSolnHandoff. One-shot.
-  var _psh = useState(null), pendingSolnHandoff = _psh[0], setPendingSolnHandoff = _psh[1];
-  function sendToSolutionMaker(amount, unit, source) {
-    setPendingSolnHandoff({ amount: String(amount), unit: unit, source: source });
-    setSelectedTool("solution_maker");
-  }
-  function consumeSolnHandoff() {
-    var v = pendingSolnHandoff;
-    setPendingSolnHandoff(null);
-    return v;
-  }
   var _exp=useState({}),expanded=_exp[0],setExpanded=_exp[1];
   var _rexp=useState({}),resultsExpanded=_rexp[0],setResultsExpanded=_rexp[1];
   var _ap=useState({}),picks=_ap[0],setPicks=_ap[1];
@@ -14842,10 +14901,7 @@ function App() {
             {id:"unit",  title:"Unit Converter",          desc:"Convert mg/mL ↔ ug/mL ↔ ng/mL etc.",  icon:iconConv,  color:"#0F8AA2"},
             {id:"spike", title:"Spike Recovery Planner",   desc:"Plan spike volumes and check expected recovery.", icon:iconSpike, color:"#6337b9"},
             {id:"elisa", title:"Dilution Planner",        desc:"Plan tube pre-dilutions and plate serial dilutions for any assay.", icon:iconElisa, color:"#BF7A1A"},
-            {id:"mass_col", title:"Mass on Column",        desc:"Compute mass and moles delivered to the LC-MS column (fmol/pmol/ng on column).", icon:iconMassCol, color:"#0b2a6f"},
-            {id:"mass_moles", title:"Mass ↔ Moles",        desc:"Quick converter between mass (ng/µg/mg) and moles (fmol/pmol/nmol). Uses MW.", icon:iconMassMoles, color:"#139cb6"},
-            {id:"solution_maker", title:"Solution Maker", desc:"You have X amount, want Y concentration — how much buffer? For resuspending dry-downs.", icon:iconSolMaker, color:"#1b7f6a"},
-            {id:"peptide_prep", title:"Peptide Mapping Prep", desc:"Bench math for reduction–alkylation–digestion. Volumes, enzyme reconstitution, ratios.", icon:iconPepPrep, color:"#bf7a1a"},
+            {id:"ms_tools", title:"Mass Spec Tools", desc:"Peptide mapping prep recipe · mass on column · solution maker · mass↔moles. All in one tabbed view, with a shared protein library.", icon:iconPepPrep, color:"#0b2a6f"},
             {id:"validation", title:"Validation Designer", desc:"Design simple ICH Q2-aligned validation experiments — linearity, accuracy, precision, LLOQ, spike recovery.", icon:iconValidation, color:"#6337b9"},
           ];
           var bioTools = [
@@ -14908,10 +14964,7 @@ function App() {
               setTab(0);
             }} />}
             {selectedTool==="validation" && <ValidationDesignerEntry instructor={instructor} unit={unit} />}
-            {selectedTool==="mass_col" && <MassOnColumnCard instructor={instructor} customProteins={customProteins} saveProtein={saveProtein} />}
-            {selectedTool==="mass_moles" && <MassMolesConverterCard instructor={instructor} customProteins={customProteins} saveProtein={saveProtein} />}
-            {selectedTool==="solution_maker" && <SolutionMakerCard instructor={instructor} customProteins={customProteins} saveProtein={saveProtein} pendingHandoff={pendingSolnHandoff} consumeHandoff={consumeSolnHandoff} />}
-            {selectedTool==="peptide_prep" && <PeptidePrepCard instructor={instructor} sendToSolutionMaker={sendToSolutionMaker} />}
+            {selectedTool==="ms_tools" && <LCMSCalculatorsCard instructor={instructor} customProteins={customProteins} saveProtein={saveProtein} />}
             {selectedTool==="growth_rate" && <GrowthRateCalculatorCard batches={btBatches} setBatches={setBtBatches} activeId={btActiveId} setActiveId={setBtActiveId} instructor={instructor} step={btStep} setStep={setBtStep} />}
           </div>;
         })()}
