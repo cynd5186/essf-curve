@@ -2531,15 +2531,43 @@ function SpikePlannerCard(props){
   var customProteins = props.customProteins || [];
   var saveProtein = props.saveProtein;
 
-  // Default sample set matches the user's TopN screenshot — handy for
-  // testing and as a sensible starting point. User can clear/add rows.
+  // ── Waters MassPREP digestion standards ─────────────────────────────
+  // CORRECTED 2026-06-05 per Waters manual 715001593 Rev C (and 715001717 for Mixes):
+  // Individual standards are prepared by digesting 1 nmol of protein, so each
+  // vial contains 1000 pmol total. The Waters recommendation for MALDI is:
+  //   1. Dissolve vial in 1.0 mL of 0.1% TFA/10% ACN → 1 pmol/µL stock
+  //   2. Dilute 20 µL aliquot in 180 µL water → 100 fmol/µL working solution
+  //   "Each MassPREP Digestion Standard is sufficient for 1000 or more MALDI MS analyses."
+  //
+  // For HPLC: dissolve in 100 µL of 0.1% TFA → 10 pmol/µL stock.
+  //
+  // pmolPerVial below is the AMOUNT IN THE LYOPHILIZED VIAL (the starting material),
+  // not the working stock. The tool computes the reconstitution volume needed to
+  // hit the analyst's target stock from this number.
+  //
+  // MPDS Mixes (Waters manual 715001717): four proteins co-digested at specific
+  // molar ratios. Mix 1 is 1:1:1:1 at 50 pmol each. Mix 2 is varied: ADH 50,
+  // GPB 25, ENO 100, BSA 400 pmol per vial.
+  var massprepStandards = [
+    { id: "custom", label: "Custom (specify amount in vial)",         pmolPerVial: null, partNo: "" },
+    { id: "adh",    label: "ADH (yeast alcohol dehydrogenase)",        pmolPerVial: 1000, partNo: "186002328" },
+    { id: "gpb",    label: "GPB (phosphorylase b, rabbit)",            pmolPerVial: 1000, partNo: "186002326" },
+    { id: "eno",    label: "Enolase (yeast)",                          pmolPerVial: 1000, partNo: "186002325" },
+    { id: "bsa",    label: "BSA (bovine serum albumin)",               pmolPerVial: 1000, partNo: "186002329" },
+    { id: "hbh",    label: "Hemoglobin (bovine)",                      pmolPerVial: 1000, partNo: "186002327" },
+    { id: "mpds1",  label: "MPDS Mix 1 (50 pmol each: ADH+GPB+ENO+BSA, 1:1:1:1)", pmolPerVial: 50, partNo: "186002865", isMix: true },
+    { id: "mpds2",  label: "MPDS Mix 2 (varied: ADH 50 / GPB 25 / ENO 100 / BSA 400 pmol)", pmolPerVial: null, partNo: "186002866", isMix: true, note: "Per-protein amounts vary. If you're using a single protein from the mix as your spike, switch to that protein's individual standard for accurate vial math." },
+  ];
+
+
+
   var defaultSamples = [
-    { id: "S1",   name: "Sample 1 MWCO Ret",        proteinUg: "52.52",  include: true,  showDigest: false, digestConc: "",   digestVol: "" },
-    { id: "S1+",  name: "Sample 1+BLG MWCO Ret",    proteinUg: "17.862", include: true,  showDigest: false, digestConc: "",   digestVol: "" },
-    { id: "S2",   name: "Sample 2 MWCO Ret",        proteinUg: "38.5",   include: true,  showDigest: false, digestConc: "",   digestVol: "" },
-    { id: "S3",   name: "Sample 3 MWCO Ret",        proteinUg: "46.44",  include: true,  showDigest: false, digestConc: "",   digestVol: "" },
-    { id: "SST1", name: "BSA (2 mg/mL) SST",        proteinUg: "25",     include: true,  showDigest: false, digestConc: "",   digestVol: "" },
-    { id: "SST2", name: "bLG (100 µg/mL) Low SST",  proteinUg: "9.5",    include: true,  showDigest: false, digestConc: "",   digestVol: "" },
+    { id: "S1",   name: "Sample 1 MWCO Ret",       sampleConc: "5.252", sampleVolPulled: "10", proteinUg: "52.52",  include: true,  showDigest: false },
+    { id: "S1+",  name: "Sample 1+BLG MWCO Ret",   sampleConc: "1.786", sampleVolPulled: "10", proteinUg: "17.862", include: true,  showDigest: false },
+    { id: "S2",   name: "Sample 2 MWCO Ret",       sampleConc: "3.85",  sampleVolPulled: "10", proteinUg: "38.5",   include: true,  showDigest: false },
+    { id: "S3",   name: "Sample 3 MWCO Ret",       sampleConc: "4.644", sampleVolPulled: "10", proteinUg: "46.44",  include: true,  showDigest: false },
+    { id: "SST1", name: "BSA (2 mg/mL) SST",       sampleConc: "2",     sampleVolPulled: "12.5", proteinUg: "25",   include: true,  showDigest: false },
+    { id: "SST2", name: "bLG (100 µg/mL) Low SST", sampleConc: "0.1",   sampleVolPulled: "95", proteinUg: "9.5",   include: true,  showDigest: false },
   ];
 
   var _s = useState({
@@ -2551,9 +2579,70 @@ function SpikePlannerCard(props){
     manualStock: "100",
     formula: "exact",
     samples: defaultSamples,
+    // Waters MassPREP picker (or custom vial)
+    standardId: "adh",
+    customPmolPerVial: "50",   // used when standardId === "custom"
+    reconstitutionVol: "",     // µL — if blank, auto-computed from desired stock
   });
   var st = _s[0], setSt = _s[1];
   var u = function(k, v){ setSt(function(p){ var n={}; for(var x in p) n[x]=p[x]; n[k]=v; return n; }); };
+
+  // Per-column unit overrides (apply to all rows). null = auto-pick by magnitude.
+  var _resusOv = useState(null), resusUnitOv = _resusOv[0], setResusUnitOv = _resusOv[1];
+  var _spkVolOv = useState(null), spkVolUnitOv = _spkVolOv[0], setSpkVolUnitOv = _spkVolOv[1];
+  var _spkAmtOv = useState(null), spkAmtUnitOv = _spkAmtOv[0], setSpkAmtUnitOv = _spkAmtOv[1];
+  var _finalOv = useState(null), finalUnitOv = _finalOv[0], setFinalUnitOv = _finalOv[1];
+
+  var VOL_UNITS_TABLE = ["nL", "µL", "mL"];
+  var FMOL_UNITS_TABLE = ["amol", "fmol", "pmol", "nmol"];
+  var CONC_FMOL_UNITS_TABLE = ["fmol/µL", "pmol/µL", "fmol/mL"];
+
+  function autoVolUnitT(uL) {
+    if (uL == null || !isFinite(uL)) return "µL";
+    var a = Math.abs(uL);
+    if (a >= 1000) return "mL";
+    if (a >= 0.5) return "µL";
+    return "nL";
+  }
+  function uLToVolUnitT(uL, unit) {
+    if (uL == null || !isFinite(uL)) return null;
+    if (unit === "nL") return uL * 1000;
+    if (unit === "µL") return uL;
+    if (unit === "mL") return uL / 1000;
+    return uL;
+  }
+  function autoFmolUnitT(fmol) {
+    if (fmol == null || !isFinite(fmol)) return "fmol";
+    var a = Math.abs(fmol);
+    if (a >= 1e6) return "nmol";
+    if (a >= 1000) return "pmol";
+    if (a >= 0.001) return "fmol";
+    return "amol";
+  }
+  function fmolToFmolUnitT(fmol, unit) {
+    if (fmol == null || !isFinite(fmol)) return null;
+    if (unit === "amol") return fmol * 1000;
+    if (unit === "fmol") return fmol;
+    if (unit === "pmol") return fmol / 1000;
+    if (unit === "nmol") return fmol / 1e6;
+    return fmol;
+  }
+  function autoConcFmolUnitT(fmolPerUL) {
+    if (fmolPerUL == null || !isFinite(fmolPerUL)) return "fmol/µL";
+    if (fmolPerUL >= 1000) return "pmol/µL";
+    return "fmol/µL";
+  }
+  function concToConcUnitT(fmolPerUL, unit) {
+    if (fmolPerUL == null || !isFinite(fmolPerUL)) return null;
+    if (unit === "fmol/µL") return fmolPerUL;
+    if (unit === "pmol/µL") return fmolPerUL / 1000;
+    if (unit === "fmol/mL") return fmolPerUL * 1000;
+    return fmolPerUL;
+  }
+  function cycleUT(list, current){
+    var i = list.indexOf(current);
+    return list[(i + 1) % list.length];
+  }
 
   // Update one field of one sample row
   function updateSample(idx, field, value){
@@ -2563,12 +2652,13 @@ function SpikePlannerCard(props){
         if (i !== idx) return s;
         var ns = {}; for (var k in s) ns[k] = s[k];
         ns[field] = value;
-        // If user is editing digest_conc or digest_vol, auto-multiply into proteinUg
-        if (field === "digestConc" || field === "digestVol") {
-          var dc = parseFloat(field === "digestConc" ? value : s.digestConc);
-          var dv = parseFloat(field === "digestVol"  ? value : s.digestVol);
-          if (isFinite(dc) && isFinite(dv) && dc > 0 && dv > 0) {
-            ns.proteinUg = String((dc * dv).toFixed(3));
+        // Auto-compute proteinUg when sample conc or volume pulled changes.
+        // sampleConc (mg/mL) × sampleVolPulled (µL) = µg in tube (since mg/mL == µg/µL).
+        if (field === "sampleConc" || field === "sampleVolPulled") {
+          var sc = parseFloat(field === "sampleConc" ? value : s.sampleConc);
+          var sv = parseFloat(field === "sampleVolPulled" ? value : s.sampleVolPulled);
+          if (isFinite(sc) && isFinite(sv) && sc > 0 && sv > 0) {
+            ns.proteinUg = String((sc * sv).toFixed(3));
           }
         }
         return ns;
@@ -2582,8 +2672,9 @@ function SpikePlannerCard(props){
       var copy = {}; for (var x in prev) copy[x] = prev[x];
       var nextN = prev.samples.length + 1;
       copy.samples = prev.samples.concat([{
-        id: "S" + nextN, name: "New sample", proteinUg: "10",
-        include: true, showDigest: false, digestConc: "", digestVol: "",
+        id: "S" + nextN, name: "New sample",
+        sampleConc: "1", sampleVolPulled: "10", proteinUg: "10",
+        include: true, showDigest: false,
       }]);
       return copy;
     });
@@ -2640,28 +2731,25 @@ function SpikePlannerCard(props){
     return x; // x is smaller than smallest benchmark — return raw
   }
 
-  // ── Recommender ────────────────────────────────────────────────────
-  // TWO constraints in play:
-  //   (a) Min spike volume: stock CANNOT exceed the value at which spike_vol
-  //       = minSpikeVol for the SMALLEST sample. Higher stock → too-small spike.
-  //   (b) Max dilution: stock MUST be at least target + (target × 100 / max_dil_pct).
-  //       Lower stock → more dilution.
+  // ── Recommender (multi-stock clustering) ───────────────────────────
+  // Each sample has a valid [floor, ceiling] range of stock concentrations:
+  //   - Floor: stock must be high enough to keep dilution under max_dil_pct.
+  //     Same for all samples (depends only on target + dilution tolerance).
+  //   - Ceiling: stock must be low enough that spike volume ≥ min_spike_vol.
+  //     Depends on sample volume; smaller samples → tighter ceiling.
   //
-  // These can conflict for very small samples or aggressive constraints.
-  // When they conflict, recommend "no good stock" and let the user relax
-  // one constraint manually.
+  // If all included samples share a valid stock value, one stock suffices.
+  // If not, partition into groups using greedy interval covering: sort
+  // samples by ceiling, repeatedly pick the smallest-ceiling sample as the
+  // anchor for a new group, then sweep up all samples whose ceiling ≥ the
+  // anchor's ceiling (they can use the anchor's stock too). Minimum number
+  // of stocks needed.
+  //
+  // Samples whose ceiling < floor are truly infeasible (no stock works for
+  // them regardless) — flagged separately, not assigned to any group.
   var includedSamples = st.samples.filter(function(s){ return s.include; });
 
-  // Constraint (a): max stock from min-spike-volume rule (smallest sample dominates)
-  var perSampleMaxStock = includedSamples.map(function(s){
-    var sv = computeSampleVol(s);
-    return stockForSpikeVol(sv, minSpikeVol);
-  }).filter(function(x){ return x != null && isFinite(x); });
-  var stockCeiling = perSampleMaxStock.length ? Math.min.apply(null, perSampleMaxStock) : null;
-
-  // Constraint (b): min stock from max-dilution rule (independent of sample size in exact formula)
-  // Exact: dil% = 100 × target / (stock - target) ≤ max_dil_pct  →  stock ≥ target + (100×target/max_dil_pct)
-  // Approx: dil% = 100 × target / stock  →  stock ≥ 100 × target / max_dil_pct
+  // Universal floor (same for all samples)
   var stockFloor = null;
   if (isFinite(targetSpike) && isFinite(maxDilPct) && maxDilPct > 0) {
     stockFloor = useExact
@@ -2669,64 +2757,160 @@ function SpikePlannerCard(props){
       : (100 * targetSpike / maxDilPct);
   }
 
-  // Conflict detection
-  var constraintsConflict = (stockCeiling != null && stockFloor != null && stockCeiling < stockFloor);
+  // Per-sample ceilings + feasibility
+  var sampleConstraints = includedSamples.map(function(s, idx){
+    var sv = computeSampleVol(s);
+    var ceiling = stockForSpikeVol(sv, minSpikeVol);
+    var feasible = (stockFloor == null) ||
+                   (ceiling != null && isFinite(ceiling) && ceiling >= stockFloor);
+    return {
+      sample: s,
+      originalIdx: idx,
+      sampleVol: sv,
+      ceiling: ceiling,
+      feasible: feasible,
+    };
+  });
 
-  // Pick the stock: if no conflict, anything in [floor, ceiling] works. We pick
-  // a clean benchmark close to the floor (smaller stock = smaller pipette volumes
-  // are NOT needed = friendlier to the small samples). User can override.
-  var rawRecommendedStock = null;
-  if (!constraintsConflict) {
-    if (stockFloor != null && stockCeiling != null) {
-      // Both constraints active — anything in [floor, ceiling] is valid. Pick
-      // smallest clean benchmark ≥ floor.
-      rawRecommendedStock = stockFloor;
-    } else if (stockCeiling != null) {
-      rawRecommendedStock = stockCeiling;
-    } else if (stockFloor != null) {
-      rawRecommendedStock = stockFloor;
+  var infeasibleSamples = sampleConstraints.filter(function(c){ return !c.feasible && c.ceiling != null; });
+  var feasibleSamples = sampleConstraints.filter(function(c){ return c.feasible && c.ceiling != null; });
+
+  // Pick a "clean" stock value within [floor, ceiling]. Prefer benchmarks.
+  function pickStockInRange(floor, ceiling){
+    var benchmarks = [10, 20, 25, 50, 75, 100, 125, 150, 200, 250, 300, 500, 750, 1000, 1500, 2000, 5000, 10000];
+    var lo = (floor != null && isFinite(floor)) ? floor : 0;
+    var hi = (ceiling != null && isFinite(ceiling)) ? ceiling : Infinity;
+    // First, look for a clean benchmark in [lo, hi]
+    var inRange = benchmarks.filter(function(b){ return b >= lo && b <= hi; });
+    if (inRange.length > 0) {
+      // Prefer the one closest to the geometric mean of lo and hi (centered)
+      var mid = isFinite(hi) ? Math.sqrt(lo * hi) : lo * 1.5;
+      var best = inRange[0];
+      var bestDist = Math.abs(inRange[0] - mid);
+      for (var i = 1; i < inRange.length; i++){
+        var d = Math.abs(inRange[i] - mid);
+        if (d < bestDist) { best = inRange[i]; bestDist = d; }
+      }
+      return best;
     }
+    // No clean benchmark — pick the floor (rounded to nearest 5)
+    if (isFinite(lo)) return Math.ceil(lo / 5) * 5;
+    return null;
   }
 
-  // Round to a clean benchmark, but make sure it doesn't violate either constraint
-  var recommendedStock = null;
-  if (rawRecommendedStock != null && isFinite(rawRecommendedStock)) {
-    var rounded = roundStock(rawRecommendedStock);
-    // If we have a floor and rounding down breaks it, bump up
-    if (stockFloor != null && rounded < stockFloor) {
-      // Try the next benchmark up
-      var benchmarks = [10, 20, 25, 50, 100, 150, 200, 250, 500, 750, 1000, 1500, 2000, 5000, 10000];
-      var fixed = benchmarks.filter(function(b){ return b >= stockFloor; })[0];
-      rounded = fixed != null ? fixed : Math.ceil(stockFloor);
+  // Greedy interval covering: sort feasible samples by ceiling ascending,
+  // then build groups. Each group anchored by the smallest-ceiling unassigned
+  // sample. The stock for the group satisfies floor ≤ stock ≤ anchor's ceiling.
+  var sortedFeasible = feasibleSamples.slice().sort(function(a, b){
+    return a.ceiling - b.ceiling;
+  });
+  var stockGroups = []; // [{ stock, ceiling, members: [...sampleConstraints] }, ...]
+  var assigned = {};
+  sortedFeasible.forEach(function(c){
+    if (assigned[c.originalIdx]) return;
+    var groupCeiling = c.ceiling;
+    var stock = pickStockInRange(stockFloor, groupCeiling);
+    // Sweep: every sample whose ceiling >= groupCeiling can join (since stock ≤ groupCeiling ≤ their ceiling)
+    var members = sortedFeasible.filter(function(cc){
+      return !assigned[cc.originalIdx] && cc.ceiling >= groupCeiling;
+    });
+    members.forEach(function(m){ assigned[m.originalIdx] = true; });
+    stockGroups.push({ stock: stock, ceiling: groupCeiling, members: members });
+  });
+
+  // Decide on "recommended" stock for the manual-override field. If single group,
+  // use that stock. If multi-group, the largest group's stock (most useful default).
+  var primaryRecommendedStock = null;
+  if (stockGroups.length > 0) {
+    if (stockGroups.length === 1) {
+      primaryRecommendedStock = stockGroups[0].stock;
+    } else {
+      // Pick the group with most members
+      var biggest = stockGroups[0];
+      for (var i = 1; i < stockGroups.length; i++){
+        if (stockGroups[i].members.length > biggest.members.length) biggest = stockGroups[i];
+      }
+      primaryRecommendedStock = biggest.stock;
     }
-    // If a ceiling exists and rounding up breaks it, fall back to raw
-    if (stockCeiling != null && rounded > stockCeiling) {
-      rounded = Math.floor(stockCeiling);
-    }
-    recommendedStock = rounded;
   }
+  // Back-compat for downstream code that used "recommendedStock"
+  var recommendedStock = primaryRecommendedStock;
+  var rawRecommendedStock = primaryRecommendedStock;
+  var constraintsConflict = false; // We don't use the binary conflict flag anymore — infeasibleSamples handles it
+
+  // ── Waters MassPREP standard lookup ───────────────────────────────
+  var selectedStandard = massprepStandards.filter(function(x){ return x.id === st.standardId; })[0] || massprepStandards[0];
+  var pmolPerVial = (st.standardId === "custom")
+    ? parseFloat(st.customPmolPerVial)
+    : selectedStandard.pmolPerVial;
 
   // Active stock: either auto-recommended or user override
   var activeStock = st.stockMode === "auto"
     ? recommendedStock
     : parseFloat(st.manualStock);
 
+  // ── Active stock(s) and per-row stock lookup ──────────────────────
+  // In manual mode, every row uses st.manualStock.
+  // In auto mode, each row uses its group's stock (from stockGroups).
+  // Build a map from sample index → assigned stock (auto mode).
+  var rowStockMap = {}; // originalIdx → stock
+  if (st.stockMode === "auto") {
+    stockGroups.forEach(function(g){
+      g.members.forEach(function(m){
+        rowStockMap[m.originalIdx] = g.stock;
+      });
+    });
+  }
+
+  function stockForRow(s){
+    // Find sample in includedSamples to get originalIdx
+    if (st.stockMode === "manual") return parseFloat(st.manualStock);
+    // Auto mode: locate this sample's index in includedSamples
+    var idx = -1;
+    for (var i = 0; i < includedSamples.length; i++) {
+      if (includedSamples[i] === s) { idx = i; break; }
+    }
+    if (idx < 0) return null; // excluded sample — show no spike computation
+    return rowStockMap[idx] != null ? rowStockMap[idx] : null;
+  }
+
   // ── Per-row computed values ────────────────────────────────────────
   function rowMath(s){
     var sample_vol = computeSampleVol(s);
     var spike_vol = null, spike_fmol = null, final_spike_conc = null, dil_pct = null;
     var status = "ok"; var statusMsg = "OK";
+    var thisStock = stockForRow(s);
 
-    if (sample_vol != null && isFinite(activeStock) && activeStock > 0) {
+    // Excluded samples: just show sample volume, no spike math
+    if (!s.include) {
+      return {
+        sample_vol: sample_vol,
+        spike_vol: null, spike_fmol: null, final_spike_conc: null, dil_pct: null,
+        status: "excluded", statusMsg: "excluded",
+        thisStock: null,
+      };
+    }
+
+    // Infeasible samples (auto mode): no stock satisfies their constraints
+    if (st.stockMode === "auto" && thisStock == null) {
+      return {
+        sample_vol: sample_vol,
+        spike_vol: null, spike_fmol: null, final_spike_conc: null, dil_pct: null,
+        status: "infeasible", statusMsg: "no stock fits",
+        thisStock: null,
+      };
+    }
+
+    if (sample_vol != null && isFinite(thisStock) && thisStock > 0) {
       if (useExact) {
-        if (activeStock > targetSpike) {
-          spike_vol = (targetSpike * sample_vol) / (activeStock - targetSpike);
+        if (thisStock > targetSpike) {
+          spike_vol = (targetSpike * sample_vol) / (thisStock - targetSpike);
         }
       } else {
-        spike_vol = (targetSpike * sample_vol) / activeStock;
+        spike_vol = (targetSpike * sample_vol) / thisStock;
       }
       if (spike_vol != null) {
-        spike_fmol = activeStock * spike_vol;
+        spike_fmol = thisStock * spike_vol;
         var final_vol = sample_vol + spike_vol;
         final_spike_conc = spike_fmol / final_vol;
         dil_pct = (spike_vol / sample_vol) * 100;
@@ -2745,33 +2929,93 @@ function SpikePlannerCard(props){
       final_spike_conc: final_spike_conc,
       dil_pct: dil_pct,
       status: status, statusMsg: statusMsg,
+      thisStock: thisStock,
     };
+  }
+
+  // ── Spike consumption totals (for "is one vial enough?" indicator) ─
+  // Sum spike_fmol across included samples that have valid math. This tells
+  // the analyst how much of the standard they're consuming from a vial.
+  var totalSpikeUsed_fmol = 0;
+  var nValidRows = 0;
+  st.samples.forEach(function(s){
+    if (!s.include) return;
+    var m = rowMath(s);
+    if (m.spike_fmol != null && isFinite(m.spike_fmol)) {
+      totalSpikeUsed_fmol += m.spike_fmol;
+      nValidRows++;
+    }
+  });
+  var totalSpikeUsed_pmol = totalSpikeUsed_fmol / 1000;
+  var vialFractionUsed = (pmolPerVial != null && isFinite(pmolPerVial) && pmolPerVial > 0)
+    ? totalSpikeUsed_pmol / pmolPerVial : null;
+
+  // ── Reconstitution math ────────────────────────────────────────────
+  // If the recommended stock is Y fmol/µL and the vial has X pmol = X*1000 fmol,
+  // then dissolving the vial in V µL of buffer gives stock = X*1000/V fmol/µL.
+  // → V = X*1000 / Y. This is the auto-suggested reconstitution volume.
+  // User can override via reconstitutionVol field.
+  var autoReconstVol_uL = null;
+  var targetStockForRecon = (st.stockMode === "auto" ? primaryRecommendedStock : parseFloat(st.manualStock));
+  if (pmolPerVial != null && isFinite(pmolPerVial) && pmolPerVial > 0 &&
+      targetStockForRecon != null && isFinite(targetStockForRecon) && targetStockForRecon > 0) {
+    autoReconstVol_uL = (pmolPerVial * 1000) / targetStockForRecon;
+  }
+  // If user typed a custom reconstitution volume, compute actual stock
+  var userReconstVol = parseFloat(st.reconstitutionVol);
+  var actualStockFromUserRecon = null;
+  if (isFinite(userReconstVol) && userReconstVol > 0 && pmolPerVial != null && isFinite(pmolPerVial) && pmolPerVial > 0) {
+    actualStockFromUserRecon = (pmolPerVial * 1000) / userReconstVol;
   }
 
   // ── Export to CSV (clipboard) ─────────────────────────────────────
   function copyAsCsv(){
     var lines = [];
-    lines.push("ID,Name,Include,Protein (µg),Sample vol (µL),Spike vol (µL),Spike (fmol),Final spike (fmol/µL),Dilution (%),Status");
+    lines.push("ID,Name,Include,Sample conc (mg/mL),Vol pulled (µL),Protein (µg),Resus vol (µL),Spike vol (µL),Spike (fmol),Final spike (fmol/µL),Dilution (%),Stock used (fmol/µL),Status");
     st.samples.forEach(function(s){
       var m = rowMath(s);
       lines.push([
         s.id, '"' + (s.name || "").replace(/"/g, '""') + '"',
         s.include ? "yes" : "no",
+        s.sampleConc || "",
+        s.sampleVolPulled || "",
         s.proteinUg,
         m.sample_vol != null ? m.sample_vol.toFixed(2) : "",
         m.spike_vol != null ? m.spike_vol.toFixed(2) : "",
         m.spike_fmol != null ? m.spike_fmol.toFixed(1) : "",
         m.final_spike_conc != null ? m.final_spike_conc.toFixed(2) : "",
         m.dil_pct != null ? m.dil_pct.toFixed(1) : "",
+        m.thisStock != null ? m.thisStock : "",
         m.statusMsg,
       ].join(","));
     });
     lines.push("");
     lines.push("Target protein conc," + st.targetProteinConc + " mg/mL");
     lines.push("Target spike conc," + st.targetSpikeConc + " fmol/µL");
-    lines.push("Spike stock," + (activeStock != null && isFinite(activeStock) ? activeStock + " fmol/µL" : "—"));
     lines.push("Stock mode," + st.stockMode);
     lines.push("Formula," + st.formula);
+    // Waters standard info
+    if (selectedStandard) {
+      lines.push("Spike standard," + selectedStandard.label + (selectedStandard.partNo ? " (" + selectedStandard.partNo + ")" : ""));
+      if (pmolPerVial != null && isFinite(pmolPerVial)) {
+        lines.push("Vial contains," + pmolPerVial + " pmol");
+      }
+      var reconVolDisp = (st.reconstitutionVol && parseFloat(st.reconstitutionVol) > 0)
+        ? parseFloat(st.reconstitutionVol)
+        : autoReconstVol_uL;
+      if (reconVolDisp != null && isFinite(reconVolDisp)) {
+        lines.push("Reconstitute in," + reconVolDisp.toFixed(2) + " µL");
+      }
+      if (totalSpikeUsed_pmol > 0) {
+        lines.push("Total spike used," + totalSpikeUsed_pmol.toFixed(2) + " pmol");
+      }
+    }
+    // List stock groups (auto mode)
+    if (st.stockMode === "auto" && stockGroups.length > 0) {
+      stockGroups.forEach(function(g, gi){
+        lines.push("Stock " + String.fromCharCode(65 + gi) + "," + g.stock + " fmol/µL — " + g.members.map(function(mm){ return mm.sample.id; }).join("; "));
+      });
+    }
     var csv = lines.join("\n");
     if (typeof navigator !== "undefined" && navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(csv).then(function(){}, function(){});
@@ -2863,35 +3107,58 @@ function SpikePlannerCard(props){
         </div>
       </div>
       {st.stockMode === "auto" ? <div>
-        {constraintsConflict ? <div>
-          <div style={{display:"flex",alignItems:"baseline",gap:6,marginBottom:6}}>
-            <span style={{fontSize:24,fontWeight:700,color:WARN,lineHeight:1}}>No single stock works</span>
+        {/* Infeasible samples — surfaced ahead of any group recommendations */}
+        {infeasibleSamples.length > 0 && <div style={{padding:"10px 12px",background:"#fef0ee",border:"1px solid #f5d4cf",borderRadius:6,marginBottom:12}}>
+          <div style={{fontSize:11,fontWeight:700,color:WARN,marginBottom:4}}>
+            {infeasibleSamples.length} sample{infeasibleSamples.length > 1 ? "s" : ""} can't satisfy both constraints
           </div>
           <div style={{fontSize:12,color:SLATE,lineHeight:1.6}}>
-            Your constraints conflict:
-            <div style={{marginTop:6,fontFamily:"ui-monospace, monospace",color:NAVY}}>
-              · Min spike vol ({minSpikeVol} µL) requires stock ≤ <strong>{fmt1(stockCeiling)} fmol/µL</strong> (set by smallest sample)<br/>
-              · Max dilution ({maxDilPct}%) requires stock ≥ <strong>{fmt1(stockFloor)} fmol/µL</strong>
-            </div>
-            <div style={{marginTop:8}}>
-              Relax one to proceed: raise the dilution tolerance, lower the min spike volume (smaller pipette), or exclude the constraint-tightest sample (likely the smallest).
-            </div>
+            {infeasibleSamples.map(function(c){ return c.sample.id; }).join(", ")} — sample volume too small for {minSpikeVol} µL spike while staying under {maxDilPct}% dilution.
           </div>
-        </div> : (recommendedStock != null && isFinite(recommendedStock)) ? <div>
-          <div style={{display:"flex",alignItems:"baseline",gap:6}}>
-            <span style={{fontSize:36,fontWeight:700,color:NAVY,fontFamily:"ui-monospace, monospace",lineHeight:1}}>{fmt0(recommendedStock)}</span>
-            <span style={{fontSize:16,color:SLATE,fontWeight:600}}>fmol/µL</span>
+          <div style={{fontSize:11,color:SLATE,marginTop:6,fontStyle:"italic"}}>
+            Options: uncheck these from the table, raise max dilution, or lower min spike volume (smaller pipette).
           </div>
-          {rawRecommendedStock != null && Math.abs(rawRecommendedStock - recommendedStock) > 0.5 && <div style={{fontSize:11,color:"#8e9bb5",marginTop:4,fontFamily:"ui-monospace, monospace"}}>
-            (raw {fmt1(rawRecommendedStock)} fmol/µL, rounded to clean benchmark)
-          </div>}
-          <div style={{fontSize:11,color:SLATE,marginTop:6,lineHeight:1.5}}>
-            Valid range: {stockFloor != null && isFinite(stockFloor) ? fmt1(stockFloor) + "–" : "≤ "}
-            {stockCeiling != null && isFinite(stockCeiling) ? fmt1(stockCeiling) : "no upper bound"} fmol/µL
-            ({stockFloor != null && isFinite(stockFloor) ? "floor from max dilution, " : ""}
-             {stockCeiling != null && isFinite(stockCeiling) ? "ceiling from smallest sample's spike volume" : ""})
+        </div>}
+
+        {stockGroups.length > 0 ? <div>
+          <div style={{fontSize:12,color:SLATE,marginBottom:10,fontWeight:600}}>
+            {stockGroups.length === 1
+              ? "1 stock covers all " + feasibleSamples.length + " feasible samples"
+              : stockGroups.length + " stocks needed for " + feasibleSamples.length + " samples"}
           </div>
-        </div> : <div style={{fontSize:13,color:"#8e9bb5",fontStyle:"italic"}}>Add at least one included sample with valid protein mass.</div>}
+          {stockGroups.map(function(g, gi){
+            return <div key={gi} style={{
+              padding:"12px 14px",
+              background:"#fff",
+              border:"1px solid " + BORDER,
+              borderRadius:8,
+              marginBottom: gi === stockGroups.length - 1 ? 0 : 8,
+            }}>
+              <div style={{display:"flex",alignItems:"baseline",gap:8,justifyContent:"space-between",flexWrap:"wrap"}}>
+                <div>
+                  <span style={{fontSize:9,fontWeight:700,letterSpacing:1.5,color:TEAL,marginRight:8}}>
+                    STOCK {String.fromCharCode(65 + gi)}
+                  </span>
+                  <span style={{fontSize:28,fontWeight:700,color:NAVY,fontFamily:"ui-monospace, monospace"}}>{fmt0(g.stock)}</span>
+                  <span style={{fontSize:14,color:SLATE,fontWeight:600,marginLeft:4}}>fmol/µL</span>
+                </div>
+                <div style={{fontSize:11,color:SLATE}}>
+                  {g.members.length} sample{g.members.length > 1 ? "s" : ""}
+                </div>
+              </div>
+              <div style={{fontSize:11,color:SLATE,marginTop:6,lineHeight:1.5}}>
+                For: <span style={{fontFamily:"ui-monospace, monospace",color:NAVY,fontWeight:600}}>
+                  {g.members.map(function(m){ return m.sample.id; }).join(", ")}
+                </span>
+              </div>
+              {stockFloor != null && isFinite(stockFloor) && <div style={{fontSize:10,color:"#8e9bb5",marginTop:4,fontFamily:"ui-monospace, monospace"}}>
+                Valid range: {fmt1(stockFloor)}–{fmt1(g.ceiling)} fmol/µL
+              </div>}
+            </div>;
+          })}
+        </div> : (feasibleSamples.length === 0 && infeasibleSamples.length === 0) ?
+          <div style={{fontSize:13,color:"#8e9bb5",fontStyle:"italic"}}>Add at least one included sample with valid protein mass.</div>
+          : <div style={{fontSize:13,color:"#8e9bb5",fontStyle:"italic"}}>No feasible samples — relax constraints or uncheck rows.</div>}
       </div> : <div>
         <div style={{display:"flex",alignItems:"baseline",gap:6}}>
           <input type="number" value={st.manualStock} onChange={function(e){ u("manualStock", e.target.value); }} style={{
@@ -2901,9 +3168,9 @@ function SpikePlannerCard(props){
           }} />
           <span style={{fontSize:16,color:SLATE,fontWeight:600}}>fmol/µL</span>
         </div>
-        {recommendedStock != null && isFinite(recommendedStock) && !constraintsConflict && Math.abs(parseFloat(st.manualStock) - recommendedStock) > 0.5 && <div style={{fontSize:11,color:AMBER,marginTop:4}}>
-          Recommended: {fmt0(recommendedStock)} fmol/µL ·{" "}
-          <button type="button" onClick={function(){ u("manualStock", String(recommendedStock)); }} style={{
+        {primaryRecommendedStock != null && isFinite(primaryRecommendedStock) && Math.abs(parseFloat(st.manualStock) - primaryRecommendedStock) > 0.5 && <div style={{fontSize:11,color:AMBER,marginTop:4}}>
+          Auto would recommend: {fmt0(primaryRecommendedStock)} fmol/µL{stockGroups.length > 1 ? " (plus " + (stockGroups.length - 1) + " more group" + (stockGroups.length > 2 ? "s" : "") + " — see Auto mode)" : ""} ·{" "}
+          <button type="button" onClick={function(){ u("manualStock", String(primaryRecommendedStock)); }} style={{
             background:"none",border:"none",color:TEAL,fontWeight:600,cursor:"pointer",padding:0,fontFamily:"inherit",textDecoration:"underline",
           }}>use it</button>
         </div>}
@@ -2930,21 +3197,135 @@ function SpikePlannerCard(props){
       </span>
     </div>
 
+    {/* WATERS MASSPREP STANDARDS PICKER */}
+    <div style={sectionLabel}>PEPTIDE STANDARD (vial → stock recipe)</div>
+    <div style={{padding:"14px 16px",background:"#fff",border:"1px solid " + BORDER,borderRadius:10,marginBottom:8}}>
+      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10,flexWrap:"wrap"}}>
+        <span style={{fontSize:11,color:SLATE,fontWeight:600,minWidth:60}}>Standard:</span>
+        <select value={st.standardId} onChange={function(e){ u("standardId", e.target.value); }} style={{
+          padding:"6px 10px",border:"1px solid " + BORDER,borderRadius:6,
+          fontSize:13,fontFamily:"inherit",color:NAVY,background:"#fff",
+          cursor:"pointer",fontWeight:600,flex:1,minWidth:240,
+        }}>
+          {massprepStandards.map(function(stdOpt){
+            return <option key={stdOpt.id} value={stdOpt.id}>
+              {stdOpt.label}{stdOpt.partNo ? "  ·  " + stdOpt.partNo : ""}
+            </option>;
+          })}
+        </select>
+      </div>
+
+      {/* Custom: ask for pmol per vial */}
+      {st.standardId === "custom" && <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10,paddingLeft:68,flexWrap:"wrap"}}>
+        <span style={{fontSize:11,color:SLATE,fontWeight:600}}>Vial contains:</span>
+        <input type="number" value={st.customPmolPerVial} onChange={function(e){ u("customPmolPerVial", e.target.value); }} style={{
+          width:80,padding:"4px 8px",border:"1px solid " + BORDER,borderRadius:4,
+          fontSize:13,fontFamily:"ui-monospace, monospace",color:NAVY,outline:"none",
+        }} />
+        <span style={{fontSize:13,color:SLATE}}>pmol</span>
+      </div>}
+
+      {/* MPDS Mix 2 note */}
+      {selectedStandard.note && <div style={{
+        padding:"6px 10px",background:"#fff8ed",border:"1px solid #f0d8a8",
+        borderRadius:6,fontSize:11,color:"#7a5012",marginBottom:10,lineHeight:1.5,
+      }}>
+        Note: {selectedStandard.note}. Use a single representative if you'll pick one peptide as your spike, or treat each protein separately.
+      </div>}
+
+      {/* Reconstitution recipe — auto or user override */}
+      {pmolPerVial != null && isFinite(pmolPerVial) && pmolPerVial > 0 && (
+        <div style={{padding:"10px 12px",background:"#f7fbff",border:"1px solid #d7e7fb",borderRadius:6}}>
+          {autoReconstVol_uL != null && targetStockForRecon != null ? <div style={{fontSize:12,color:NAVY,lineHeight:1.7}}>
+            <strong>Recipe:</strong> Dissolve the <span style={{fontFamily:"ui-monospace, monospace",fontWeight:700}}>{pmolPerVial} pmol</span> {selectedStandard.id === "custom" ? "" : selectedStandard.label.split(" ")[0]} vial in <span style={{fontFamily:"ui-monospace, monospace",fontWeight:700}}>
+            {actualStockFromUserRecon != null ? fmt2(userReconstVol) : fmt2(autoReconstVol_uL)} µL
+            </span> of 0.1% TFA (or 0.1% formic acid) → <span style={{fontFamily:"ui-monospace, monospace",fontWeight:700,color:TEAL}}>
+            {actualStockFromUserRecon != null ? fmt0(actualStockFromUserRecon) : fmt0(targetStockForRecon)} fmol/µL stock
+            </span>
+            {/* Practical-alternative hint when direct recon volume is impractical */}
+            {actualStockFromUserRecon == null && autoReconstVol_uL > 2000 && pmolPerVial >= 1000 && targetStockForRecon > 0 && (function(){
+              // Standard recipe: dissolve in 1 mL → 1 pmol/µL stock. Then dilute aliquot:
+              // To go from 1 pmol/µL (1000 fmol/µL) → targetStockForRecon fmol/µL:
+              // dilution factor = 1000 / targetStockForRecon. e.g., target 125 → 8x dilution → 20 µL + 140 µL water (1:8).
+              var dilFactor = 1000 / targetStockForRecon;
+              var aliquotUL = 20;
+              var addWater = aliquotUL * (dilFactor - 1);
+              return <div style={{marginTop:8,padding:"8px 10px",background:"#fff8ed",border:"1px solid #f0d8a8",borderRadius:5,fontSize:11,color:"#7a5012",lineHeight:1.55}}>
+                <strong>Practical alternative:</strong> The direct recipe above asks for {(autoReconstVol_uL/1000).toFixed(1)} mL — impractically large. Use Waters' standard 2-step recipe instead:
+                <ol style={{margin:"6px 0 0 18px",padding:0}}>
+                  <li>Dissolve vial in <strong>1.0 mL</strong> of 0.1% TFA/10% ACN → 1 pmol/µL stock</li>
+                  <li>Take <strong>{aliquotUL} µL</strong> aliquot, add <strong>{addWater.toFixed(0)} µL</strong> water → {fmt0(targetStockForRecon)} fmol/µL working stock</li>
+                </ol>
+              </div>;
+            })()}
+            {actualStockFromUserRecon == null && autoReconstVol_uL < 10 && (
+              <div style={{marginTop:8,padding:"8px 10px",background:"#fef0ee",border:"1px solid #f5d4cf",borderRadius:5,fontSize:11,color:WARN,lineHeight:1.55}}>
+                <strong>Tight recipe:</strong> Direct recon volume is under 10 µL — hard to dissolve a lyophilized pellet in. Consider increasing your target stock so the recon volume is more practical, or use a smaller vial.
+              </div>
+            )}
+          </div> : <div style={{fontSize:12,color:SLATE,fontStyle:"italic"}}>Set a target stock concentration above to see a reconstitution recipe.</div>}
+
+          {/* Override field */}
+          <div style={{display:"flex",alignItems:"center",gap:8,marginTop:10,flexWrap:"wrap"}}>
+            <span style={{fontSize:11,color:SLATE,fontWeight:600}}>Override volume:</span>
+            <input
+              type="number"
+              placeholder={autoReconstVol_uL != null ? fmt2(autoReconstVol_uL) : "auto"}
+              value={st.reconstitutionVol}
+              onChange={function(e){ u("reconstitutionVol", e.target.value); }}
+              style={{
+                width:80,padding:"4px 8px",border:"1px solid " + BORDER,borderRadius:4,
+                fontSize:12,fontFamily:"ui-monospace, monospace",color:NAVY,outline:"none",
+              }}
+            />
+            <span style={{fontSize:11,color:SLATE}}>µL</span>
+            {st.reconstitutionVol && <button type="button" onClick={function(){ u("reconstitutionVol", ""); }} style={{
+              background:"none",border:"none",color:TEAL,fontSize:11,fontWeight:600,cursor:"pointer",padding:0,fontFamily:"inherit",
+            }}>↻ use auto</button>}
+            <span style={{fontSize:11,color:"#8e9bb5",marginLeft:"auto"}}>
+              Standard Waters recipe: 1.0 mL → 1 pmol/µL stock; dilute 20 µL aliquot in 180 µL water → 100 fmol/µL working solution.
+            </span>
+          </div>
+
+          {/* Vial sufficiency indicator */}
+          {vialFractionUsed != null && totalSpikeUsed_fmol > 0 && <div style={{
+            marginTop:10,padding:"8px 10px",
+            background: vialFractionUsed > 1 ? "#fef0ee" : (vialFractionUsed > 0.5 ? "#fff8ed" : "#e7f7ef"),
+            border:"1px solid " + (vialFractionUsed > 1 ? "#f5d4cf" : (vialFractionUsed > 0.5 ? "#f0d8a8" : "#cce8d8")),
+            borderRadius:5,fontSize:11,
+            color: vialFractionUsed > 1 ? WARN : (vialFractionUsed > 0.5 ? "#7a5012" : "#1b7f6a"),
+            fontWeight:600,lineHeight:1.5,
+          }}>
+            {vialFractionUsed > 1
+              ? "⚠ Need " + totalSpikeUsed_pmol.toFixed(2) + " pmol total for " + nValidRows + " samples — exceeds the " + pmolPerVial + " pmol in one vial. Need " + Math.ceil(vialFractionUsed) + " vials, or reduce sample count."
+              : "✓ Using ~" + totalSpikeUsed_pmol.toFixed(2) + " pmol of " + pmolPerVial + " pmol vial (" + (vialFractionUsed * 100).toFixed(0) + "%). One vial is plenty for " + nValidRows + " samples."
+            }
+          </div>}
+        </div>
+      )}
+    </div>
+
     {/* SAMPLE TABLE */}
     <div style={sectionLabel}>SAMPLES</div>
+    <div style={{fontSize:11,color:SLATE,marginBottom:8,lineHeight:1.5}}>
+      Enter your sample concentration (mg/mL) and the volume pulled into digest (µL). The protein µg in tube is computed for you, or you can edit it directly. Sample vol below is what's needed to resuspend at the target protein concentration.
+    </div>
     <div style={{overflowX:"auto",border:"1px solid " + BORDER,borderRadius:8}}>
-      <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,minWidth:680}}>
+      <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,minWidth:880}}>
         <thead>
-          <tr style={{background:"#fafcfe",borderBottom:"1px solid " + BORDER}}>
-            <th style={{padding:"8px 6px",textAlign:"center",color:SLATE,fontSize:10,fontWeight:700,letterSpacing:0.5,width:32}}>✓</th>
-            <th style={{padding:"8px 6px",textAlign:"left",color:SLATE,fontSize:10,fontWeight:700,letterSpacing:0.5,width:60}}>ID</th>
-            <th style={{padding:"8px 6px",textAlign:"left",color:SLATE,fontSize:10,fontWeight:700,letterSpacing:0.5}}>Name</th>
-            <th style={{padding:"8px 6px",textAlign:"right",color:SLATE,fontSize:10,fontWeight:700,letterSpacing:0.5}}>Protein µg</th>
-            <th style={{padding:"8px 6px",textAlign:"right",color:SLATE,fontSize:10,fontWeight:700,letterSpacing:0.5}}>Vol µL</th>
-            <th style={{padding:"8px 6px",textAlign:"right",color:SLATE,fontSize:10,fontWeight:700,letterSpacing:0.5}}>Spike µL</th>
-            <th style={{padding:"8px 6px",textAlign:"right",color:SLATE,fontSize:10,fontWeight:700,letterSpacing:0.5}}>Spike fmol</th>
-            <th style={{padding:"8px 6px",textAlign:"right",color:SLATE,fontSize:10,fontWeight:700,letterSpacing:0.5}}>Final fmol/µL</th>
-            <th style={{padding:"8px 6px",textAlign:"center",color:SLATE,fontSize:10,fontWeight:700,letterSpacing:0.5,width:90}}>Status</th>
+          <tr style={{background:"#dbe6f4",borderBottom:"1px solid " + BORDER}}>
+            <th style={{padding:"8px 6px",textAlign:"center",color:NAVY,fontSize:10,fontWeight:700,letterSpacing:0.5,width:32}}>✓</th>
+            <th style={{padding:"8px 6px",textAlign:"left",color:NAVY,fontSize:10,fontWeight:700,letterSpacing:0.5,width:60}}>ID</th>
+            <th style={{padding:"8px 6px",textAlign:"left",color:NAVY,fontSize:10,fontWeight:700,letterSpacing:0.5}}>Name</th>
+            <th style={{padding:"8px 6px",textAlign:"right",color:NAVY,fontSize:10,fontWeight:700,letterSpacing:0.5}} title="Concentration of your protein stock (e.g. from A280 reading)">Sample conc<br/><span style={{fontWeight:500,color:SLATE,fontSize:9}}>mg/mL</span></th>
+            <th style={{padding:"8px 6px",textAlign:"right",color:NAVY,fontSize:10,fontWeight:700,letterSpacing:0.5}} title="Volume pulled from your sample stock into the digest">Vol pulled<br/><span style={{fontWeight:500,color:SLATE,fontSize:9}}>µL</span></th>
+            <th style={{padding:"8px 6px",textAlign:"right",color:NAVY,fontSize:10,fontWeight:700,letterSpacing:0.5}} title="Protein/peptide mass in tube (conc × vol pulled). Editable.">Protein<br/><span style={{fontWeight:500,color:SLATE,fontSize:9}}>µg</span></th>
+            <th style={{padding:"8px 6px",textAlign:"right",color:NAVY,fontSize:10,fontWeight:700,letterSpacing:0.5}} title="Buffer volume to add to hit target final protein concentration">Resus vol<br/><span style={{fontWeight:500,color:SLATE,fontSize:9}}>µL</span></th>
+            <th style={{padding:"8px 6px",textAlign:"right",color:NAVY,fontSize:10,fontWeight:700,letterSpacing:0.5}} title="Volume of spike to add per sample (click to cycle units)">Spike<br/><span style={{fontWeight:500,color:SLATE,fontSize:9}}>µL</span></th>
+            <th style={{padding:"8px 6px",textAlign:"right",color:NAVY,fontSize:10,fontWeight:700,letterSpacing:0.5}} title="Total fmol of spike going into this sample (click to cycle units)">Spike<br/><span style={{fontWeight:500,color:SLATE,fontSize:9}}>fmol</span></th>
+            <th style={{padding:"8px 6px",textAlign:"right",color:NAVY,fontSize:10,fontWeight:700,letterSpacing:0.5}} title="Final spike concentration in the injection (should equal target)">Final<br/><span style={{fontWeight:500,color:SLATE,fontSize:9}}>fmol/µL</span></th>
+            <th style={{padding:"8px 6px",textAlign:"center",color:NAVY,fontSize:10,fontWeight:700,letterSpacing:0.5,width:60}}>Stock</th>
+            <th style={{padding:"8px 6px",textAlign:"center",color:NAVY,fontSize:10,fontWeight:700,letterSpacing:0.5,width:90}}>Status</th>
             <th style={{padding:"8px 6px",width:24}}></th>
           </tr>
         </thead>
@@ -2952,6 +3333,24 @@ function SpikePlannerCard(props){
           {st.samples.map(function(s, idx){
             var m = rowMath(s);
             var rowBg = s.include ? "#fff" : "#f5f7fb";
+            // Determine display units per result column (override or auto)
+            var resusUnit = resusUnitOv || autoVolUnitT(m.sample_vol);
+            var spkVolUnit = spkVolUnitOv || autoVolUnitT(m.spike_vol);
+            var spkAmtUnit = spkAmtUnitOv || autoFmolUnitT(m.spike_fmol);
+            var finalUnit = finalUnitOv || autoConcFmolUnitT(m.final_spike_conc);
+            // Clickable result cell — cycles unit on click
+            function ClickableUnitCell(displayValue, unit, onCycle, isComputed){
+              return <td onClick={onCycle} style={{
+                padding:"6px 6px",textAlign:"right",
+                fontFamily:"ui-monospace, monospace",color:NAVY,
+                background: isComputed ? "#f7fbff" : "#fff",
+                fontWeight:600,
+                cursor: displayValue != null ? "pointer" : "default",
+                userSelect: "none",
+              }} title={displayValue != null ? "Click to change units" : ""}>
+                {displayValue != null ? <span>{displayValue} <span style={{fontSize:9,color:SLATE,fontWeight:500}}>{unit}</span></span> : "—"}
+              </td>;
+            }
             return <span key={idx} style={{display:"contents"}}>
               <tr style={{background: rowBg, borderBottom:"1px solid #ecf0f6", opacity: s.include ? 1 : 0.6}}>
                 <td style={{padding:"6px 6px",textAlign:"center"}}>
@@ -2964,23 +3363,67 @@ function SpikePlannerCard(props){
                   <input value={s.name} onChange={function(e){ updateSample(idx, "name", e.target.value); }} style={cellTextInput} />
                 </td>
                 <td style={{padding:"4px 6px",textAlign:"right"}}>
-                  <input type="number" value={s.proteinUg} onChange={function(e){ updateSample(idx, "proteinUg", e.target.value); }} style={cellNumInput} />
-                  <button type="button" onClick={function(){ updateSample(idx, "showDigest", !s.showDigest); }} style={{
-                    background:"none",border:"none",color:TEAL,fontSize:10,cursor:"pointer",padding:"0 4px",fontFamily:"inherit",
-                  }} title="Compute from digest concentration × digest volume">
-                    {s.showDigest ? "−" : "+digest"}
-                  </button>
+                  <input type="number" value={s.sampleConc} onChange={function(e){ updateSample(idx, "sampleConc", e.target.value); }} style={cellNumInput} />
                 </td>
-                <td style={{padding:"6px 6px",textAlign:"right",fontFamily:"ui-monospace, monospace",color:NAVY,background:"#f7fbff",fontWeight:600}}>{fmt2(m.sample_vol)}</td>
-                <td style={{padding:"6px 6px",textAlign:"right",fontFamily:"ui-monospace, monospace",color:NAVY,background:"#f7fbff",fontWeight:600}}>{fmt2(m.spike_vol)}</td>
-                <td style={{padding:"6px 6px",textAlign:"right",fontFamily:"ui-monospace, monospace",color:NAVY,background:"#f7fbff",fontWeight:600}}>{fmt0(m.spike_fmol)}</td>
-                <td style={{padding:"6px 6px",textAlign:"right",fontFamily:"ui-monospace, monospace",color:NAVY,background:"#f7fbff",fontWeight:600}}>{fmt2(m.final_spike_conc)}</td>
+                <td style={{padding:"4px 6px",textAlign:"right"}}>
+                  <input type="number" value={s.sampleVolPulled} onChange={function(e){ updateSample(idx, "sampleVolPulled", e.target.value); }} style={cellNumInput} />
+                </td>
+                <td style={{padding:"4px 6px",textAlign:"right",background:"#fffdf7"}}>
+                  <input type="number" value={s.proteinUg} onChange={function(e){ updateSample(idx, "proteinUg", e.target.value); }} style={cellNumInput} title="Auto-computed from conc × vol pulled. You can override." />
+                </td>
+                {ClickableUnitCell(
+                  m.sample_vol != null ? fmt2(uLToVolUnitT(m.sample_vol, resusUnit)) : null,
+                  resusUnit,
+                  function(){ setResusUnitOv(cycleUT(VOL_UNITS_TABLE, resusUnit)); },
+                  true
+                )}
+                {ClickableUnitCell(
+                  m.spike_vol != null ? fmt2(uLToVolUnitT(m.spike_vol, spkVolUnit)) : null,
+                  spkVolUnit,
+                  function(){ setSpkVolUnitOv(cycleUT(VOL_UNITS_TABLE, spkVolUnit)); },
+                  true
+                )}
+                {ClickableUnitCell(
+                  m.spike_fmol != null ? (spkAmtUnit === "amol" || spkAmtUnit === "fmol" ? fmt0(fmolToFmolUnitT(m.spike_fmol, spkAmtUnit)) : fmt2(fmolToFmolUnitT(m.spike_fmol, spkAmtUnit))) : null,
+                  spkAmtUnit,
+                  function(){ setSpkAmtUnitOv(cycleUT(FMOL_UNITS_TABLE, spkAmtUnit)); },
+                  true
+                )}
+                {ClickableUnitCell(
+                  m.final_spike_conc != null ? fmt2(concToConcUnitT(m.final_spike_conc, finalUnit)) : null,
+                  finalUnit,
+                  function(){ setFinalUnitOv(cycleUT(CONC_FMOL_UNITS_TABLE, finalUnit)); },
+                  true
+                )}
+                <td style={{padding:"6px 6px",textAlign:"center",background:"#f7fbff"}}>
+                  {(function(){
+                    if (st.stockMode === "manual") return <span style={{fontSize:11,color:SLATE}}>—</span>;
+                    if (!s.include) return <span style={{fontSize:11,color:"#8e9bb5"}}>—</span>;
+                    for (var gi = 0; gi < stockGroups.length; gi++) {
+                      var matched = stockGroups[gi].members.some(function(mm){ return mm.sample === s; });
+                      if (matched) {
+                        return <span style={{
+                          display:"inline-block",
+                          width:22, height:22, lineHeight:"22px",
+                          borderRadius:11,
+                          background: TEAL, color:"#fff",
+                          fontSize:11, fontWeight:700,
+                        }}>{String.fromCharCode(65 + gi)}</span>;
+                      }
+                    }
+                    return <span style={{fontSize:11,color:WARN}}>—</span>;
+                  })()}
+                </td>
                 <td style={{padding:"6px 6px",textAlign:"center"}}>
                   <span style={{
                     display:"inline-block",padding:"2px 6px",borderRadius:4,
                     fontSize:10,fontWeight:700,
-                    background: m.status === "ok" ? "#e7f7ef" : "#fef0ee",
-                    color: m.status === "ok" ? "#1b7f6a" : WARN,
+                    background: m.status === "ok" ? "#e7f7ef" :
+                                m.status === "excluded" ? "#eef0f6" :
+                                m.status === "infeasible" ? "#fef0ee" : "#fef0ee",
+                    color: m.status === "ok" ? "#1b7f6a" :
+                           m.status === "excluded" ? SLATE :
+                           m.status === "infeasible" ? WARN : WARN,
                   }}>{m.statusMsg}</span>
                 </td>
                 <td style={{padding:"6px 6px",textAlign:"center"}}>
@@ -2989,25 +3432,6 @@ function SpikePlannerCard(props){
                   }} title="Remove row">×</button>
                 </td>
               </tr>
-              {s.showDigest && <tr style={{background:"#f7fbff",borderBottom:"1px solid #ecf0f6"}}>
-                <td colSpan={10} style={{padding:"8px 16px"}}>
-                  <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
-                    <span style={{fontSize:11,color:SLATE,fontWeight:600}}>From digest:</span>
-                    <input type="number" placeholder="conc" value={s.digestConc} onChange={function(e){ updateSample(idx, "digestConc", e.target.value); }} style={{
-                      width:70,padding:"4px 6px",border:"1px solid " + BORDER, borderRadius:4,
-                      fontSize:12,fontFamily:"ui-monospace, monospace",color:NAVY,outline:"none",
-                    }} />
-                    <span style={{fontSize:11,color:SLATE}}>mg/mL</span>
-                    <span style={{fontSize:11,color:SLATE}}>×</span>
-                    <input type="number" placeholder="vol" value={s.digestVol} onChange={function(e){ updateSample(idx, "digestVol", e.target.value); }} style={{
-                      width:70,padding:"4px 6px",border:"1px solid " + BORDER, borderRadius:4,
-                      fontSize:12,fontFamily:"ui-monospace, monospace",color:NAVY,outline:"none",
-                    }} />
-                    <span style={{fontSize:11,color:SLATE}}>µL = {s.proteinUg} µg</span>
-                    <span style={{fontSize:10,color:"#8e9bb5",marginLeft:8}}>(≈ peptide mass after digestion)</span>
-                  </div>
-                </td>
-              </tr>}
             </span>;
           })}
         </tbody>
