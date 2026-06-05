@@ -1,12 +1,420 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { LoginGate, HeaderUserBadge } from "./auth.jsx";
 
+// ─────────────────────────────────────────────────────────────────────────
+//  TEMPORARY: AUTH DISABLED FOR LOCAL TESTING
+//  Set back to false before pushing to production / Vercel.
+//  When true: bypasses the LoginGate entirely and hides the inline
+//  "Signed in as · sign out" badge in the page header. The auth.jsx
+//  and users.js files are unchanged — only this flag changes the routing.
+// ─────────────────────────────────────────────────────────────────────────
+var AUTH_DISABLED_FOR_TESTING = true;
+
 var avg = function(a) { return a.length ? a.reduce(function(s,v){return s+v;},0)/a.length : 0; };
 var sdc = function(a) { if (a.length<2) return 0; var m=avg(a); return Math.sqrt(a.reduce(function(s,v){return s+(v-m)*(v-m);},0)/(a.length-1)); };
 var cvc = function(a) { var m=avg(a); return m ? sdc(a)/Math.abs(m) : Infinity; };
 var med = function(a) { var s=a.slice().sort(function(x,y){return x-y;}); var m=Math.floor(s.length/2); return s.length%2 ? s[m] : (s[m-1]+s[m])/2; };
 var APP_NAME = "eSSF Curve";
 var APP_VERSION = "v5d3";
+
+// ── Chart export utility ─────────────────────────────────────────────────
+// Exports an SVG chart as a PNG, either as a downloaded file or to the
+// clipboard. Used by chart "Save / Copy" buttons throughout the app.
+//
+// Design choices:
+//   • Renders at 2x DPI for crisp display on retina screens and in PPT
+//   • Adds white background (overrides any page tint)
+//   • Adds a small "eSSF Curve · YYYY-MM-DD" footer in the bottom-right so
+//     pasted images stay attributable
+//   • Returns a Promise that resolves on success, rejects on failure
+//
+// Usage:
+//   exportSVGChart(svgEl, { mode: 'download', filename: 'std_curve.png' })
+//   exportSVGChart(svgEl, { mode: 'clipboard' })
+function exportSVGChart(svgEl, opts) {
+  opts = opts || {};
+  var mode = opts.mode || 'download';
+  var filename = opts.filename || 'chart.png';
+  var scale = opts.scale || 2;            // 2x DPI for retina sharpness
+  var footer = opts.footer !== false;     // include footer unless explicitly disabled
+  var bgColor = opts.bgColor || '#ffffff';
+  var footerPad = footer ? 22 : 0;        // extra height for the footer strip
+
+  return new Promise(function(resolve, reject) {
+    if (!svgEl) return reject(new Error('No SVG element provided'));
+    try {
+      // Clone so we don't mutate the live SVG.
+      var clone = svgEl.cloneNode(true);
+      // Force xmlns on the root so the serialized string is a valid standalone SVG.
+      clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+      clone.setAttribute('xmlns:xlink', 'http://www.w3.org/1999/xlink');
+
+      // Determine dimensions. Prefer viewBox; fall back to width/height attrs.
+      var vb = (clone.getAttribute('viewBox') || '').split(/\s+/).map(Number);
+      var w, h;
+      if (vb.length === 4 && !isNaN(vb[2])) {
+        w = vb[2]; h = vb[3];
+      } else {
+        w = svgEl.clientWidth || 600;
+        h = svgEl.clientHeight || 320;
+      }
+
+      // Add an eSSF Curve · date footer at bottom-right of the SVG itself
+      // (drawn into the SVG before rasterization so it scales correctly).
+      if (footer) {
+        var SVG_NS = 'http://www.w3.org/2000/svg';
+        var d = new Date();
+        var dateStr = d.getFullYear() + '-' +
+          String(d.getMonth()+1).padStart(2,'0') + '-' +
+          String(d.getDate()).padStart(2,'0');
+        var footerText = APP_NAME + ' · ' + dateStr;
+        var t = document.createElementNS(SVG_NS, 'text');
+        t.setAttribute('x', String(w - 6));
+        t.setAttribute('y', String(h + footerPad - 6));
+        t.setAttribute('text-anchor', 'end');
+        t.setAttribute('font-size', '10');
+        t.setAttribute('fill', '#8e9bb5');
+        t.setAttribute('font-family', 'system-ui, -apple-system, sans-serif');
+        t.textContent = footerText;
+        clone.appendChild(t);
+        // Update viewBox to include footer height
+        clone.setAttribute('viewBox', '0 0 ' + w + ' ' + (h + footerPad));
+      }
+
+      var totalH = h + footerPad;
+      clone.setAttribute('width', String(w));
+      clone.setAttribute('height', String(totalH));
+
+      // Serialize.
+      var serializer = new XMLSerializer();
+      var svgString = serializer.serializeToString(clone);
+      // Some browsers omit the xmlns even after setAttribute; double-check.
+      if (!svgString.match(/^<svg[^>]+xmlns=/)) {
+        svgString = svgString.replace(/^<svg/, '<svg xmlns="http://www.w3.org/2000/svg"');
+      }
+
+      // SVG → blob URL → <img> → canvas → PNG blob
+      var svgBlob = new Blob([svgString], {type: 'image/svg+xml;charset=utf-8'});
+      var url = URL.createObjectURL(svgBlob);
+      var img = new Image();
+
+      img.onload = function() {
+        try {
+          var canvas = document.createElement('canvas');
+          canvas.width = w * scale;
+          canvas.height = totalH * scale;
+          var ctx = canvas.getContext('2d');
+          // White background
+          ctx.fillStyle = bgColor;
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          URL.revokeObjectURL(url);
+
+          canvas.toBlob(function(pngBlob) {
+            if (!pngBlob) return reject(new Error('Canvas toBlob returned null'));
+            if (mode === 'clipboard') {
+              if (!navigator.clipboard || !window.ClipboardItem) {
+                return reject(new Error('Clipboard API not supported in this browser'));
+              }
+              navigator.clipboard.write([
+                new ClipboardItem({'image/png': pngBlob})
+              ]).then(function(){resolve('clipboard');}).catch(reject);
+            } else {
+              // Download
+              var dlUrl = URL.createObjectURL(pngBlob);
+              var a = document.createElement('a');
+              a.href = dlUrl;
+              a.download = filename;
+              document.body.appendChild(a);
+              a.click();
+              document.body.removeChild(a);
+              setTimeout(function(){URL.revokeObjectURL(dlUrl);}, 1000);
+              resolve('download');
+            }
+          }, 'image/png');
+        } catch (e) {
+          URL.revokeObjectURL(url);
+          reject(e);
+        }
+      };
+      img.onerror = function(e) {
+        URL.revokeObjectURL(url);
+        reject(new Error('Failed to load SVG as image'));
+      };
+      img.src = url;
+    } catch (e) {
+      reject(e);
+    }
+  });
+}
+
+// Small React-ready helper: a pair of inline icon buttons for download/clipboard.
+// Hooks into exportSVGChart and shows a brief feedback message on success/failure.
+function ChartExportButtons(props) {
+  var fb = useState(''), feedback = fb[0], setFeedback = fb[1];
+  function show(msg) {
+    setFeedback(msg);
+    setTimeout(function(){setFeedback('');}, 1800);
+  }
+  function handle(mode) {
+    var svgEl = props.svgRef && props.svgRef.current;
+    if (!svgEl) { show('Chart not ready'); return; }
+    exportSVGChart(svgEl, {
+      mode: mode,
+      filename: props.filename || 'essf_chart.png'
+    }).then(function(result){
+      show(result === 'clipboard' ? '✓ Copied to clipboard' : '✓ Downloaded');
+    }).catch(function(err){
+      show(mode === 'clipboard' ? 'Copy failed — try Download instead' : 'Download failed');
+      // Log for debugging; analyst can still see the user-friendly message above.
+      if (typeof console !== 'undefined' && console.warn) console.warn('Chart export error:', err);
+    });
+  }
+  var btnStyle = {
+    background: 'none',
+    border: '1px solid #d8dfeb',
+    color: '#5a6984',
+    padding: '4px 9px',
+    borderRadius: 6,
+    fontSize: 11,
+    fontWeight: 600,
+    cursor: 'pointer',
+    fontFamily: 'inherit',
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 4,
+    transition: 'background 0.12s'
+  };
+  return <span style={{display:'inline-flex',alignItems:'center',gap:6,marginLeft:8}}>
+    <button
+      type="button"
+      onClick={function(){handle('download');}}
+      style={btnStyle}
+      title="Download chart as PNG"
+      onMouseEnter={function(e){e.currentTarget.style.background='#f4f7fb';}}
+      onMouseLeave={function(e){e.currentTarget.style.background='none';}}
+    >⬇ PNG</button>
+    <button
+      type="button"
+      onClick={function(){handle('clipboard');}}
+      style={btnStyle}
+      title="Copy chart to clipboard (paste into PowerPoint, Word, etc.)"
+      onMouseEnter={function(e){e.currentTarget.style.background='#f4f7fb';}}
+      onMouseLeave={function(e){e.currentTarget.style.background='none';}}
+    >📋 Copy</button>
+    {feedback && <span style={{fontSize:11,color:feedback.indexOf('✓')===0?'#1b7f6a':'#b4332e',fontWeight:600,fontStyle:'italic'}}>{feedback}</span>}
+  </span>;
+}
+
+// ── Shared helpers for the mass-spec calculator family ───────────────────
+// Used by Mass on Column, Mass↔Moles, Solution Maker, and Peptide Prep.
+// Lifted to module scope so the four calculators stay aligned and we have
+// one place to extend (e.g., adding a new preset protein).
+
+var MASS_UNITS = ["pg", "ng", "µg", "mg"];
+var MOLE_UNITS = ["amol", "fmol", "pmol", "nmol", "µmol"];
+
+// Convert a value in ng (canonical) to any mass unit
+function ngToUnit(ng, unit) {
+  if (ng == null || !isFinite(ng)) return null;
+  if (unit === "pg") return ng * 1000;
+  if (unit === "ng") return ng;
+  if (unit === "µg") return ng / 1000;
+  if (unit === "mg") return ng / 1e6;
+  return ng;
+}
+// Convert a value in pmol (canonical) to any molar unit
+function pmolToUnit(pmol, unit) {
+  if (pmol == null || !isFinite(pmol)) return null;
+  if (unit === "amol") return pmol * 1e6;
+  if (unit === "fmol") return pmol * 1000;
+  if (unit === "pmol") return pmol;
+  if (unit === "nmol") return pmol / 1000;
+  if (unit === "µmol") return pmol / 1e6;
+  return pmol;
+}
+// Pick the most readable mass unit for a value in ng (auto when no override)
+function autoMassUnit(ng) {
+  if (ng == null || !isFinite(ng)) return "ng";
+  var a = Math.abs(ng);
+  if (a >= 1e6)   return "mg";
+  if (a >= 1000)  return "µg";
+  if (a >= 1)     return "ng";
+  return "pg";
+}
+// Pick the most readable molar unit for a value in pmol
+function autoMoleUnit(pmol) {
+  if (pmol == null || !isFinite(pmol)) return "pmol";
+  var a = Math.abs(pmol);
+  if (a >= 1e6)   return "µmol";
+  if (a >= 1000)  return "nmol";
+  if (a >= 1)     return "pmol";
+  if (a >= 0.001) return "fmol";
+  return "amol";
+}
+// Cycle to next unit in a list (used by ↻ "switch unit" buttons)
+function cycleUnit(list, current) {
+  var i = list.indexOf(current);
+  return list[(i + 1) % list.length];
+}
+// Format a number with sensible precision
+function fmtNum(x) {
+  if (x == null || !isFinite(x)) return "—";
+  var a = Math.abs(x);
+  if (a === 0) return "0";
+  if (a >= 1000) return x.toFixed(1);
+  if (a >= 1)    return x.toFixed(2);
+  if (a >= 0.01) return x.toFixed(3);
+  return x.toExponential(2);
+}
+
+// Built-in protein presets. Custom proteins are stored separately at App level
+// (with localStorage persistence) and merged in via renderPresetOptions.
+var PROTEIN_PRESETS = [
+  { id: "custom",  label: "Custom",                       mwDa: null },
+  { id: "igg",     label: "IgG / mAb (~150 kDa)",         mwDa: 150000 },
+  { id: "trast",   label: "Trastuzumab (148 kDa)",        mwDa: 148000 },
+  { id: "bsa",     label: "BSA (66 kDa)",                 mwDa: 66000 },
+  { id: "gfp",     label: "GFP (~27 kDa)",                mwDa: 27000 },
+  { id: "insulin", label: "Insulin (~5.8 kDa)",           mwDa: 5800 },
+  { id: "peptide", label: "Tryptic peptide (~1.5 kDa)",   mwDa: 1500 },
+];
+
+// Build the protein <select> options: built-ins followed by an optgroup of
+// user-saved proteins (if any). Used by Mass on Column, Mass↔Moles, Solution
+// Maker — they all share the same library.
+function renderProteinPresetOptions(customProteins) {
+  var opts = PROTEIN_PRESETS.map(function(p){
+    return <option key={p.id} value={p.id}>{p.label}</option>;
+  });
+  if (!customProteins || customProteins.length === 0) return opts;
+  var savedItems = customProteins.map(function(p){
+    var mwLabel = p.mwDa >= 1000 ? (p.mwDa / 1000).toFixed(1) + " kDa" : p.mwDa + " Da";
+    return <option key={p.id} value={p.id}>{p.label + " (" + mwLabel + ")"}</option>;
+  });
+  return opts.concat([
+    <optgroup key="saved" label="── Saved proteins ──">{savedItems}</optgroup>
+  ]);
+}
+
+// Resolve a preset id (built-in or user-added) to its MW in Da. Returns null
+// for "custom" (no preset MW) or unknown ids.
+function resolveProteinPresetMW(presetId, customProteins) {
+  var builtIn = PROTEIN_PRESETS.filter(function(p){ return p.id === presetId; })[0];
+  if (builtIn && builtIn.mwDa != null) return builtIn.mwDa;
+  if (customProteins) {
+    var userProt = customProteins.filter(function(p){ return p.id === presetId; })[0];
+    if (userProt) return userProt.mwDa;
+  }
+  return null;
+}
+
+// Small ↻ button next to a unit. Tap to cycle through the list.
+// Used by every result tile in the mass-spec calculators.
+function UnitCycleLink(props) {
+  var units = props.units, current = props.current, onCycle = props.onCycle;
+  return <button
+    type="button"
+    onClick={function(){ onCycle(cycleUnit(units, current)); }}
+    style={{
+      background: "none",
+      border: "none",
+      color: "#139cb6",
+      fontSize: 11,
+      fontWeight: 600,
+      cursor: "pointer",
+      padding: "2px 4px",
+      fontFamily: "inherit",
+    }}
+    title={"Cycle through: " + units.join(" / ")}
+  >↻ {units.join(" / ")}</button>;
+}
+
+// Inline editor shown when user picks "Custom" from a protein dropdown. Lets
+// them name the protein and save it to the shared library. Used by Mass on
+// Column, Mass↔Moles, and Solution Maker (all 3 protein calculators).
+function CustomProteinEditor(props) {
+  var mwValue = props.mwValue, mwUnit = props.mwUnit;
+  var onMwChange = props.onMwChange;     // (value, unit) => void
+  var saveProtein = props.saveProtein;   // (name, mwDa) => {ok, error?, id?}
+
+  var nameS = useState(""), name = nameS[0], setName = nameS[1];
+  var fbS = useState({kind:null, msg:""}), feedback = fbS[0], setFeedback = fbS[1];
+
+  function handleSave(){
+    var mwNum = parseFloat(mwValue);
+    var mwDa = isFinite(mwNum) ? (mwUnit === "kDa" ? mwNum * 1000 : mwNum) : null;
+    var res = saveProtein(name, mwDa);
+    if (res && res.ok) {
+      setFeedback({kind:"ok", msg:"✓ saved"});
+      setName("");
+      setTimeout(function(){ setFeedback({kind:null, msg:""}); }, 1800);
+    } else {
+      setFeedback({kind:"err", msg: (res && res.error) || "Could not save"});
+      setTimeout(function(){ setFeedback({kind:null, msg:""}); }, 2400);
+    }
+  }
+
+  var lineInput = {
+    flex: 1, padding: "10px 12px", border: "none", borderBottom: "2px solid #dfe7f2",
+    background: "transparent", fontSize: 15, fontFamily: "inherit",
+    color: "#0b2a6f", outline: "none", minWidth: 0,
+  };
+  var lineNumInput = Object.assign({}, lineInput, {fontFamily: "ui-monospace, monospace"});
+  var linePicker = {
+    padding: "10px 8px", border: "none", borderBottom: "2px solid #dfe7f2",
+    background: "transparent", fontSize: 14, fontFamily: "inherit",
+    color: "#5a6984", cursor: "pointer", outline: "none",
+  };
+  var hint = { fontSize: 11, color: "#8e9bb5", marginTop: 2 };
+
+  return <div style={{marginTop:18}}>
+    <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:6}}>
+      <input
+        type="text"
+        value={name}
+        onChange={function(e){ setName(e.target.value); }}
+        placeholder="e.g. MAB-X3"
+        style={lineInput}
+      />
+    </div>
+    <div style={hint}>Protein name (for the library)</div>
+
+    <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:6,marginTop:18}}>
+      <input
+        type="number"
+        value={mwValue}
+        onChange={function(e){ onMwChange(e.target.value, mwUnit); }}
+        style={lineNumInput}
+      />
+      <select
+        value={mwUnit}
+        onChange={function(e){ onMwChange(mwValue, e.target.value); }}
+        style={linePicker}
+      >
+        <option value="kDa">kDa</option>
+        <option value="Da">Da</option>
+      </select>
+    </div>
+    <div style={hint}>Molecular weight</div>
+
+    <div style={{marginTop:14,display:"flex",alignItems:"center",gap:10}}>
+      <button
+        type="button"
+        onClick={handleSave}
+        style={{
+          background: "#139cb6", color: "#fff", border: "none",
+          padding: "8px 14px", borderRadius: 6,
+          fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
+        }}
+      >Save to library</button>
+      {feedback.kind && <span style={{
+        fontSize: 12, fontWeight: 600,
+        color: feedback.kind === "ok" ? "#1b7f6a" : "#b4332e",
+      }}>{feedback.msg}</span>}
+    </div>
+  </div>;
+}
 
 // Plain-language tooltip texts — used in many places via `title` attr on inline spans so
 // analysts (who don't have the time/context for the long instructor-mode prose) can still
@@ -816,8 +1224,8 @@ function PageHeader(props){
       <div onClick={props.onSecretTap} style={{fontSize:large?12:10,color:"#6f7fa0",fontFamily:"Georgia,serif",letterSpacing:1,paddingLeft:large?12:8,borderLeft:"1px solid #dfe7f2",cursor:"default",userSelect:"none"}}>{APP_VERSION}</div>
     </div>
     <div style={{display:"flex",alignItems:"center",gap:14}}>
-      <HeaderUserBadge />
-      <div style={{width:1,height:18,background:"#dfe7f2"}}/>
+      {!AUTH_DISABLED_FOR_TESTING && <HeaderUserBadge />}
+      {!AUTH_DISABLED_FOR_TESTING && <div style={{width:1,height:18,background:"#dfe7f2"}}/>}
       <ModeToggle instructor={props.instructor} setInstructor={props.setInstructor} />
       {props.onReset && <button
         onClick={doReset}
@@ -1062,6 +1470,1036 @@ function FormatPill(props) {
       whiteSpace:"nowrap",
     }}
   >{labelOf(value)}</span>;
+}
+
+// ── Mass on Column calculator ───────────────────────────────────────────
+//
+// Given a sample concentration, injection volume, and (optionally) the
+// analyte's molecular weight, computes both mass on column (pg/ng/µg)
+// and moles on column (amol/fmol/pmol). Cross-checks the two if both
+// can be computed.
+//
+// Inputs allow either mass-based concentration (mg/mL, ug/mL, ng/mL) or
+// molar (µM, nM, pM) — the tool picks the appropriate output set based
+// on what's provided.
+function MassOnColumnCard(props){
+  var instructor = !!props.instructor;
+  var customProteins = props.customProteins || [];
+  var saveProtein = props.saveProtein;
+
+  var _s = useState({
+    conc: "1",
+    concUnit: "mg/mL",
+    injVol: "1",
+    injVolUnit: "uL",
+    mw: "150",
+    mwUnit: "kDa",
+    dilution: "1",
+    preset: "igg",
+  });
+  var st = _s[0], setSt = _s[1];
+  var _mO = useState(null), massUnitOverride = _mO[0], setMassUnitOverride = _mO[1];
+  var _nO = useState(null), moleUnitOverride = _nO[0], setMoleUnitOverride = _nO[1];
+  var _more = useState(false), showMore = _more[0], setShowMore = _more[1];
+  // Default primary = moles (LC-MS work usually reports concentrations in fmol/pmol;
+  // mass is the cross-check).
+  var _pri = useState("moles"), primary = _pri[0], setPrimary = _pri[1];
+  var u = function(k,v){ setSt(function(p){ var n={}; for(var x in p) n[x]=p[x]; n[k]=v; return n; }); };
+
+  function applyPreset(id){
+    if (id === "custom") { u("preset", "custom"); return; }
+    var mwDa = resolveProteinPresetMW(id, customProteins);
+    if (mwDa == null) { u("preset", id); }
+    else {
+      setSt(function(prev){
+        var n={}; for(var x in prev) n[x]=prev[x];
+        n.preset = id;
+        n.mw = String(mwDa >= 1000 ? mwDa / 1000 : mwDa);
+        n.mwUnit = mwDa >= 1000 ? "kDa" : "Da";
+        return n;
+      });
+    }
+  }
+
+  // Math
+  var concInput = parseFloat(st.conc);
+  var injVol_uL = parseFloat(st.injVol);
+  if (st.injVolUnit === "nL") injVol_uL = injVol_uL / 1000;
+  var mwInput = parseFloat(st.mw);
+  var mwDa = isFinite(mwInput) ? (st.mwUnit === "kDa" ? mwInput * 1000 : mwInput) : null;
+  var dilFactor = parseFloat(st.dilution);
+  if (!isFinite(dilFactor) || dilFactor <= 0) dilFactor = 1;
+  var effConc = isFinite(concInput) ? concInput / dilFactor : null;
+
+  var mgPerML = null, uM = null;
+  if (effConc != null && isFinite(effConc)) {
+    if (st.concUnit === "mg/mL")      mgPerML = effConc;
+    else if (st.concUnit === "ug/mL") mgPerML = effConc / 1000;
+    else if (st.concUnit === "ng/mL") mgPerML = effConc / 1e6;
+    else if (st.concUnit === "uM")    uM = effConc;
+    else if (st.concUnit === "nM")    uM = effConc / 1000;
+    else if (st.concUnit === "pM")    uM = effConc / 1e6;
+  }
+  if (mgPerML != null && uM == null && mwDa) uM = (mgPerML / mwDa) * 1e6;
+  if (uM != null && mgPerML == null && mwDa) mgPerML = (uM * mwDa) / 1e6;
+
+  var mass_ng = (mgPerML != null && isFinite(injVol_uL)) ? mgPerML * injVol_uL * 1000 : null;
+  var moles_pmol = (uM != null && isFinite(injVol_uL)) ? uM * injVol_uL : null;
+
+  var displayMassUnit = massUnitOverride || autoMassUnit(mass_ng);
+  var displayMoleUnit = moleUnitOverride || autoMoleUnit(moles_pmol);
+  var massDisplay = ngToUnit(mass_ng, displayMassUnit);
+  var moleDisplay = pmolToUnit(moles_pmol, displayMoleUnit);
+
+  var warns = [];
+  if (mass_ng != null && mass_ng > 50000) warns.push("Over 50 µg — most columns can't handle this.");
+  if (mass_ng != null && mass_ng < 0.001) warns.push("Sub-pg mass — below LOQ for most LC-MS.");
+  if (injVol_uL != null && injVol_uL > 100) warns.push("Injection volume over 100 µL — check column.");
+
+  // Lean styles
+  var NAVY = "#0b2a6f", TEAL = "#139cb6", BORDER = "#dfe7f2", SLATE = "#5a6984";
+  var lineInput = {
+    flex: 1, padding: "10px 12px", border: "none", borderBottom: "2px solid " + BORDER,
+    background: "transparent", fontSize: 18, fontFamily: "ui-monospace, monospace",
+    color: NAVY, outline: "none", minWidth: 0,
+  };
+  var linePicker = {
+    padding: "10px 8px", border: "none", borderBottom: "2px solid " + BORDER,
+    background: "transparent", fontSize: 14, fontFamily: "inherit",
+    color: SLATE, cursor: "pointer", outline: "none",
+  };
+  var hint = { fontSize: 11, color: "#8e9bb5", marginTop: 2 };
+
+  function ResultTile(rprops) {
+    var value = rprops.value, unit = rprops.unit, units = rprops.units;
+    var cycleSetter = rprops.cycleSetter, label = rprops.label, isPrimary = rprops.isPrimary;
+    var swapTo = rprops.swapTo;
+    if (value == null) {
+      return <div style={{
+        padding: isPrimary ? "20px 18px" : "12px 16px",
+        background: isPrimary ? "#fff" : "transparent",
+        border: isPrimary ? "1px solid " + BORDER : "none",
+        borderRadius: 10,
+        marginBottom: isPrimary ? 8 : 0,
+      }}>
+        <div style={{fontSize:11,color:SLATE,marginBottom:4}}>{label}</div>
+        <div style={{fontSize:13,color:"#8e9bb5",fontStyle:"italic"}}>
+          {rprops.hasMW ? "Enter values above" : "Add a molecular weight"}
+        </div>
+      </div>;
+    }
+    return <div
+      onClick={!isPrimary ? function(){ setPrimary(swapTo); } : undefined}
+      style={{
+        padding: isPrimary ? "20px 18px" : "10px 16px",
+        background: isPrimary ? "#fff" : "transparent",
+        border: isPrimary ? "1px solid " + BORDER : "none",
+        borderRadius: 10,
+        marginBottom: isPrimary ? 8 : 0,
+        cursor: isPrimary ? "default" : "pointer",
+      }}
+    >
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom: isPrimary ? 4 : 0}}>
+        <div style={{fontSize:11,color:SLATE}}>{label}</div>
+        {isPrimary && <UnitCycleLink units={units} current={unit} onCycle={cycleSetter} />}
+      </div>
+      <div style={{display:"flex",alignItems:"baseline",gap:6}}>
+        <span style={{
+          fontSize: isPrimary ? 36 : 18,
+          fontWeight: 700, color: NAVY,
+          fontFamily: "ui-monospace, monospace", lineHeight: 1,
+        }}>{fmtNum(value)}</span>
+        <span style={{fontSize: isPrimary ? 16 : 13, color: SLATE, fontWeight: 600}}>{unit}</span>
+      </div>
+    </div>;
+  }
+
+  var showMassPrimary = primary === "mass";
+
+  return <div>
+    <h2 style={{fontSize:20,fontWeight:700,color:NAVY,margin:"0 0 4px",letterSpacing:"-0.01em"}}>Mass on column</h2>
+    <div style={{fontSize:12,color:SLATE,marginBottom:22}}>From sample concentration and injection volume.</div>
+
+    {/* Preset dropdown */}
+    <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:22}}>
+      <span style={{fontSize:12,color:SLATE}}>For:</span>
+      <select value={st.preset} onChange={function(e){ applyPreset(e.target.value); }} style={{
+        padding:"6px 10px",border:"1px solid " + BORDER,borderRadius:6,
+        fontSize:13,fontFamily:"inherit",color:NAVY,background:"#fff",
+        cursor:"pointer",fontWeight:600,
+      }}>{renderProteinPresetOptions(customProteins)}</select>
+    </div>
+
+    {/* Inputs */}
+    <div style={{marginBottom:24}}>
+      <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:6}}>
+        <input type="number" value={st.conc} onChange={function(e){ u("conc", e.target.value); }} style={lineInput} />
+        <select value={st.concUnit} onChange={function(e){ u("concUnit", e.target.value); }} style={linePicker}>
+          <option value="mg/mL">mg/mL</option>
+          <option value="ug/mL">µg/mL</option>
+          <option value="ng/mL">ng/mL</option>
+          <option value="uM">µM</option>
+          <option value="nM">nM</option>
+          <option value="pM">pM</option>
+        </select>
+      </div>
+      <div style={hint}>Sample concentration</div>
+
+      <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:6,marginTop:18}}>
+        <input type="number" value={st.injVol} onChange={function(e){ u("injVol", e.target.value); }} style={lineInput} />
+        <select value={st.injVolUnit} onChange={function(e){ u("injVolUnit", e.target.value); }} style={linePicker}>
+          <option value="uL">µL</option>
+          <option value="nL">nL</option>
+        </select>
+      </div>
+      <div style={hint}>Injection volume</div>
+
+      {st.preset === "custom" && saveProtein && (
+        <CustomProteinEditor
+          mwValue={st.mw}
+          mwUnit={st.mwUnit}
+          onMwChange={function(v, unit){
+            setSt(function(prev){ var n={}; for(var x in prev) n[x]=prev[x]; n.mw=v; n.mwUnit=unit; return n; });
+          }}
+          saveProtein={function(name, mwDa){
+            var res = saveProtein(name, mwDa);
+            if (res && res.ok) {
+              setSt(function(prev){ var n={}; for(var x in prev) n[x]=prev[x]; n.preset=res.id; return n; });
+            }
+            return res;
+          }}
+        />
+      )}
+    </div>
+
+    {/* Results — primary big, secondary small */}
+    <div style={{marginBottom:14}}>
+      {showMassPrimary ? <span>
+        <ResultTile value={massDisplay} unit={displayMassUnit} units={MASS_UNITS}
+          cycleSetter={setMassUnitOverride} label="Mass on column" isPrimary={true} hasMW={!!mwDa} />
+        <ResultTile value={moleDisplay} unit={displayMoleUnit} units={MOLE_UNITS}
+          cycleSetter={setMoleUnitOverride} label="Moles on column (tap to switch)" isPrimary={false} hasMW={!!mwDa} swapTo="moles" />
+      </span> : <span>
+        <ResultTile value={moleDisplay} unit={displayMoleUnit} units={MOLE_UNITS}
+          cycleSetter={setMoleUnitOverride} label="Moles on column" isPrimary={true} hasMW={!!mwDa} />
+        <ResultTile value={massDisplay} unit={displayMassUnit} units={MASS_UNITS}
+          cycleSetter={setMassUnitOverride} label="Mass on column (tap to switch)" isPrimary={false} hasMW={!!mwDa} swapTo="mass" />
+      </span>}
+    </div>
+
+    {warns.length > 0 && <div style={{marginBottom:14}}>
+      {warns.map(function(w, i){
+        return <div key={i} style={{fontSize:12,color:"#b4332e",padding:"6px 0",display:"flex",gap:6}}>
+          <span>⚠</span><span>{w}</span>
+        </div>;
+      })}
+    </div>}
+
+    <button type="button" onClick={function(){ setShowMore(!showMore); }} style={{
+      background:"none",border:"none",color:TEAL,fontSize:12,cursor:"pointer",
+      padding:"4px 0",fontFamily:"inherit",fontWeight:600,
+    }}>{showMore ? "− Less" : "+ More options"}</button>
+
+    {showMore && <div style={{marginTop:12,padding:"14px 0 4px",borderTop:"1px solid " + BORDER}}>
+      {st.preset !== "custom" && <span>
+        <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:6}}>
+          <input type="number" value={st.mw} onChange={function(e){
+            setSt(function(prev){ var n={}; for(var x in prev) n[x]=prev[x]; n.mw=e.target.value; n.preset="custom"; return n; });
+          }} style={lineInput} />
+          <select value={st.mwUnit} onChange={function(e){ u("mwUnit", e.target.value); }} style={linePicker}>
+            <option value="kDa">kDa</option>
+            <option value="Da">Da</option>
+          </select>
+        </div>
+        <div style={hint}>Override molecular weight</div>
+      </span>}
+      <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:6,marginTop: st.preset !== "custom" ? 14 : 0}}>
+        <input type="number" value={st.dilution} onChange={function(e){ u("dilution", e.target.value); }} style={lineInput} placeholder="1" />
+        <span style={{fontSize:14,color:SLATE,padding:"0 8px"}}>×</span>
+      </div>
+      <div style={hint}>Dilution factor (1 = no dilution)</div>
+
+      {dilFactor !== 1 && effConc != null && <div style={{marginTop:12,fontSize:11,color:SLATE}}>
+        Effective conc. in vial: <span style={{fontFamily:"ui-monospace, monospace",color:NAVY}}>{effConc.toExponential(3)} {st.concUnit}</span>
+      </div>}
+
+      {mass_ng != null && <div style={{marginTop:12,fontSize:11,color:"#8e9bb5",fontFamily:"ui-monospace, monospace"}}>
+        Raw: {mass_ng.toExponential(3)} ng · {moles_pmol != null ? moles_pmol.toExponential(3) + " pmol" : ""}
+      </div>}
+
+      {instructor && mgPerML != null && injVol_uL != null && <div style={{marginTop:12,fontSize:11,color:SLATE,lineHeight:1.7,fontFamily:"ui-monospace, monospace"}}>
+        Mass on column = conc × inj vol = {mgPerML.toExponential(3)} mg/mL × {injVol_uL} µL = {mass_ng != null ? mass_ng.toExponential(3) : "—"} ng
+      </div>}
+    </div>}
+  </div>;
+}
+
+// ── Peptide Mapping Prep calculator ─────────────────────────────────────
+//
+// Bench math for a tryptic mapping prep. Given starting protein concentration
+// and target digest conditions, computes every volume an analyst would
+// otherwise calculate by hand: protein needed, buffer to add, reduction
+// reagent, alkylation reagent, enzyme reconstitution + add volume, quench.
+//
+// Designed to be the calculation an analyst would do on paper before starting
+// — so the output reads like a prep recipe, not like a math display.
+function PeptidePrepCard(props){
+  var instructor = !!props.instructor;
+  // Handoff callback from App — invoked when user taps "Send X µg to Solution Maker"
+  var sendToSolutionMaker = props.sendToSolutionMaker;
+
+  var _s = useState({
+    proteinConc: "5",
+    digestVol: "100",
+    targetProteinConc: "1",
+    redAgent: "DTT",
+    redStockConc: "1",
+    redStockUnit: "M",
+    redFinalConc: "10",
+    redFinalUnit: "mM",
+    alkAgent: "IAA",
+    alkStockConc: "0.5",
+    alkStockUnit: "M",
+    alkFinalConc: "25",
+    alkFinalUnit: "mM",
+    enzyme: "Trypsin",
+    enzymeVialMass: "20",
+    enzymeReconVol: "40",
+    enzymeRatio: "20",
+    quenchAgent: "Formic acid",
+    quenchTargetPct: "1",
+    quenchStockPct: "100",
+  });
+  var st = _s[0], setSt = _s[1];
+  var u = function(k, v){ setSt(function(p){ var n={}; for(var x in p) n[x]=p[x]; n[k]=v; return n; }); };
+  var _stub = useState("setup"), subTab = _stub[0], setSubTab = _stub[1];
+  // Yield estimate state — recovery range and avg peptide MW.
+  var _yo = useState(false), yieldOverride = _yo[0], setYieldOverride = _yo[1];
+  var _yl = useState("60"), yieldLow = _yl[0], setYieldLow = _yl[1];
+  var _yh = useState("80"), yieldHigh = _yh[0], setYieldHigh = _yh[1];
+  var _ymw = useState("1.5"), avgPepMW = _ymw[0], setAvgPepMW = _ymw[1];
+
+  var enzymeDefaults = {
+    "Trypsin":      { ratio: "20",  incubation: "Overnight at 37°C",          note: "Most common for mAbs." },
+    "Lys-C":        { ratio: "50",  incubation: "4-6 h at 37°C, or overnight", note: "Cleaves only at K. Often combined with trypsin." },
+    "Chymotrypsin": { ratio: "20",  incubation: "Overnight at 25-30°C",       note: "Broad specificity (F, W, Y)." },
+    "Asp-N":        { ratio: "100", incubation: "Overnight at 37°C",          note: "Cleaves N-terminal to D. Slower kinetics." },
+    "Glu-C":        { ratio: "20",  incubation: "Overnight at 25-37°C",       note: "Cleaves C-terminal to E (and D in some buffers)." },
+  };
+
+  function changeEnzyme(name){
+    var d = enzymeDefaults[name];
+    setSt(function(prev){ var n={}; for(var x in prev) n[x]=prev[x]; n.enzyme=name; if (d) n.enzymeRatio = d.ratio; return n; });
+  }
+
+  // Recipe math (unchanged from before)
+  var Cp = parseFloat(st.proteinConc);
+  var Vd = parseFloat(st.digestVol);
+  var Cfp = parseFloat(st.targetProteinConc);
+  var fmt2 = function(x){ return (x == null || !isFinite(x)) ? "—" : x.toFixed(2); };
+
+  var totalProtein_ug = (Cfp * Vd) / 1;
+  var Vprotein = totalProtein_ug / Cp;
+
+  var redStock_mM = parseFloat(st.redStockConc) * (st.redStockUnit === "M" ? 1000 : 1);
+  var redFinal_mM = parseFloat(st.redFinalConc) * (st.redFinalUnit === "M" ? 1000 : 1);
+  var Vred = (redFinal_mM * Vd) / redStock_mM;
+
+  var alkStock_mM = parseFloat(st.alkStockConc) * (st.alkStockUnit === "M" ? 1000 : 1);
+  var alkFinal_mM = parseFloat(st.alkFinalConc) * (st.alkFinalUnit === "M" ? 1000 : 1);
+  var Valk = (alkFinal_mM * Vd) / alkStock_mM;
+
+  var enzymeVialMass = parseFloat(st.enzymeVialMass);
+  var enzymeReconVol = parseFloat(st.enzymeReconVol);
+  var enzymeStockConc = enzymeReconVol > 0 ? enzymeVialMass / enzymeReconVol : 0;
+  var enzymeMassNeeded = totalProtein_ug / parseFloat(st.enzymeRatio);
+  var Venzyme = enzymeStockConc > 0 ? enzymeMassNeeded / enzymeStockConc : 0;
+
+  var Vbuffer = Vd - Vprotein - Vred - Valk - Venzyme;
+  var quenchTarget = parseFloat(st.quenchTargetPct);
+  var quenchStock = parseFloat(st.quenchStockPct);
+  var Vquench = quenchStock > quenchTarget ? (Vd * quenchTarget) / (quenchStock - quenchTarget) : 0;
+
+  // Yield estimate
+  var theoreticalYield_ug = totalProtein_ug + enzymeMassNeeded;
+  var recLow_pct = parseFloat(yieldLow), recHigh_pct = parseFloat(yieldHigh);
+  var recLowOk = isFinite(recLow_pct) && recLow_pct > 0 && recLow_pct <= 100;
+  var recHighOk = isFinite(recHigh_pct) && recHigh_pct > 0 && recHigh_pct <= 100;
+  var yieldLow_ug = recLowOk ? theoreticalYield_ug * (recLow_pct / 100) : null;
+  var yieldHigh_ug = recHighOk ? theoreticalYield_ug * (recHigh_pct / 100) : null;
+  var yieldMid_ug = (yieldLow_ug != null && yieldHigh_ug != null) ? (yieldLow_ug + yieldHigh_ug) / 2 : null;
+  var avgPepMW_kDa = parseFloat(avgPepMW);
+  var yieldLow_pmol = (yieldLow_ug != null && avgPepMW_kDa > 0) ? (yieldLow_ug / avgPepMW_kDa) * 1000 : null;
+  var yieldHigh_pmol = (yieldHigh_ug != null && avgPepMW_kDa > 0) ? (yieldHigh_ug / avgPepMW_kDa) * 1000 : null;
+
+  // Sanity warnings
+  var warns = [];
+  if (Vprotein > Vd)   warns.push("Need " + fmt2(Vprotein) + " µL of protein but digest is only " + Vd + " µL.");
+  if (Vbuffer < 0)     warns.push("Reagents exceed digest volume by " + fmt2(-Vbuffer) + " µL.");
+  if (Vbuffer < Vd * 0.1 && Vbuffer >= 0) warns.push("Very little buffer headroom (" + fmt2(Vbuffer) + " µL).");
+  if (Venzyme < 0.5 && Venzyme > 0) warns.push("Enzyme add volume <0.5 µL — pipetting will be inaccurate.");
+
+  var NAVY = "#0b2a6f", TEAL = "#139cb6", BORDER = "#dfe7f2", SLATE = "#5a6984", AMBER = "#bf7a1a";
+  var monoVal = { fontFamily: "ui-monospace, monospace", color: NAVY, fontWeight: 700 };
+  var d = enzymeDefaults[st.enzyme];
+
+  var lineInput = {
+    flex: 1, padding: "10px 12px", border: "none", borderBottom: "2px solid " + BORDER,
+    background: "transparent", fontSize: 16, fontFamily: "ui-monospace, monospace",
+    color: NAVY, outline: "none", minWidth: 0,
+  };
+  var linePicker = {
+    padding: "10px 8px", border: "none", borderBottom: "2px solid " + BORDER,
+    background: "transparent", fontSize: 14, fontFamily: "inherit",
+    color: SLATE, cursor: "pointer", outline: "none",
+  };
+  var fieldHint = { fontSize: 11, color: "#8e9bb5", marginTop: 2 };
+
+  function subTabBtn(active) {
+    return {
+      flex: 1, padding: "10px 6px",
+      background: active ? "#fff" : "transparent",
+      color: active ? NAVY : SLATE, border: "none",
+      borderBottom: active ? "3px solid " + TEAL : "3px solid transparent",
+      fontSize: 12, fontWeight: active ? 800 : 600,
+      cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap",
+    };
+  }
+
+  return <div>
+    <h2 style={{fontSize:20,fontWeight:700,color:NAVY,margin:"0 0 4px",letterSpacing:"-0.01em"}}>Peptide mapping prep</h2>
+    <div style={{fontSize:12,color:SLATE,marginBottom:18}}>Bench volumes for reduction, alkylation, digestion.</div>
+
+    {/* Reconstitution sidecar — ABOVE the recipe, framed as a pre-step */}
+    <div style={{fontSize:12,color:SLATE,marginBottom:14,padding:"10px 14px",background:"#fff8ed",border:"1px solid #f0d8a8",borderRadius:8,lineHeight:1.6}}>
+      <strong>First:</strong> reconstitute the <span style={monoVal}>{st.enzymeVialMass} µg</span> {st.enzyme} vial with <span style={monoVal}>{st.enzymeReconVol} µL</span> buffer. Stock = <span style={monoVal}>{fmt2(enzymeStockConc)} µg/µL</span>.
+    </div>
+
+    {/* Recipe table — PINNED AT TOP */}
+    <div style={{padding:"16px 18px",background:"#fff",border:"1px solid " + BORDER,borderRadius:10,marginBottom:18}}>
+      <div style={{fontSize:11,color:SLATE,fontWeight:600,marginBottom:10}}>Prep recipe</div>
+      <div style={{overflowX:"auto"}}>
+        <table style={{width:"100%",borderCollapse:"collapse",fontSize:13,minWidth:360}}>
+          <thead><tr style={{borderBottom:"1px solid " + BORDER}}>
+            <th style={{textAlign:"left",padding:"6px 4px",color:SLATE,fontSize:11,fontWeight:600}}>#</th>
+            <th style={{textAlign:"left",padding:"6px 4px",color:SLATE,fontSize:11,fontWeight:600}}>Component</th>
+            <th style={{textAlign:"right",padding:"6px 4px",color:SLATE,fontSize:11,fontWeight:600}}>µL</th>
+            <th style={{textAlign:"left",padding:"6px 4px 6px 10px",color:SLATE,fontSize:11,fontWeight:600}}>Notes</th>
+          </tr></thead>
+          <tbody>
+            <tr style={{borderBottom:"1px solid #ecf0f6"}}>
+              <td style={{padding:"8px 4px",fontWeight:600,color:TEAL}}>1</td>
+              <td style={{padding:"8px 4px"}}>Protein</td>
+              <td style={Object.assign({padding:"8px 4px",textAlign:"right",fontSize:14}, monoVal)}>{fmt2(Vprotein)}</td>
+              <td style={{padding:"8px 4px 8px 10px",fontSize:11,color:SLATE}}>{fmt2(totalProtein_ug)} µg</td>
+            </tr>
+            <tr style={{borderBottom:"1px solid #ecf0f6"}}>
+              <td style={{padding:"8px 4px",fontWeight:600,color:TEAL}}>2</td>
+              <td style={{padding:"8px 4px"}}>Buffer</td>
+              <td style={Object.assign({padding:"8px 4px",textAlign:"right",fontSize:14}, monoVal, Vbuffer < 0 ? {color:"#b4332e"} : {})}>{fmt2(Vbuffer)}</td>
+              <td style={{padding:"8px 4px 8px 10px",fontSize:11,color:SLATE}}>50 mM Tris</td>
+            </tr>
+            <tr style={{borderBottom:"1px solid #ecf0f6"}}>
+              <td style={{padding:"8px 4px",fontWeight:600,color:TEAL}}>3</td>
+              <td style={{padding:"8px 4px"}}>{st.redAgent}</td>
+              <td style={Object.assign({padding:"8px 4px",textAlign:"right",fontSize:14}, monoVal)}>{fmt2(Vred)}</td>
+              <td style={{padding:"8px 4px 8px 10px",fontSize:11,color:SLATE}}>30 min, 56°C</td>
+            </tr>
+            <tr style={{borderBottom:"1px solid #ecf0f6"}}>
+              <td style={{padding:"8px 4px",fontWeight:600,color:TEAL}}>4</td>
+              <td style={{padding:"8px 4px"}}>{st.alkAgent}</td>
+              <td style={Object.assign({padding:"8px 4px",textAlign:"right",fontSize:14}, monoVal)}>{fmt2(Valk)}</td>
+              <td style={{padding:"8px 4px 8px 10px",fontSize:11,color:SLATE}}>30 min, dark</td>
+            </tr>
+            <tr style={{borderBottom:"1px solid #ecf0f6"}}>
+              <td style={{padding:"8px 4px",fontWeight:600,color:TEAL}}>5</td>
+              <td style={{padding:"8px 4px"}}>{st.enzyme}</td>
+              <td style={Object.assign({padding:"8px 4px",textAlign:"right",fontSize:14}, monoVal)}>{fmt2(Venzyme)}</td>
+              <td style={{padding:"8px 4px 8px 10px",fontSize:11,color:SLATE}}>{fmt2(enzymeMassNeeded)} µg</td>
+            </tr>
+            <tr style={{background:"#f7fbff"}}>
+              <td style={{padding:"10px 4px"}}></td>
+              <td style={{padding:"10px 4px",fontWeight:600,color:NAVY}}>Total</td>
+              <td style={Object.assign({padding:"10px 4px",textAlign:"right",fontSize:15}, monoVal)}>{fmt2(Vprotein + Vbuffer + Vred + Valk + Venzyme)}</td>
+              <td style={{padding:"10px 4px 10px 10px",fontSize:11,color:SLATE}}>Target: {Vd}</td>
+            </tr>
+            <tr style={{borderTop:"2px solid " + BORDER}}>
+              <td style={{padding:"10px 4px",fontWeight:600,color:AMBER}}>6</td>
+              <td style={{padding:"10px 4px"}}>{st.quenchAgent}</td>
+              <td style={Object.assign({padding:"10px 4px",textAlign:"right",fontSize:14}, monoVal)}>{fmt2(Vquench)}</td>
+              <td style={{padding:"10px 4px 10px 10px",fontSize:11,color:SLATE}}>To {st.quenchTargetPct}%</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    {/* Yield estimate */}
+    <div style={{padding:"14px 16px",background:"#f7fbff",border:"1px solid #d7e7fb",borderRadius:10,marginBottom:18}}>
+      <div style={{display:"flex",alignItems:"baseline",justifyContent:"space-between",gap:8,flexWrap:"wrap",marginBottom:6}}>
+        <div style={{fontSize:11,color:SLATE,fontWeight:600}}>Expected peptide yield</div>
+        <button type="button" onClick={function(){ setYieldOverride(!yieldOverride); }} style={{
+          background:"none",border:"none",color:TEAL,fontSize:11,fontWeight:600,
+          cursor:"pointer",padding:0,fontFamily:"inherit",
+        }}>{yieldOverride ? "− hide" : "+ adjust"}</button>
+      </div>
+      {yieldLow_ug != null && yieldHigh_ug != null ? <div>
+        <div style={{fontSize:16,color:NAVY,fontFamily:"ui-monospace, monospace",fontWeight:700}}>
+          {yieldLow_ug.toFixed(1)}–{yieldHigh_ug.toFixed(1)} µg
+        </div>
+        {yieldLow_pmol != null && yieldHigh_pmol != null && <div style={{fontSize:12,color:SLATE,marginTop:2,fontFamily:"ui-monospace, monospace"}}>
+          ≈ {yieldLow_pmol.toFixed(0)}–{yieldHigh_pmol.toFixed(0)} pmol (avg peptide {avgPepMW_kDa} kDa)
+        </div>}
+        <div style={{fontSize:11,color:"#8e9bb5",marginTop:6}}>
+          From {theoreticalYield_ug.toFixed(1)} µg theoretical (protein + enzyme), {yieldLow}–{yieldHigh}% recovery after desalting
+        </div>
+
+        {yieldOverride && <div style={{marginTop:14,padding:"12px 0 0",borderTop:"1px solid #d7e7fb"}}>
+          <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:4,flexWrap:"wrap"}}>
+            <span style={{fontSize:11,color:SLATE,fontWeight:600}}>Recovery range:</span>
+            <input type="number" value={yieldLow} onChange={function(e){ setYieldLow(e.target.value); }} style={{width:56,padding:"4px 6px",border:"1px solid " + BORDER,borderRadius:4,fontSize:13,fontFamily:"ui-monospace, monospace",color:NAVY,outline:"none"}} />
+            <span style={{fontSize:12,color:SLATE}}>to</span>
+            <input type="number" value={yieldHigh} onChange={function(e){ setYieldHigh(e.target.value); }} style={{width:56,padding:"4px 6px",border:"1px solid " + BORDER,borderRadius:4,fontSize:13,fontFamily:"ui-monospace, monospace",color:NAVY,outline:"none"}} />
+            <span style={{fontSize:12,color:SLATE}}>%</span>
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:6,marginTop:10,flexWrap:"wrap"}}>
+            <span style={{fontSize:11,color:SLATE,fontWeight:600}}>Avg peptide MW:</span>
+            <input type="number" value={avgPepMW} onChange={function(e){ setAvgPepMW(e.target.value); }} style={{width:56,padding:"4px 6px",border:"1px solid " + BORDER,borderRadius:4,fontSize:13,fontFamily:"ui-monospace, monospace",color:NAVY,outline:"none"}} />
+            <span style={{fontSize:12,color:SLATE}}>kDa</span>
+          </div>
+        </div>}
+
+        {yieldMid_ug != null && sendToSolutionMaker && <div style={{marginTop:14}}>
+          <button type="button" onClick={function(){ sendToSolutionMaker(yieldMid_ug.toFixed(1), "µg", "Peptide Prep yield"); }} style={{
+            background:TEAL,color:"#fff",border:"none",
+            padding:"8px 14px",borderRadius:6,
+            fontSize:12,fontWeight:700,cursor:"pointer",fontFamily:"inherit",
+          }}>Send {yieldMid_ug.toFixed(1)} µg to Solution Maker →</button>
+          <div style={{fontSize:11,color:"#8e9bb5",marginTop:4}}>Then pick a target concentration to know your resuspension volume.</div>
+        </div>}
+      </div> : <div style={{fontSize:13,color:"#8e9bb5",fontStyle:"italic"}}>Enter setup values to see expected yield.</div>}
+    </div>
+
+    {/* Sub-tab strip */}
+    <div style={{display:"flex",background:"#eaf1fb",borderRadius:8,overflow:"hidden",borderBottom:"1px solid " + BORDER}}>
+      <button type="button" onClick={function(){ setSubTab("setup"); }} style={subTabBtn(subTab === "setup")}>Setup</button>
+      <button type="button" onClick={function(){ setSubTab("reduction"); }} style={subTabBtn(subTab === "reduction")}>Reduction</button>
+      <button type="button" onClick={function(){ setSubTab("alkylation"); }} style={subTabBtn(subTab === "alkylation")}>Alkylation</button>
+      <button type="button" onClick={function(){ setSubTab("enzyme"); }} style={subTabBtn(subTab === "enzyme")}>Enzyme</button>
+    </div>
+
+    {/* Active sub-tab panel */}
+    <div style={{padding:"16px 4px 4px",marginBottom:14}}>
+      {subTab === "setup" && <div>
+        <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:6}}>
+          <input type="number" value={st.proteinConc} onChange={function(e){ u("proteinConc", e.target.value); }} style={lineInput} />
+        </div>
+        <div style={fieldHint}>Starting protein concentration (mg/mL)</div>
+        <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:6,marginTop:18}}>
+          <input type="number" value={st.digestVol} onChange={function(e){ u("digestVol", e.target.value); }} style={lineInput} />
+        </div>
+        <div style={fieldHint}>Target digest volume (µL)</div>
+        <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:6,marginTop:18}}>
+          <input type="number" value={st.targetProteinConc} onChange={function(e){ u("targetProteinConc", e.target.value); }} style={lineInput} />
+        </div>
+        <div style={fieldHint}>Target final protein concentration (mg/mL)</div>
+      </div>}
+
+      {subTab === "reduction" && <div>
+        <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:6}}>
+          <select value={st.redAgent} onChange={function(e){ u("redAgent", e.target.value); }} style={Object.assign({}, linePicker, {fontSize:16,flex:1})}>
+            <option>DTT</option><option>TCEP</option><option>2-Mercaptoethanol</option>
+          </select>
+        </div>
+        <div style={fieldHint}>Reducing reagent</div>
+        <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:6,marginTop:18}}>
+          <input type="number" value={st.redStockConc} onChange={function(e){ u("redStockConc", e.target.value); }} style={lineInput} />
+          <select value={st.redStockUnit} onChange={function(e){ u("redStockUnit", e.target.value); }} style={linePicker}>
+            <option>M</option><option>mM</option>
+          </select>
+        </div>
+        <div style={fieldHint}>Stock concentration</div>
+        <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:6,marginTop:18}}>
+          <input type="number" value={st.redFinalConc} onChange={function(e){ u("redFinalConc", e.target.value); }} style={lineInput} />
+          <select value={st.redFinalUnit} onChange={function(e){ u("redFinalUnit", e.target.value); }} style={linePicker}>
+            <option>mM</option><option>M</option>
+          </select>
+        </div>
+        <div style={fieldHint}>Final concentration in digest</div>
+      </div>}
+
+      {subTab === "alkylation" && <div>
+        <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:6}}>
+          <select value={st.alkAgent} onChange={function(e){ u("alkAgent", e.target.value); }} style={Object.assign({}, linePicker, {fontSize:16,flex:1})}>
+            <option>IAA</option><option>NEM</option><option>MMTS</option>
+          </select>
+        </div>
+        <div style={fieldHint}>Alkylating reagent</div>
+        <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:6,marginTop:18}}>
+          <input type="number" value={st.alkStockConc} onChange={function(e){ u("alkStockConc", e.target.value); }} style={lineInput} />
+          <select value={st.alkStockUnit} onChange={function(e){ u("alkStockUnit", e.target.value); }} style={linePicker}>
+            <option>M</option><option>mM</option>
+          </select>
+        </div>
+        <div style={fieldHint}>Stock concentration</div>
+        <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:6,marginTop:18}}>
+          <input type="number" value={st.alkFinalConc} onChange={function(e){ u("alkFinalConc", e.target.value); }} style={lineInput} />
+          <select value={st.alkFinalUnit} onChange={function(e){ u("alkFinalUnit", e.target.value); }} style={linePicker}>
+            <option>mM</option><option>M</option>
+          </select>
+        </div>
+        <div style={fieldHint}>Final concentration in digest</div>
+      </div>}
+
+      {subTab === "enzyme" && <div>
+        <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:6}}>
+          <select value={st.enzyme} onChange={function(e){ changeEnzyme(e.target.value); }} style={Object.assign({}, linePicker, {fontSize:16,flex:1})}>
+            {Object.keys(enzymeDefaults).map(function(k){ return <option key={k}>{k}</option>; })}
+          </select>
+        </div>
+        <div style={fieldHint}>Enzyme</div>
+        <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:6,marginTop:18}}>
+          <input type="number" value={st.enzymeVialMass} onChange={function(e){ u("enzymeVialMass", e.target.value); }} style={lineInput} />
+        </div>
+        <div style={fieldHint}>Vial mass (µg)</div>
+        <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:6,marginTop:18}}>
+          <input type="number" value={st.enzymeReconVol} onChange={function(e){ u("enzymeReconVol", e.target.value); }} style={lineInput} />
+        </div>
+        <div style={fieldHint}>Reconstitution volume (µL)</div>
+        <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:6,marginTop:18}}>
+          <input type="number" value={st.enzymeRatio} onChange={function(e){ u("enzymeRatio", e.target.value); }} style={lineInput} />
+        </div>
+        <div style={fieldHint}>Protein:enzyme ratio (1:N)</div>
+        {d && <div style={{fontSize:12,color:SLATE,marginTop:16,lineHeight:1.6,fontStyle:"italic"}}>
+          {d.note} <strong>Incubation:</strong> {d.incubation}.
+        </div>}
+      </div>}
+    </div>
+
+    {warns.length > 0 && <div>
+      {warns.map(function(w, i){
+        return <div key={i} style={{fontSize:12,color:"#b4332e",padding:"6px 0",display:"flex",gap:6}}>
+          <span>⚠</span><span>{w}</span>
+        </div>;
+      })}
+    </div>}
+  </div>;
+}
+
+// ── Mass ↔ Moles converter ────────────────────────────────────────────
+// Simple two-way unit converter. Enter an amount (mass or molar) + MW;
+// see the equivalent in the other unit system. Used standalone in Quick
+// tools mode, separate from the protein calculators (though it shares
+// the same protein library).
+function MassMolesConverterCard(props){
+  var instructor = !!props.instructor;
+  var customProteins = props.customProteins || [];
+  var saveProtein = props.saveProtein;
+
+  var _s = useState({
+    amount: "100",
+    amountUnit: "µg",
+    mw: "150",
+    mwUnit: "kDa",
+    preset: "igg",
+  });
+  var st = _s[0], setSt = _s[1];
+  var _mO = useState(null), massUnitOverride = _mO[0], setMassUnitOverride = _mO[1];
+  var _nO = useState(null), moleUnitOverride = _nO[0], setMoleUnitOverride = _nO[1];
+  var _more = useState(false), showMore = _more[0], setShowMore = _more[1];
+  var u = function(k, v){ setSt(function(p){ var n={}; for(var x in p) n[x]=p[x]; n[k]=v; return n; }); };
+
+  function applyPreset(id){
+    if (id === "custom") { u("preset", "custom"); return; }
+    var mwDa = resolveProteinPresetMW(id, customProteins);
+    if (mwDa == null) { u("preset", id); }
+    else {
+      setSt(function(prev){
+        var n={}; for(var x in prev) n[x]=prev[x];
+        n.preset = id;
+        n.mw = String(mwDa >= 1000 ? mwDa / 1000 : mwDa);
+        n.mwUnit = mwDa >= 1000 ? "kDa" : "Da";
+        return n;
+      });
+    }
+  }
+
+  var amt = parseFloat(st.amount);
+  var mwInput = parseFloat(st.mw);
+  var mwDa = isFinite(mwInput) ? (st.mwUnit === "kDa" ? mwInput * 1000 : mwInput) : null;
+
+  var amt_ng = null, amt_pmol = null;
+  if (isFinite(amt)) {
+    if (st.amountUnit === "ng") amt_ng = amt;
+    else if (st.amountUnit === "µg") amt_ng = amt * 1000;
+    else if (st.amountUnit === "mg") amt_ng = amt * 1e6;
+    else if (st.amountUnit === "g")  amt_ng = amt * 1e9;
+    else if (st.amountUnit === "fmol") amt_pmol = amt / 1000;
+    else if (st.amountUnit === "pmol") amt_pmol = amt;
+    else if (st.amountUnit === "nmol") amt_pmol = amt * 1000;
+    else if (st.amountUnit === "µmol") amt_pmol = amt * 1e6;
+    if (amt_ng != null && amt_pmol == null && mwDa) amt_pmol = (amt_ng / mwDa) * 1000;
+    if (amt_pmol != null && amt_ng == null && mwDa) amt_ng = (amt_pmol * mwDa) / 1000;
+  }
+
+  var isMolarAmount = st.amountUnit === "fmol" || st.amountUnit === "pmol" || st.amountUnit === "nmol" || st.amountUnit === "µmol";
+  var answerSide = isMolarAmount ? "mass" : "moles";
+
+  var displayMassUnit = massUnitOverride || autoMassUnit(amt_ng);
+  var displayMoleUnit = moleUnitOverride || autoMoleUnit(amt_pmol);
+  var massDisp = ngToUnit(amt_ng, displayMassUnit);
+  var moleDisp = pmolToUnit(amt_pmol, displayMoleUnit);
+
+  var NAVY = "#0b2a6f", TEAL = "#139cb6", BORDER = "#dfe7f2", SLATE = "#5a6984";
+  var lineInput = {
+    flex: 1, padding: "10px 12px", border: "none", borderBottom: "2px solid " + BORDER,
+    background: "transparent", fontSize: 18, fontFamily: "ui-monospace, monospace",
+    color: NAVY, outline: "none", minWidth: 0,
+  };
+  var linePicker = {
+    padding: "10px 8px", border: "none", borderBottom: "2px solid " + BORDER,
+    background: "transparent", fontSize: 14, fontFamily: "inherit",
+    color: SLATE, cursor: "pointer", outline: "none",
+  };
+  var hint = { fontSize: 11, color: "#8e9bb5", marginTop: 2 };
+
+  return <div>
+    <h2 style={{fontSize:20,fontWeight:700,color:NAVY,margin:"0 0 4px",letterSpacing:"-0.01em"}}>Mass ↔ moles</h2>
+    <div style={{fontSize:12,color:SLATE,marginBottom:22}}>Convert between mass and moles using molecular weight.</div>
+
+    <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:22}}>
+      <span style={{fontSize:12,color:SLATE}}>For:</span>
+      <select value={st.preset} onChange={function(e){ applyPreset(e.target.value); }} style={{
+        padding:"6px 10px",border:"1px solid " + BORDER,borderRadius:6,
+        fontSize:13,fontFamily:"inherit",color:NAVY,background:"#fff",
+        cursor:"pointer",fontWeight:600,
+      }}>{renderProteinPresetOptions(customProteins)}</select>
+    </div>
+
+    <div style={{marginBottom:24}}>
+      <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:6}}>
+        <input type="number" value={st.amount} onChange={function(e){ u("amount", e.target.value); }} style={lineInput} />
+        <select value={st.amountUnit} onChange={function(e){ u("amountUnit", e.target.value); }} style={linePicker}>
+          <optgroup label="Mass">
+            <option value="ng">ng</option>
+            <option value="µg">µg</option>
+            <option value="mg">mg</option>
+            <option value="g">g</option>
+          </optgroup>
+          <optgroup label="Moles">
+            <option value="fmol">fmol</option>
+            <option value="pmol">pmol</option>
+            <option value="nmol">nmol</option>
+            <option value="µmol">µmol</option>
+          </optgroup>
+        </select>
+      </div>
+      <div style={hint}>Amount you have</div>
+
+      {st.preset === "custom" && saveProtein && (
+        <CustomProteinEditor
+          mwValue={st.mw}
+          mwUnit={st.mwUnit}
+          onMwChange={function(v, unit){ setSt(function(prev){ var n={}; for(var x in prev) n[x]=prev[x]; n.mw=v; n.mwUnit=unit; return n; }); }}
+          saveProtein={function(name, mwDa){
+            var res = saveProtein(name, mwDa);
+            if (res && res.ok) { setSt(function(prev){ var n={}; for(var x in prev) n[x]=prev[x]; n.preset=res.id; return n; }); }
+            return res;
+          }}
+        />
+      )}
+    </div>
+
+    {/* Single result tile — opposite-of-input is the answer */}
+    {answerSide === "moles" ? <div style={{padding:"20px 18px",background:"#fff",border:"1px solid " + BORDER,borderRadius:10,marginBottom:8}}>
+      <div style={{fontSize:11,color:SLATE,marginBottom:4,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <span>That's</span>
+        <UnitCycleLink units={MOLE_UNITS} current={displayMoleUnit} onCycle={setMoleUnitOverride} />
+      </div>
+      {moleDisp != null ? <div style={{display:"flex",alignItems:"baseline",gap:6}}>
+        <span style={{fontSize:36,fontWeight:700,color:NAVY,fontFamily:"ui-monospace, monospace",lineHeight:1}}>{fmtNum(moleDisp)}</span>
+        <span style={{fontSize:16,color:SLATE,fontWeight:600}}>{displayMoleUnit}</span>
+      </div> : <div style={{fontSize:13,color:"#8e9bb5",fontStyle:"italic"}}>Add a molecular weight</div>}
+    </div> : <div style={{padding:"20px 18px",background:"#fff",border:"1px solid " + BORDER,borderRadius:10,marginBottom:8}}>
+      <div style={{fontSize:11,color:SLATE,marginBottom:4,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <span>That's</span>
+        <UnitCycleLink units={MASS_UNITS} current={displayMassUnit} onCycle={setMassUnitOverride} />
+      </div>
+      {massDisp != null ? <div style={{display:"flex",alignItems:"baseline",gap:6}}>
+        <span style={{fontSize:36,fontWeight:700,color:NAVY,fontFamily:"ui-monospace, monospace",lineHeight:1}}>{fmtNum(massDisp)}</span>
+        <span style={{fontSize:16,color:SLATE,fontWeight:600}}>{displayMassUnit}</span>
+      </div> : <div style={{fontSize:13,color:"#8e9bb5",fontStyle:"italic"}}>Add a molecular weight</div>}
+    </div>}
+
+    <button type="button" onClick={function(){ setShowMore(!showMore); }} style={{
+      background:"none",border:"none",color:TEAL,fontSize:12,cursor:"pointer",
+      padding:"4px 0",fontFamily:"inherit",fontWeight:600,
+    }}>{showMore ? "− Less" : "+ How the math works"}</button>
+
+    {showMore && <div style={{marginTop:12,padding:"14px 0 4px",borderTop:"1px solid " + BORDER,fontSize:12,color:SLATE,lineHeight:1.7}}>
+      <strong>moles = mass ÷ molecular weight</strong>
+      <div style={{marginTop:8,fontFamily:"ui-monospace, monospace",color:NAVY}}>
+        100 µg ÷ 150,000 g/mol<br/>
+        = 6.67 × 10⁻¹⁰ mol<br/>
+        = 0.667 nmol = 667 pmol
+      </div>
+    </div>}
+  </div>;
+}
+
+
+// ── Solution Maker ───────────────────────────────────────────────────
+// "I have X amount; I want it at Y concentration. How much buffer?" — the
+// missing piece between knowing how much you have and knowing how much to
+// inject. Computes resuspension volume. Receives cross-tab handoff from
+// Peptide Prep via the pendingHandoff prop.
+function SolutionMakerCard(props){
+  var instructor = !!props.instructor;
+  var customProteins = props.customProteins || [];
+  var saveProtein = props.saveProtein;
+  var consumeHandoff = props.consumeHandoff;
+  var pendingHandoff = props.pendingHandoff;
+
+  var _s = useState({
+    amount: "100",
+    amountUnit: "µg",
+    targetConc: "1",
+    targetConcUnit: "mg/mL",
+    mw: "150",
+    mwUnit: "kDa",
+    preset: "igg",
+  });
+  var st = _s[0], setSt = _s[1];
+  var _vO = useState(null), volUnitOverride = _vO[0], setVolUnitOverride = _vO[1];
+  var _more = useState(false), showMore = _more[0], setShowMore = _more[1];
+  var _hb = useState(null), handoffBanner = _hb[0], setHandoffBanner = _hb[1];
+  var u = function(k, v){ setSt(function(p){ var n={}; for(var x in p) n[x]=p[x]; n[k]=v; return n; }); };
+
+  // Consume cross-tab handoff once when it arrives (peptide prep → solution maker)
+  useEffect(function(){
+    if (pendingHandoff && consumeHandoff) {
+      var v = consumeHandoff();
+      if (v) {
+        setSt(function(prev){ var n={}; for(var x in prev) n[x]=prev[x]; n.amount=v.amount; n.amountUnit=v.unit; return n; });
+        setHandoffBanner("Filled in from " + (v.source || "Peptide Prep") + ": " + v.amount + " " + v.unit);
+        setTimeout(function(){ setHandoffBanner(null); }, 3500);
+      }
+    }
+  }, [pendingHandoff]);
+
+  function applyPreset(id){
+    if (id === "custom") { u("preset", "custom"); return; }
+    var mwDa = resolveProteinPresetMW(id, customProteins);
+    if (mwDa == null) { u("preset", id); }
+    else {
+      setSt(function(prev){
+        var n={}; for(var x in prev) n[x]=prev[x];
+        n.preset = id;
+        n.mw = String(mwDa >= 1000 ? mwDa / 1000 : mwDa);
+        n.mwUnit = mwDa >= 1000 ? "kDa" : "Da";
+        return n;
+      });
+    }
+  }
+
+  // Math
+  var amt = parseFloat(st.amount);
+  var targetVal = parseFloat(st.targetConc);
+  var mwInput = parseFloat(st.mw);
+  var mwDa = isFinite(mwInput) ? (st.mwUnit === "kDa" ? mwInput * 1000 : mwInput) : null;
+
+  var amt_ng = null, amt_pmol = null;
+  if (isFinite(amt)) {
+    if (st.amountUnit === "ng") amt_ng = amt;
+    else if (st.amountUnit === "µg") amt_ng = amt * 1000;
+    else if (st.amountUnit === "mg") amt_ng = amt * 1e6;
+    else if (st.amountUnit === "g")  amt_ng = amt * 1e9;
+    else if (st.amountUnit === "fmol") amt_pmol = amt / 1000;
+    else if (st.amountUnit === "pmol") amt_pmol = amt;
+    else if (st.amountUnit === "nmol") amt_pmol = amt * 1000;
+    else if (st.amountUnit === "µmol") amt_pmol = amt * 1e6;
+    if (amt_ng != null && amt_pmol == null && mwDa) amt_pmol = (amt_ng / mwDa) * 1000;
+    if (amt_pmol != null && amt_ng == null && mwDa) amt_ng = (amt_pmol * mwDa) / 1000;
+  }
+
+  var targetMgPerML = null, targetUM = null;
+  if (isFinite(targetVal)) {
+    if (st.targetConcUnit === "mg/mL")      targetMgPerML = targetVal;
+    else if (st.targetConcUnit === "ug/mL") targetMgPerML = targetVal / 1000;
+    else if (st.targetConcUnit === "ng/mL") targetMgPerML = targetVal / 1e6;
+    else if (st.targetConcUnit === "uM")    targetUM = targetVal;
+    else if (st.targetConcUnit === "nM")    targetUM = targetVal / 1000;
+    else if (st.targetConcUnit === "pM")    targetUM = targetVal / 1e6;
+  }
+
+  var volume_uL = null;
+  var calcPath = null;
+  if (targetMgPerML != null && amt_ng != null && targetMgPerML > 0) {
+    volume_uL = amt_ng / (targetMgPerML * 1000);
+    calcPath = "mass";
+  } else if (targetUM != null && amt_pmol != null && targetUM > 0) {
+    volume_uL = amt_pmol / targetUM;
+    calcPath = "molar";
+  }
+
+  var VOL_UNITS = ["nL", "µL", "mL"];
+  function autoVolUnit(uL){
+    if (uL == null || !isFinite(uL)) return "µL";
+    var a = Math.abs(uL);
+    if (a >= 1000)  return "mL";
+    if (a >= 0.5)   return "µL";
+    return "nL";
+  }
+  function uLToUnit(uL, unit){
+    if (uL == null || !isFinite(uL)) return null;
+    if (unit === "nL") return uL * 1000;
+    if (unit === "µL") return uL;
+    if (unit === "mL") return uL / 1000;
+    return uL;
+  }
+  var displayVolUnit = volUnitOverride || autoVolUnit(volume_uL);
+  var volDisplay = uLToUnit(volume_uL, displayVolUnit);
+
+  var checkAmount = null;
+  if (volume_uL != null && targetMgPerML != null && calcPath === "mass") {
+    checkAmount = targetMgPerML * volume_uL * 1000;
+  } else if (volume_uL != null && targetUM != null && calcPath === "molar") {
+    checkAmount = targetUM * volume_uL;
+  }
+
+  var warns = [];
+  if (volume_uL != null && volume_uL < 1) warns.push("Resuspension volume under 1 µL — hard to pipette. Try a lower target concentration.");
+  if (volume_uL != null && volume_uL > 10000) warns.push("Resuspension volume over 10 mL — double-check your numbers.");
+
+  var isMolarTarget = st.targetConcUnit === "uM" || st.targetConcUnit === "nM" || st.targetConcUnit === "pM";
+  var isMolarAmount = st.amountUnit === "fmol" || st.amountUnit === "pmol" || st.amountUnit === "nmol" || st.amountUnit === "µmol";
+  var needsMW = isMolarTarget !== isMolarAmount;
+  if (needsMW && !mwDa) warns.push("Add a molecular weight to bridge mass and molar units.");
+
+  var equivMassUnit = autoMassUnit(amt_ng);
+  var equivMoleUnit = autoMoleUnit(amt_pmol);
+  var equivMassDisp = ngToUnit(amt_ng, equivMassUnit);
+  var equivMoleDisp = pmolToUnit(amt_pmol, equivMoleUnit);
+  var showEquiv = amt_ng != null && amt_pmol != null;
+
+  var NAVY = "#0b2a6f", TEAL = "#139cb6", BORDER = "#dfe7f2", SLATE = "#5a6984";
+  var lineInput = {
+    flex: 1, padding: "10px 12px", border: "none", borderBottom: "2px solid " + BORDER,
+    background: "transparent", fontSize: 18, fontFamily: "ui-monospace, monospace",
+    color: NAVY, outline: "none", minWidth: 0,
+  };
+  var linePicker = {
+    padding: "10px 8px", border: "none", borderBottom: "2px solid " + BORDER,
+    background: "transparent", fontSize: 14, fontFamily: "inherit",
+    color: SLATE, cursor: "pointer", outline: "none",
+  };
+  var hint = { fontSize: 11, color: "#8e9bb5", marginTop: 2 };
+
+  return <div>
+    <h2 style={{fontSize:20,fontWeight:700,color:NAVY,margin:"0 0 4px",letterSpacing:"-0.01em"}}>Solution maker</h2>
+    <div style={{fontSize:12,color:SLATE,marginBottom:22}}>You have an amount; you want it at a concentration. How much buffer to add?</div>
+
+    {handoffBanner && <div style={{padding:"8px 12px",background:"#eefcfd",border:"1px solid #b9e3eb",borderRadius:6,fontSize:11,color:"#0f5c6a",fontWeight:600,marginBottom:14}}>
+      ↳ {handoffBanner}
+    </div>}
+
+    <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:22}}>
+      <span style={{fontSize:12,color:SLATE}}>For:</span>
+      <select value={st.preset} onChange={function(e){ applyPreset(e.target.value); }} style={{
+        padding:"6px 10px",border:"1px solid " + BORDER,borderRadius:6,
+        fontSize:13,fontFamily:"inherit",color:NAVY,background:"#fff",
+        cursor:"pointer",fontWeight:600,
+      }}>{renderProteinPresetOptions(customProteins)}</select>
+    </div>
+
+    <div style={{marginBottom:24}}>
+      <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:6}}>
+        <input type="number" value={st.amount} onChange={function(e){ u("amount", e.target.value); }} style={lineInput} />
+        <select value={st.amountUnit} onChange={function(e){ u("amountUnit", e.target.value); }} style={linePicker}>
+          <optgroup label="Mass">
+            <option value="ng">ng</option>
+            <option value="µg">µg</option>
+            <option value="mg">mg</option>
+            <option value="g">g</option>
+          </optgroup>
+          <optgroup label="Moles">
+            <option value="fmol">fmol</option>
+            <option value="pmol">pmol</option>
+            <option value="nmol">nmol</option>
+            <option value="µmol">µmol</option>
+          </optgroup>
+        </select>
+      </div>
+      <div style={hint}>Amount you have</div>
+
+      <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:6,marginTop:18}}>
+        <input type="number" value={st.targetConc} onChange={function(e){ u("targetConc", e.target.value); }} style={lineInput} />
+        <select value={st.targetConcUnit} onChange={function(e){ u("targetConcUnit", e.target.value); }} style={linePicker}>
+          <option value="mg/mL">mg/mL</option>
+          <option value="ug/mL">µg/mL</option>
+          <option value="ng/mL">ng/mL</option>
+          <option value="uM">µM</option>
+          <option value="nM">nM</option>
+          <option value="pM">pM</option>
+        </select>
+      </div>
+      <div style={hint}>Target concentration</div>
+
+      {st.preset === "custom" && saveProtein && (
+        <CustomProteinEditor
+          mwValue={st.mw}
+          mwUnit={st.mwUnit}
+          onMwChange={function(v, unit){ setSt(function(prev){ var n={}; for(var x in prev) n[x]=prev[x]; n.mw=v; n.mwUnit=unit; return n; }); }}
+          saveProtein={function(name, mwDa){
+            var res = saveProtein(name, mwDa);
+            if (res && res.ok) { setSt(function(prev){ var n={}; for(var x in prev) n[x]=prev[x]; n.preset=res.id; return n; }); }
+            return res;
+          }}
+        />
+      )}
+    </div>
+
+    {showEquiv && <div style={{fontSize:12,color:SLATE,marginBottom:12,lineHeight:1.6}}>
+      You have <span style={{fontFamily:"ui-monospace, monospace",color:NAVY,fontWeight:600}}>{fmtNum(equivMassDisp)} {equivMassUnit}</span> = <span style={{fontFamily:"ui-monospace, monospace",color:NAVY,fontWeight:600}}>{fmtNum(equivMoleDisp)} {equivMoleUnit}</span>
+    </div>}
+
+    <div style={{padding:"20px 18px",background:"#fff",border:"1px solid " + BORDER,borderRadius:10,marginBottom:8}}>
+      <div style={{fontSize:11,color:SLATE,marginBottom:4,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <span>Add this much buffer</span>
+        {volume_uL != null && <UnitCycleLink units={VOL_UNITS} current={displayVolUnit} onCycle={setVolUnitOverride} />}
+      </div>
+      {volume_uL != null ? <div style={{display:"flex",alignItems:"baseline",gap:6}}>
+        <span style={{fontSize:36,fontWeight:700,color:NAVY,fontFamily:"ui-monospace, monospace",lineHeight:1}}>{fmtNum(volDisplay)}</span>
+        <span style={{fontSize:16,color:SLATE,fontWeight:600}}>{displayVolUnit}</span>
+      </div> : <div style={{fontSize:13,color:"#8e9bb5",fontStyle:"italic"}}>{needsMW && !mwDa ? "Add a molecular weight" : "Enter values above"}</div>}
+    </div>
+
+    {warns.length > 0 && <div style={{marginBottom:14}}>
+      {warns.map(function(w, i){
+        return <div key={i} style={{fontSize:12,color:"#b4332e",padding:"6px 0",display:"flex",gap:6}}>
+          <span>⚠</span><span>{w}</span>
+        </div>;
+      })}
+    </div>}
+
+    <button type="button" onClick={function(){ setShowMore(!showMore); }} style={{
+      background:"none",border:"none",color:TEAL,fontSize:12,cursor:"pointer",
+      padding:"4px 0",fontFamily:"inherit",fontWeight:600,
+    }}>{showMore ? "− Less" : "+ More options"}</button>
+
+    {showMore && <div style={{marginTop:12,padding:"14px 0 4px",borderTop:"1px solid " + BORDER}}>
+      {checkAmount != null && <div style={{fontSize:12,color:SLATE,lineHeight:1.6,marginBottom:8}}>
+        <strong>Check:</strong>{" "}
+        <span style={{fontFamily:"ui-monospace, monospace",color:"#0f5c6a"}}>{fmtNum(volDisplay)} {displayVolUnit}</span> × <span style={{fontFamily:"ui-monospace, monospace",color:"#0f5c6a"}}>{st.targetConc} {st.targetConcUnit}</span> = <span style={{fontFamily:"ui-monospace, monospace",color:NAVY,fontWeight:700}}>{calcPath === "mass" ? (fmtNum(checkAmount / 1000) + " µg") : (fmtNum(checkAmount) + " pmol")} total</span>
+      </div>}
+      {volume_uL != null && <div style={{fontSize:11,color:"#8e9bb5",fontFamily:"ui-monospace, monospace",marginBottom:8}}>
+        Raw: {volume_uL.toExponential(3)} µL
+      </div>}
+      <div style={{fontSize:12,color:SLATE,lineHeight:1.7,marginTop:10}}>
+        <strong>Math:</strong> volume = amount ÷ concentration
+      </div>
+    </div>}
+  </div>;
 }
 
 function UnitConverterCard(){
@@ -5257,10 +6695,12 @@ function GrowthRateCalculatorCard(props) {
       </div>
     </div>
 
-    {/* Secondary metrics — smaller tiles for context */}
+    {/* Secondary metrics — smaller tiles for context.
+        95% CI tile is instructor-only — analysts find ± CI noisy and rarely act on it.
+        Instructor mode keeps it as a teaching moment. */}
     <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(120px, 1fr))",gap:8,marginBottom:14}}>
       {kpiBox("R² of fit", muR2!=null?muR2.toFixed(4):"—", instructor ? "linearity of the fit" : null)}
-      {(function(){
+      {instructor && (function(){
         // 95% CI tile — shows both absolute and percentage of µ
         if (muCI == null || mu == null || mu === 0) {
           return <div style={{padding:"8px 10px",background:"#f4f7fb",border:"1px solid #d8dfeb",borderRadius:6}}>
@@ -6183,6 +7623,9 @@ function RobotQCCard(props) {
   var res = props.res;
   if (!res || !res.length) return null;
   var instructor = !!props.instructor;
+  // Ref for the "Per-sample dilution curves" chart SVG, used by the export
+  // buttons (Download PNG / Copy to clipboard) to grab the rendered element.
+  var chartRef = useRef(null);
 
   // Flatten across plates
   var multiPlate = res.length > 1;
@@ -6399,7 +7842,7 @@ function RobotQCCard(props) {
       return {pts:pts, path:pathD, color:col, name:s.name, key:s.key, fitLine:fitLine};
     }).filter(function(L){return L!=null;});
 
-    renderPlot = <svg viewBox={"0 0 "+plotW+" "+plotH} style={{width:"100%",height:"auto",maxWidth:plotW,display:"block",background:"#fafbfd",border:"1px solid #e5e9f0",borderRadius:8}}>
+    renderPlot = <svg ref={chartRef} viewBox={"0 0 "+plotW+" "+plotH} style={{width:"100%",height:"auto",maxWidth:plotW,display:"block",background:"#fafbfd",border:"1px solid #e5e9f0",borderRadius:8}}>
       {/* Y gridlines + labels */}
       {yTicks.map(function(t,i){
         var y = yScale(t);
@@ -6508,7 +7951,10 @@ function RobotQCCard(props) {
 
     {/* Plot — works with even 1 sample selected */}
     {selectedSamples.length >= 1 && hasPlotData && <div style={{marginBottom:10}}>
-      <div style={{fontSize:11,fontWeight:700,color:"#30437a",marginBottom:4}}>Per-sample dilution curves (overlaid)</div>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:4,flexWrap:"wrap",gap:6}}>
+        <div style={{fontSize:11,fontWeight:700,color:"#30437a"}}>Per-sample dilution curves (overlaid)</div>
+        <ChartExportButtons svgRef={chartRef} filename="essf_curve_standard.png" />
+      </div>
       {renderPlot}
     </div>}
 
@@ -9293,6 +10739,55 @@ function App() {
   var _cmp=useState(false),cmp2=_cmp[0],setCmp=_cmp[1];
   var _mw=useState(null),mathRow=_mw[0],setMathRow=_mw[1];
   var _inst=useState(false),instructor=_inst[0],setInstructor=_inst[1];
+  // ── Shared protein library (used by Mass on Column, Mass↔Moles, Solution Maker) ──
+  // Lives at App level so all three calculators see the same list. Persisted
+  // to localStorage so the user's saved proteins survive page reloads.
+  var _cp = useState(function(){
+    try {
+      var raw = (typeof localStorage !== 'undefined') ? localStorage.getItem("essf_custom_proteins") : null;
+      if (!raw) return [];
+      var arr = JSON.parse(raw);
+      return Array.isArray(arr) ? arr : [];
+    } catch(e) { return []; }
+  });
+  var customProteins = _cp[0], setCustomProteins = _cp[1];
+  useEffect(function(){
+    try {
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem("essf_custom_proteins", JSON.stringify(customProteins));
+      }
+    } catch(e) { /* localStorage unavailable or full; non-fatal */ }
+  }, [customProteins]);
+
+  function saveProtein(name, mwDa) {
+    // Returns {ok:true, id} or {ok:false, error}
+    var trimmed = (name || "").trim();
+    if (!trimmed) return { ok: false, error: "Give the protein a name." };
+    if (!isFinite(mwDa) || mwDa <= 0) return { ok: false, error: "Enter a valid molecular weight." };
+    var dupe = customProteins.filter(function(p){ return p.label.toLowerCase() === trimmed.toLowerCase(); })[0];
+    if (dupe) return { ok: false, error: "A protein with that name already exists." };
+    var id = "user_" + Date.now();
+    setCustomProteins(function(prev){ return prev.concat([{id: id, label: trimmed, mwDa: mwDa}]); });
+    return { ok: true, id: id };
+  }
+  function deleteProtein(id) {
+    setCustomProteins(function(prev){ return prev.filter(function(p){ return p.id !== id; }); });
+  }
+
+  // ── Cross-tab handoff (Peptide Prep → Solution Maker) ─────────────────
+  // When user taps "Send X µg to Solution Maker" in Peptide Prep, we stash
+  // the amount + switch to Solution Maker. Solution Maker reads-and-clears
+  // on mount via consumeSolnHandoff. One-shot.
+  var _psh = useState(null), pendingSolnHandoff = _psh[0], setPendingSolnHandoff = _psh[1];
+  function sendToSolutionMaker(amount, unit, source) {
+    setPendingSolnHandoff({ amount: String(amount), unit: unit, source: source });
+    setSelectedTool("solution_maker");
+  }
+  function consumeSolnHandoff() {
+    var v = pendingSolnHandoff;
+    setPendingSolnHandoff(null);
+    return v;
+  }
   var _exp=useState({}),expanded=_exp[0],setExpanded=_exp[1];
   var _rexp=useState({}),resultsExpanded=_rexp[0],setResultsExpanded=_rexp[1];
   var _ap=useState({}),picks=_ap[0],setPicks=_ap[1];
@@ -10577,7 +12072,7 @@ function App() {
   }, [pendingReanalyze, cfg.fm]);
 
   if(!on) return (
-    <div style={{padding:"1.25rem 0 2.5rem",maxWidth:1060}}>
+    <div style={{padding:"1.25rem 16px 2.5rem",maxWidth:1320,margin:"0 auto",boxSizing:"border-box"}}>
       <div style={{background:"linear-gradient(180deg,#f4f9fd,#eef5fb)",border:"1px solid "+BORDER,borderRadius:20,marginBottom:"1rem",boxShadow:SHADOW,overflow:"hidden"}}>
         <PageHeader instructor={instructor} setInstructor={setInstructor} large={true} />
       </div>
@@ -10595,7 +12090,7 @@ function App() {
         */}
         <div style={{background:"linear-gradient(180deg,#fbfeff,#f4fbff)",border:"1px solid #e5edf7",borderRadius:20,padding:"1.2rem 1.25rem",boxShadow:"inset 0 1px 0 rgba(255,255,255,0.8)",marginBottom:"1rem"}}>
           <label style={{display:"block",fontSize:13,fontWeight:800,marginBottom:10,color:"#18233f"}}>What are you doing today?</label>
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12}}>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(220px, 1fr))",gap:12}}>
             {[
               {id:"plate",   title:"Plate assay",  desc:"96-well plate, microplate reader. Classical or transposed orientation, multi-plate support.", isSel: cfg.layout!=="autosampler", color:TEAL},
               {id:"vials",   title:"Vials / autosampler",  desc:"LC-MS, intact mass quant, or LC peak-area quant. Each row in your data is one injection.", isSel: cfg.layout==="autosampler", color:TEAL},
@@ -10623,7 +12118,7 @@ function App() {
             })}
           </div>
         </div>
-        {cfg.layout!=="autosampler" && <div style={{display:"grid",gridTemplateColumns:"1.25fr 1fr",gap:"1rem"}}>
+        {cfg.layout!=="autosampler" && <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(320px, 1fr))",gap:"1rem"}}>
           <div style={{background:"linear-gradient(180deg,#fbfeff,#f4fbff)",border:"1px solid #e5edf7",borderRadius:20,padding:"1.2rem 1.25rem",boxShadow:"inset 0 1px 0 rgba(255,255,255,0.8)"}}>
             <label style={{display:"block",fontSize:13,fontWeight:800,marginBottom:12,color:"#18233f"}}>How many plates?</label>
             <div style={{display:"flex",gap:12,flexWrap:"wrap",alignItems:"center",marginBottom:12}}>
@@ -10718,7 +12213,7 @@ function App() {
             </div>}
           </div>
         </div>}
-        {cfg.layout==="autosampler" && <div style={{display:"grid",gridTemplateColumns:"1.25fr 1fr",gap:"1rem"}}>
+        {cfg.layout==="autosampler" && <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(320px, 1fr))",gap:"1rem"}}>
           {/* Left panel: sample count with chunky number buttons + override (mirrors "How many plates?") */}
           <div style={{background:"linear-gradient(180deg,#fbfeff,#f4fbff)",border:"1px solid #e5edf7",borderRadius:20,padding:"1.2rem 1.25rem",boxShadow:"inset 0 1px 0 rgba(255,255,255,0.8)"}}>
             <label style={{display:"block",fontSize:13,fontWeight:800,marginBottom:12,color:"#18233f"}}>How many samples?</label>
@@ -10766,7 +12261,7 @@ function App() {
         {cfg.layout!=="autosampler" && <div style={{marginTop:"1.25rem",background:"linear-gradient(180deg,#fbfeff,#f4fbff)",border:"1px solid #e5edf7",borderRadius:20,padding:"1.2rem 1.25rem",boxShadow:"inset 0 1px 0 rgba(255,255,255,0.8)"}}>
           <label style={{display:"block",fontSize:13,fontWeight:800,marginBottom:4,color:"#18233f"}}>Plate orientation</label>
           <div style={{fontSize:12,color:"#6f7fa0",marginBottom:14}}>Pick the orientation that matches how you loaded the plate. The math is the same; only the wells map differently.</div>
-          <div style={{display:"grid",gridTemplateColumns:"repeat(3, minmax(0, 1fr))",gap:14}}>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(280px, 1fr))",gap:14}}>
             {(function(){
               var renderOpt=function(id, title, blurb, svg){
                 var sel = cfg.layout===id;
@@ -11107,7 +12602,7 @@ function App() {
   );
 
   return (
-      <div style={{padding:"1rem 0",maxWidth:1040}}>
+      <div style={{padding:"1rem 16px",maxWidth:1320,margin:"0 auto",boxSizing:"border-box"}}>
       <div style={{background:"linear-gradient(180deg,#f4f9fd,#eef5fb)",border:"1px solid "+BORDER,borderRadius:20,marginBottom:"1rem",boxShadow:SHADOW,overflow:"hidden"}}>
         <PageHeader instructor={instructor} setInstructor={setInstructor} onReset={reset} onSecretTap={htc} />
       </div>
@@ -12574,14 +14069,28 @@ function App() {
                 var bg=isPk?"#e3f0fc":isRec?"#e6f5f0":"transparent";
                 var isMO=instructor&&mathRow&&mathRow.pi===vp&&mathRow.si===si&&mathRow.di===d.di;
                 var dbD2=s.dbD?s.dbD.find(function(dd){return dd.di===d.di;}):null;
+                // BQL ("below quantification limit"): the response is within the standard curve's
+                // response range (so it's flagged IR by the response-range check) BUT the inverse
+                // fit function couldn't return a valid positive concentration. This happens at the
+                // very low end of log-log and 4PL curves where the inverse is mathematically
+                // ill-defined near the lower asymptote. The row is, in practice, unreportable —
+                // but it's a different failure mode from OOR (which means "above top standard").
+                var isBQL = d.ir && d.cW == null;
+                // Row tooltip prioritizes BQL (technical-but-actionable) over OOR.
+                var rowTitle = "";
+                if (isBQL) {
+                  rowTitle = "BQL (Below Quantification Limit): response is technically within the calibrated range, but the curve fit can't reliably invert at this signal level. Common at the very low end of log-log or 4PL fits, near the curve's lower asymptote. Do not report this value.";
+                } else if (!d.ir && instructor) {
+                  rowTitle = "OOR — back-calculated value shown for teaching only. Do not report (extrapolated outside the standard curve range).";
+                }
                 return [
-                  <tr key={di} style={{background:bg,cursor:instructor?"pointer":"default"}} onClick={function(){if(!instructor)return;if(isMO)setMathRow(null);else setMathRow({pi:vp,si:si,di:d.di});}} title={!d.ir&&instructor?"OOR — back-calculated value shown for teaching only. Do not report (extrapolated outside the standard curve range).":""}>
+                  <tr key={di} style={{background:bg,cursor:instructor?"pointer":"default"}} onClick={function(){if(!instructor)return;if(isMO)setMathRow(null);else setMathRow({pi:vp,si:si,di:d.di});}} title={rowTitle}>
                     <td style={{...tdS,fontWeight:isRec||isPk?700:400}}>{d.di}{isRec?" *":""}</td>
                     <td style={{...tdS,textAlign:"center"}}>{fmtResponse(d.avgA)}</td>
                     <td style={{...tdS,textAlign:"center"}}><CVB val={d.cv} /></td>
                     <td style={{...tdS,textAlign:"center",color:!d.ir&&instructor?"#a05a00":"inherit",fontStyle:!d.ir&&instructor?"italic":"normal"}}>{d.cW!=null?(d.ir?sig3(convertConc(d.cW, unit, displayUnitChart)):(instructor?sig3(convertConc(d.cW, unit, displayUnitChart)):"---")):"---"}</td>
                     <td style={{...tdS,textAlign:"center",fontWeight:isRec||isPk?700:400,color:!d.ir&&instructor?"#a05a00":"inherit",fontStyle:!d.ir&&instructor?"italic":"normal"}}>{d.cS!=null?(d.ir?sig3(convertConc(d.cS, unit, displayUnitChart)):(instructor?sig3(convertConc(d.cS, unit, displayUnitChart)):"---")):"---"}</td>
-                    <td style={{...tdS,textAlign:"center"}}>{d.ir?<span style={{color:"#1b7f6a",fontWeight:700}}>IR</span>:<span style={{color:"#d70015"}}>OOR</span>}</td>
+                    <td style={{...tdS,textAlign:"center"}}>{isBQL?<span style={{color:"#d70015",fontWeight:700}} title="BQL: response is in the curve's calibrated range but the curve fit can't invert here. Click row in instructor mode for math.">BQL</span>:(d.ir?<span style={{color:"#1b7f6a",fontWeight:700}}>IR</span>:<span style={{color:"#d70015"}}>OOR</span>)}</td>
                   </tr>,
                   isMO&&dbD2?<tr key={di+"m"}><td colSpan={6} style={{padding:0,border:"none"}}><MathWalk d={dbD2} slope={p.sc.slope} intercept={p.sc.intercept} params={p.sc.params} curveModel={p.sc.model} sn={cfg.sn} target={targetP} unit={unit} displayUnit={displayUnitChart} instructor={instructor} /></td></tr>:null
                 ];})}</tbody></table>
@@ -12676,7 +14185,7 @@ function App() {
           });
           var anyIssue = issues.length > 0;
           var issueMsg = anyIssue ? ("⚠ Issues: " + issues.slice(0,3).join(", ") + (issues.length > 3 ? " and " + (issues.length-3) + " more" : "") + " — click to review") : "Show summary of my picks";
-          return <details open={anyIssue} style={{marginBottom:"1rem"}}>
+          return <details open style={{marginBottom:"1rem"}}>
           <summary style={{display:"inline-block",cursor:"pointer",fontSize:12,color:anyIssue?"#b4332e":"#3478F6",fontWeight:600,fontStyle:"italic",textDecoration:"underline",textDecorationStyle:"dotted",userSelect:"none",padding:"4px 0"}}>
             {issueMsg}
           </summary>
@@ -13297,10 +14806,46 @@ function App() {
             <circle cx="11" cy="11" r="0.9" fill="#fff"/>
             <circle cx="16" cy="5" r="0.9" fill="#fff"/>
           </svg>;
+          var iconMassCol = <svg width="22" height="22" viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg">
+            {/* Vertical column with a band */}
+            <rect x="9" y="3" width="4" height="16" rx="0.6" stroke="#fff" strokeWidth="1.4" fill="none"/>
+            <rect x="9" y="10" width="4" height="3" fill="#fff" opacity="0.85"/>
+            <line x1="7" y1="6" x2="15" y2="6" stroke="#fff" strokeWidth="1" strokeLinecap="round"/>
+            <line x1="7" y1="16" x2="15" y2="16" stroke="#fff" strokeWidth="1" strokeLinecap="round"/>
+            <circle cx="11" cy="20" r="0.9" fill="#fff"/>
+          </svg>;
+          var iconPepPrep = <svg width="22" height="22" viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg">
+            {/* Conical tube with liquid + small fragments */}
+            <path d="M7 3 L7 13 L11 19 L15 13 L15 3 Z" stroke="#fff" strokeWidth="1.4" fill="none" strokeLinejoin="round"/>
+            <path d="M7 9 L7 13 L11 19 L15 13 L15 9 Z" fill="#fff" opacity="0.6"/>
+            <line x1="6" y1="3" x2="16" y2="3" stroke="#fff" strokeWidth="1.5" strokeLinecap="round"/>
+            <circle cx="10" cy="11" r="0.6" fill="#fff"/>
+            <circle cx="12" cy="14" r="0.6" fill="#fff"/>
+            <circle cx="10.5" cy="16" r="0.5" fill="#fff"/>
+          </svg>;
+          var iconMassMoles = <svg width="22" height="22" viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg">
+            {/* Balanced scales motif — mass ↔ moles */}
+            <line x1="11" y1="4" x2="11" y2="17" stroke="#fff" strokeWidth="1.4" strokeLinecap="round"/>
+            <line x1="5" y1="8" x2="17" y2="8" stroke="#fff" strokeWidth="1.4" strokeLinecap="round"/>
+            <path d="M3 8 L5 13 L7 8" stroke="#fff" strokeWidth="1.3" fill="none" strokeLinejoin="round"/>
+            <path d="M15 8 L17 13 L19 8" stroke="#fff" strokeWidth="1.3" fill="none" strokeLinejoin="round"/>
+            <line x1="8" y1="17" x2="14" y2="17" stroke="#fff" strokeWidth="1.4" strokeLinecap="round"/>
+          </svg>;
+          var iconSolMaker = <svg width="22" height="22" viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg">
+            {/* Volumetric flask with meniscus */}
+            <path d="M8 3 L8 8 L4 17 Q4 19 6 19 L16 19 Q18 19 18 17 L14 8 L14 3 Z" stroke="#fff" strokeWidth="1.4" fill="none" strokeLinejoin="round"/>
+            <line x1="7" y1="3" x2="15" y2="3" stroke="#fff" strokeWidth="1.6" strokeLinecap="round"/>
+            <path d="M5.5 14 Q7 13 9 13.5 Q11 14 13 13.5 Q15 13 16.5 14 L16.5 17 Q16.5 18.5 15 18.5 L7 18.5 Q5.5 18.5 5.5 17 Z" fill="#fff" opacity="0.5"/>
+            <line x1="6" y1="11" x2="9" y2="11" stroke="#fff" strokeWidth="0.8" strokeLinecap="round" opacity="0.6"/>
+          </svg>;
           var methodTools = [
             {id:"unit",  title:"Unit Converter",          desc:"Convert mg/mL ↔ ug/mL ↔ ng/mL etc.",  icon:iconConv,  color:"#0F8AA2"},
             {id:"spike", title:"Spike Recovery Planner",   desc:"Plan spike volumes and check expected recovery.", icon:iconSpike, color:"#6337b9"},
             {id:"elisa", title:"Dilution Planner",        desc:"Plan tube pre-dilutions and plate serial dilutions for any assay.", icon:iconElisa, color:"#BF7A1A"},
+            {id:"mass_col", title:"Mass on Column",        desc:"Compute mass and moles delivered to the LC-MS column (fmol/pmol/ng on column).", icon:iconMassCol, color:"#0b2a6f"},
+            {id:"mass_moles", title:"Mass ↔ Moles",        desc:"Quick converter between mass (ng/µg/mg) and moles (fmol/pmol/nmol). Uses MW.", icon:iconMassMoles, color:"#139cb6"},
+            {id:"solution_maker", title:"Solution Maker", desc:"You have X amount, want Y concentration — how much buffer? For resuspending dry-downs.", icon:iconSolMaker, color:"#1b7f6a"},
+            {id:"peptide_prep", title:"Peptide Mapping Prep", desc:"Bench math for reduction–alkylation–digestion. Volumes, enzyme reconstitution, ratios.", icon:iconPepPrep, color:"#bf7a1a"},
             {id:"validation", title:"Validation Designer", desc:"Design simple ICH Q2-aligned validation experiments — linearity, accuracy, precision, LLOQ, spike recovery.", icon:iconValidation, color:"#6337b9"},
           ];
           var bioTools = [
@@ -13363,6 +14908,10 @@ function App() {
               setTab(0);
             }} />}
             {selectedTool==="validation" && <ValidationDesignerEntry instructor={instructor} unit={unit} />}
+            {selectedTool==="mass_col" && <MassOnColumnCard instructor={instructor} customProteins={customProteins} saveProtein={saveProtein} />}
+            {selectedTool==="mass_moles" && <MassMolesConverterCard instructor={instructor} customProteins={customProteins} saveProtein={saveProtein} />}
+            {selectedTool==="solution_maker" && <SolutionMakerCard instructor={instructor} customProteins={customProteins} saveProtein={saveProtein} pendingHandoff={pendingSolnHandoff} consumeHandoff={consumeSolnHandoff} />}
+            {selectedTool==="peptide_prep" && <PeptidePrepCard instructor={instructor} sendToSolutionMaker={sendToSolutionMaker} />}
             {selectedTool==="growth_rate" && <GrowthRateCalculatorCard batches={btBatches} setBatches={setBtBatches} activeId={btActiveId} setActiveId={setBtActiveId} instructor={instructor} step={btStep} setStep={setBtStep} />}
           </div>;
         })()}
@@ -13377,7 +14926,14 @@ function App() {
 // LoginGate wraps the entire App, so BOTH return paths inside App (the
 // setup-landing early return and the workspace main return) are auth-gated.
 // This is the actual default export.
+//
+// While AUTH_DISABLED_FOR_TESTING is true, the LoginGate is bypassed
+// entirely. Flip the flag at the top of this file back to false to
+// re-enable normal login before pushing to production.
 export default function AppWithAuth() {
+  if (AUTH_DISABLED_FOR_TESTING) {
+    return <App />;
+  }
   return (
     <LoginGate logoSrc={ESSF_LOGO_B64}>
       <App />
