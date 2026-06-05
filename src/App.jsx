@@ -2513,204 +2513,556 @@ function SolutionMakerCard(props){
 // MVP scope: single sample. Multi-sample table planner is in backlog
 // for v6 (post-rollout). The math here is the foundation — adding a
 // table later is straightforward.
+
+// ── Spike Planner (multi-sample, v2) ─────────────────────────────────
+// Multi-sample version: an editable table of samples, each with its own
+// protein mass (the µg in tube after digestion = approximate peptide mass
+// after desalting). Computes the recommended spike stock concentration
+// that works across all INCLUDED samples (excluded rows still show their
+// math for traceability but don't constrain the stock recommendation).
+//
+// Math toggle: "exact" accounts for dilution from spike addition, "approx"
+// ignores it (5%-ish difference for typical workflows).
+//
+// Designed for personal use during a TopN LC-MS prep flow. Output is meant
+// to be copied to a bench paper recipe or LIMS.
 function SpikePlannerCard(props){
   var instructor = !!props.instructor;
   var customProteins = props.customProteins || [];
   var saveProtein = props.saveProtein;
 
+  // Default sample set matches the user's TopN screenshot — handy for
+  // testing and as a sensible starting point. User can clear/add rows.
+  var defaultSamples = [
+    { id: "S1",   name: "Sample 1 MWCO Ret",        proteinUg: "52.52",  include: true,  showDigest: false, digestConc: "",   digestVol: "" },
+    { id: "S1+",  name: "Sample 1+BLG MWCO Ret",    proteinUg: "17.862", include: true,  showDigest: false, digestConc: "",   digestVol: "" },
+    { id: "S2",   name: "Sample 2 MWCO Ret",        proteinUg: "38.5",   include: true,  showDigest: false, digestConc: "",   digestVol: "" },
+    { id: "S3",   name: "Sample 3 MWCO Ret",        proteinUg: "46.44",  include: true,  showDigest: false, digestConc: "",   digestVol: "" },
+    { id: "SST1", name: "BSA (2 mg/mL) SST",        proteinUg: "25",     include: true,  showDigest: false, digestConc: "",   digestVol: "" },
+    { id: "SST2", name: "bLG (100 µg/mL) Low SST",  proteinUg: "9.5",    include: true,  showDigest: false, digestConc: "",   digestVol: "" },
+  ];
+
   var _s = useState({
-    proteinMass: "52.52",       // µg in digest tube
-    targetProteinConc: "0.66",  // mg/mL final
-    targetSpikeConc: "5",       // fmol/µL final
-    minSpikeVol: "1",           // µL — smallest the analyst is willing to pipette
-    maxDilutionPct: "5",        // % — how much dilution from spike addition is OK
+    targetProteinConc: "0.66",
+    targetSpikeConc: "5",
+    minSpikeVol: "1",
+    maxDilutionPct: "5",
+    stockMode: "auto",
+    manualStock: "100",
+    formula: "exact",
+    samples: defaultSamples,
   });
   var st = _s[0], setSt = _s[1];
-  var _more = useState(false), showMore = _more[0], setShowMore = _more[1];
   var u = function(k, v){ setSt(function(p){ var n={}; for(var x in p) n[x]=p[x]; n[k]=v; return n; }); };
 
-  // ── Math ──────────────────────────────────────────────────────────
-  var protein_ug = parseFloat(st.proteinMass);
-  var targetConc = parseFloat(st.targetProteinConc);     // mg/mL
-  var targetSpike = parseFloat(st.targetSpikeConc);      // fmol/µL
-  var minSpikeVol = parseFloat(st.minSpikeVol);          // µL
-  var maxDilPct = parseFloat(st.maxDilutionPct);         // %
-
-  // Sample volume to hit target concentration
-  // µL = µg / (mg/mL) since mg/mL == µg/µL
-  var sampleVol_uL = (isFinite(protein_ug) && isFinite(targetConc) && targetConc > 0)
-    ? protein_ug / targetConc : null;
-
-  // Spike volume range — user's minimum to the max-dilution ceiling
-  var maxSpikeVol_uL = (sampleVol_uL != null && isFinite(maxDilPct))
-    ? sampleVol_uL * (maxDilPct / 100) : null;
-  var hasValidRange = sampleVol_uL != null && isFinite(minSpikeVol) && minSpikeVol > 0 &&
-                      maxSpikeVol_uL != null && maxSpikeVol_uL > minSpikeVol;
-
-  // Total spike needed (fmol) — same regardless of stock concentration
-  var totalSpikeNeeded_fmol = (sampleVol_uL != null && isFinite(targetSpike))
-    ? sampleVol_uL * targetSpike : null;
-
-  // Recommended stock concentrations for a few candidate spike volumes
-  // Build a grid: min, mid, max — analyst picks whichever is most convenient
-  var recommendations = [];
-  if (hasValidRange && totalSpikeNeeded_fmol != null) {
-    var mid = (minSpikeVol + maxSpikeVol_uL) / 2;
-    var candidates = [minSpikeVol, mid, maxSpikeVol_uL];
-    for (var i = 0; i < candidates.length; i++) {
-      var v = candidates[i];
-      var stock = totalSpikeNeeded_fmol / v;  // fmol/µL needed in stock
-      // Post-spike dilution
-      var finalVol = sampleVol_uL + v;
-      var finalProtein = (protein_ug / finalVol);   // mg/mL after dilution
-      var dilPct = (v / sampleVol_uL) * 100;
-      recommendations.push({
-        spikeVol: v,
-        stockConc: stock,
-        finalVol: finalVol,
-        finalProtein: finalProtein,
-        dilPct: dilPct,
-        label: i === 0 ? "tight" : (i === 1 ? "balanced" : "loose"),
+  // Update one field of one sample row
+  function updateSample(idx, field, value){
+    setSt(function(prev){
+      var copy = {}; for (var x in prev) copy[x] = prev[x];
+      copy.samples = prev.samples.map(function(s, i){
+        if (i !== idx) return s;
+        var ns = {}; for (var k in s) ns[k] = s[k];
+        ns[field] = value;
+        // If user is editing digest_conc or digest_vol, auto-multiply into proteinUg
+        if (field === "digestConc" || field === "digestVol") {
+          var dc = parseFloat(field === "digestConc" ? value : s.digestConc);
+          var dv = parseFloat(field === "digestVol"  ? value : s.digestVol);
+          if (isFinite(dc) && isFinite(dv) && dc > 0 && dv > 0) {
+            ns.proteinUg = String((dc * dv).toFixed(3));
+          }
+        }
+        return ns;
       });
+      return copy;
+    });
+  }
+
+  function addSample(){
+    setSt(function(prev){
+      var copy = {}; for (var x in prev) copy[x] = prev[x];
+      var nextN = prev.samples.length + 1;
+      copy.samples = prev.samples.concat([{
+        id: "S" + nextN, name: "New sample", proteinUg: "10",
+        include: true, showDigest: false, digestConc: "", digestVol: "",
+      }]);
+      return copy;
+    });
+  }
+  function removeSample(idx){
+    setSt(function(prev){
+      var copy = {}; for (var x in prev) copy[x] = prev[x];
+      copy.samples = prev.samples.filter(function(_, i){ return i !== idx; });
+      return copy;
+    });
+  }
+
+  // ── Parsing ────────────────────────────────────────────────────────
+  var targetConc  = parseFloat(st.targetProteinConc);  // mg/mL
+  var targetSpike = parseFloat(st.targetSpikeConc);    // fmol/µL
+  var minSpikeVol = parseFloat(st.minSpikeVol);        // µL
+  var maxDilPct   = parseFloat(st.maxDilutionPct);     // %
+  var useExact    = st.formula === "exact";
+
+  // For each sample row: compute sample volume from protein µg and target
+  // concentration. (µg / (mg/mL) = µL since mg/mL = µg/µL.)
+  function computeSampleVol(s){
+    var p = parseFloat(s.proteinUg);
+    if (!isFinite(p) || !isFinite(targetConc) || targetConc <= 0) return null;
+    return p / targetConc;
+  }
+
+  // ── Recommender ────────────────────────────────────────────────────
+  // For each included sample, the maximum allowable stock is the stock at
+  // which the spike volume just equals the user's minimum pipettable vol.
+  // Higher stock → smaller spike vol → less pipettable. So the included
+  // sample with the smallest sample volume sets the ceiling.
+  //
+  // For each sample: at min spike vol, what stock does it require?
+  //   exact:  spike_vol = target * sample_vol / (stock - target)
+  //           → stock = target + (target * sample_vol / spike_vol)
+  //   approx: spike_vol = target * sample_vol / stock
+  //           → stock = target * sample_vol / spike_vol
+  function stockForSpikeVol(sample_vol, spike_vol){
+    if (!isFinite(sample_vol) || !isFinite(spike_vol) || spike_vol <= 0 || !isFinite(targetSpike)) return null;
+    if (useExact) return targetSpike + (targetSpike * sample_vol / spike_vol);
+    return targetSpike * sample_vol / spike_vol;
+  }
+
+  // Round stock to a "clean" benchmark — analyst will make this in the lab
+  function roundStock(x){
+    if (!isFinite(x) || x <= 0) return x;
+    var benchmarks = [10, 20, 25, 50, 100, 150, 200, 250, 500, 750, 1000, 1500, 2000, 5000, 10000];
+    // Find the largest benchmark that is <= x (so all samples still meet min spike vol).
+    // If none, return raw x.
+    for (var i = benchmarks.length - 1; i >= 0; i--) {
+      if (benchmarks[i] <= x) return benchmarks[i];
+    }
+    return x; // x is smaller than smallest benchmark — return raw
+  }
+
+  // ── Recommender ────────────────────────────────────────────────────
+  // TWO constraints in play:
+  //   (a) Min spike volume: stock CANNOT exceed the value at which spike_vol
+  //       = minSpikeVol for the SMALLEST sample. Higher stock → too-small spike.
+  //   (b) Max dilution: stock MUST be at least target + (target × 100 / max_dil_pct).
+  //       Lower stock → more dilution.
+  //
+  // These can conflict for very small samples or aggressive constraints.
+  // When they conflict, recommend "no good stock" and let the user relax
+  // one constraint manually.
+  var includedSamples = st.samples.filter(function(s){ return s.include; });
+
+  // Constraint (a): max stock from min-spike-volume rule (smallest sample dominates)
+  var perSampleMaxStock = includedSamples.map(function(s){
+    var sv = computeSampleVol(s);
+    return stockForSpikeVol(sv, minSpikeVol);
+  }).filter(function(x){ return x != null && isFinite(x); });
+  var stockCeiling = perSampleMaxStock.length ? Math.min.apply(null, perSampleMaxStock) : null;
+
+  // Constraint (b): min stock from max-dilution rule (independent of sample size in exact formula)
+  // Exact: dil% = 100 × target / (stock - target) ≤ max_dil_pct  →  stock ≥ target + (100×target/max_dil_pct)
+  // Approx: dil% = 100 × target / stock  →  stock ≥ 100 × target / max_dil_pct
+  var stockFloor = null;
+  if (isFinite(targetSpike) && isFinite(maxDilPct) && maxDilPct > 0) {
+    stockFloor = useExact
+      ? (targetSpike + (100 * targetSpike / maxDilPct))
+      : (100 * targetSpike / maxDilPct);
+  }
+
+  // Conflict detection
+  var constraintsConflict = (stockCeiling != null && stockFloor != null && stockCeiling < stockFloor);
+
+  // Pick the stock: if no conflict, anything in [floor, ceiling] works. We pick
+  // a clean benchmark close to the floor (smaller stock = smaller pipette volumes
+  // are NOT needed = friendlier to the small samples). User can override.
+  var rawRecommendedStock = null;
+  if (!constraintsConflict) {
+    if (stockFloor != null && stockCeiling != null) {
+      // Both constraints active — anything in [floor, ceiling] is valid. Pick
+      // smallest clean benchmark ≥ floor.
+      rawRecommendedStock = stockFloor;
+    } else if (stockCeiling != null) {
+      rawRecommendedStock = stockCeiling;
+    } else if (stockFloor != null) {
+      rawRecommendedStock = stockFloor;
     }
   }
 
-  // Sanity warnings
-  var warns = [];
-  if (sampleVol_uL != null && sampleVol_uL < 5) warns.push("Sample volume under 5 µL — your target concentration may be too high for this little protein.");
-  if (sampleVol_uL != null && sampleVol_uL > 500) warns.push("Sample volume over 500 µL — your target concentration may be too dilute for typical LC-MS injection.");
-  if (hasValidRange && recommendations.length > 0) {
-    var midStock = recommendations[1].stockConc;
-    if (midStock > 10000) warns.push("Recommended stock > 10,000 fmol/µL — that's a very concentrated stock to make accurately.");
-    if (midStock < 1) warns.push("Recommended stock < 1 fmol/µL — extremely dilute, MS detection at this level is unreliable.");
+  // Round to a clean benchmark, but make sure it doesn't violate either constraint
+  var recommendedStock = null;
+  if (rawRecommendedStock != null && isFinite(rawRecommendedStock)) {
+    var rounded = roundStock(rawRecommendedStock);
+    // If we have a floor and rounding down breaks it, bump up
+    if (stockFloor != null && rounded < stockFloor) {
+      // Try the next benchmark up
+      var benchmarks = [10, 20, 25, 50, 100, 150, 200, 250, 500, 750, 1000, 1500, 2000, 5000, 10000];
+      var fixed = benchmarks.filter(function(b){ return b >= stockFloor; })[0];
+      rounded = fixed != null ? fixed : Math.ceil(stockFloor);
+    }
+    // If a ceiling exists and rounding up breaks it, fall back to raw
+    if (stockCeiling != null && rounded > stockCeiling) {
+      rounded = Math.floor(stockCeiling);
+    }
+    recommendedStock = rounded;
   }
 
-  // Styles (lean aesthetic, matching the other calculators)
-  var NAVY = "#0b2a6f", TEAL = "#139cb6", BORDER = "#dfe7f2", SLATE = "#5a6984";
+  // Active stock: either auto-recommended or user override
+  var activeStock = st.stockMode === "auto"
+    ? recommendedStock
+    : parseFloat(st.manualStock);
+
+  // ── Per-row computed values ────────────────────────────────────────
+  function rowMath(s){
+    var sample_vol = computeSampleVol(s);
+    var spike_vol = null, spike_fmol = null, final_spike_conc = null, dil_pct = null;
+    var status = "ok"; var statusMsg = "OK";
+
+    if (sample_vol != null && isFinite(activeStock) && activeStock > 0) {
+      if (useExact) {
+        if (activeStock > targetSpike) {
+          spike_vol = (targetSpike * sample_vol) / (activeStock - targetSpike);
+        }
+      } else {
+        spike_vol = (targetSpike * sample_vol) / activeStock;
+      }
+      if (spike_vol != null) {
+        spike_fmol = activeStock * spike_vol;
+        var final_vol = sample_vol + spike_vol;
+        final_spike_conc = spike_fmol / final_vol;
+        dil_pct = (spike_vol / sample_vol) * 100;
+
+        if (spike_vol < minSpikeVol) {
+          status = "warn"; statusMsg = "<" + minSpikeVol + " µL";
+        } else if (dil_pct > maxDilPct) {
+          status = "warn"; statusMsg = ">" + maxDilPct + "% dilution";
+        }
+      }
+    }
+    return {
+      sample_vol: sample_vol,
+      spike_vol: spike_vol,
+      spike_fmol: spike_fmol,
+      final_spike_conc: final_spike_conc,
+      dil_pct: dil_pct,
+      status: status, statusMsg: statusMsg,
+    };
+  }
+
+  // ── Export to CSV (clipboard) ─────────────────────────────────────
+  function copyAsCsv(){
+    var lines = [];
+    lines.push("ID,Name,Include,Protein (µg),Sample vol (µL),Spike vol (µL),Spike (fmol),Final spike (fmol/µL),Dilution (%),Status");
+    st.samples.forEach(function(s){
+      var m = rowMath(s);
+      lines.push([
+        s.id, '"' + (s.name || "").replace(/"/g, '""') + '"',
+        s.include ? "yes" : "no",
+        s.proteinUg,
+        m.sample_vol != null ? m.sample_vol.toFixed(2) : "",
+        m.spike_vol != null ? m.spike_vol.toFixed(2) : "",
+        m.spike_fmol != null ? m.spike_fmol.toFixed(1) : "",
+        m.final_spike_conc != null ? m.final_spike_conc.toFixed(2) : "",
+        m.dil_pct != null ? m.dil_pct.toFixed(1) : "",
+        m.statusMsg,
+      ].join(","));
+    });
+    lines.push("");
+    lines.push("Target protein conc," + st.targetProteinConc + " mg/mL");
+    lines.push("Target spike conc," + st.targetSpikeConc + " fmol/µL");
+    lines.push("Spike stock," + (activeStock != null && isFinite(activeStock) ? activeStock + " fmol/µL" : "—"));
+    lines.push("Stock mode," + st.stockMode);
+    lines.push("Formula," + st.formula);
+    var csv = lines.join("\n");
+    if (typeof navigator !== "undefined" && navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(csv).then(function(){}, function(){});
+    }
+  }
+
+  // ── Styles (lean aesthetic, matching other calculators) ────────────
+  var NAVY = "#0b2a6f", TEAL = "#139cb6", BORDER = "#dfe7f2", SLATE = "#5a6984", AMBER = "#bf7a1a", WARN = "#b4332e";
   var lineInput = {
     flex: 1, padding: "10px 12px", border: "none", borderBottom: "2px solid " + BORDER,
-    background: "transparent", fontSize: 18, fontFamily: "ui-monospace, monospace",
+    background: "transparent", fontSize: 16, fontFamily: "ui-monospace, monospace",
     color: NAVY, outline: "none", minWidth: 0,
   };
-  var linePicker = {
-    padding: "10px 8px", border: "none", borderBottom: "2px solid " + BORDER,
-    background: "transparent", fontSize: 14, fontFamily: "inherit",
-    color: SLATE, cursor: "pointer", outline: "none",
-  };
   var hint = { fontSize: 11, color: "#8e9bb5", marginTop: 2 };
-  var monoVal = { fontFamily: "ui-monospace, monospace", color: NAVY, fontWeight: 700 };
+  var sectionLabel = { fontSize: 11, color: SLATE, fontWeight: 600, marginTop: 18, marginBottom: 10, letterSpacing: 0.5 };
 
-  function fmt2(x) { return (x == null || !isFinite(x)) ? "—" : x.toFixed(2); }
-  function fmt0(x) { return (x == null || !isFinite(x)) ? "—" : Math.round(x).toString(); }
+  // Compact inputs for the table cells
+  var cellNumInput = {
+    width: "100%", border: "none", background: "transparent",
+    fontSize: 13, fontFamily: "ui-monospace, monospace", color: NAVY,
+    outline: "none", padding: "4px 6px", textAlign: "right",
+  };
+  var cellTextInput = {
+    width: "100%", border: "none", background: "transparent",
+    fontSize: 13, fontFamily: "inherit", color: NAVY,
+    outline: "none", padding: "4px 6px",
+  };
+
+  function fmt2(x){ return (x == null || !isFinite(x)) ? "—" : x.toFixed(2); }
+  function fmt1(x){ return (x == null || !isFinite(x)) ? "—" : x.toFixed(1); }
+  function fmt0(x){ return (x == null || !isFinite(x)) ? "—" : Math.round(x).toString(); }
 
   return <div>
     <h2 style={{fontSize:20,fontWeight:700,color:NAVY,margin:"0 0 4px",letterSpacing:"-0.01em"}}>Spike planner</h2>
-    <div style={{fontSize:12,color:SLATE,marginBottom:22}}>
-      For LC-MS TopN: figure out what stock concentration of internal peptide standard to make,
-      so your spike addition is pipettable and doesn't over-dilute your sample.
+    <div style={{fontSize:12,color:SLATE,marginBottom:18}}>
+      Multi-sample. Computes the spike stock concentration that works across your TopN sample set.
     </div>
 
-    {/* Inputs — flat, lean */}
-    <div style={{marginBottom:24}}>
-      <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:6}}>
-        <input type="number" value={st.proteinMass} onChange={function(e){ u("proteinMass", e.target.value); }} style={lineInput} />
-        <span style={{fontSize:14,color:SLATE,padding:"0 8px"}}>µg</span>
-      </div>
-      <div style={hint}>Protein mass in your digest tube</div>
-
-      <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:6,marginTop:18}}>
-        <input type="number" value={st.targetProteinConc} onChange={function(e){ u("targetProteinConc", e.target.value); }} style={lineInput} />
-        <span style={{fontSize:14,color:SLATE,padding:"0 8px"}}>mg/mL</span>
-      </div>
-      <div style={hint}>Target final protein concentration for LC-MS</div>
-
-      <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:6,marginTop:18}}>
-        <input type="number" value={st.targetSpikeConc} onChange={function(e){ u("targetSpikeConc", e.target.value); }} style={lineInput} />
-        <span style={{fontSize:14,color:SLATE,padding:"0 8px"}}>fmol/µL</span>
-      </div>
-      <div style={hint}>Target final spike concentration (peptide standard in the injection)</div>
-    </div>
-
-    {/* Computed: sample volume + total spike needed */}
-    {sampleVol_uL != null && <div style={{padding:"14px 16px",background:"#f7fbff",border:"1px solid #d7e7fb",borderRadius:10,marginBottom:14}}>
-      <div style={{fontSize:11,color:SLATE,fontWeight:600,marginBottom:6}}>Resuspend your sample</div>
-      <div style={{fontSize:13,color:NAVY,lineHeight:1.7}}>
-        Add <span style={monoVal}>{fmt2(sampleVol_uL)} µL</span> buffer to reach <span style={monoVal}>{targetConc} mg/mL</span>.
-      </div>
-      {totalSpikeNeeded_fmol != null && <div style={{fontSize:13,color:NAVY,lineHeight:1.7,marginTop:4}}>
-        Then spike <span style={monoVal}>{fmt0(totalSpikeNeeded_fmol)} fmol</span> total peptide standard.
-      </div>}
-    </div>}
-
-    {/* Stock recommendations */}
-    {hasValidRange && recommendations.length > 0 && <div style={{padding:"14px 16px",background:"#fff",border:"1px solid " + BORDER,borderRadius:10,marginBottom:14}}>
-      <div style={{fontSize:11,color:SLATE,fontWeight:600,marginBottom:10}}>Stock options — pick what's easiest to make</div>
-      <div style={{display:"grid",gridTemplateColumns:"repeat(3, 1fr)",gap:10}}>
-        {recommendations.map(function(r, i){
-          return <div key={i} style={{
-            padding:"10px 12px",
-            border: i === 1 ? "1.5px solid " + TEAL : "1px solid " + BORDER,
-            borderRadius: 8,
-            background: i === 1 ? "#fafdfe" : "#fff",
-          }}>
-            <div style={{fontSize:10,color:i === 1 ? TEAL : SLATE,fontWeight:700,letterSpacing:1,textTransform:"uppercase",marginBottom:4}}>
-              {r.label}
-            </div>
-            <div style={{fontSize:20,fontWeight:700,color:NAVY,fontFamily:"ui-monospace, monospace",lineHeight:1.1}}>
-              {fmt0(r.stockConc)}
-            </div>
-            <div style={{fontSize:11,color:SLATE,marginTop:2}}>fmol/µL stock</div>
-            <div style={{fontSize:11,color:"#8e9bb5",marginTop:8,lineHeight:1.5}}>
-              Add <span style={{...monoVal,fontWeight:600}}>{fmt2(r.spikeVol)} µL</span> per sample
-              <br/>
-              {r.dilPct.toFixed(1)}% dilution
-            </div>
-          </div>;
-        })}
-      </div>
-    </div>}
-
-    {warns.length > 0 && <div style={{marginBottom:14}}>
-      {warns.map(function(w, i){
-        return <div key={i} style={{fontSize:12,color:"#b4332e",padding:"6px 0",display:"flex",gap:6}}>
-          <span>⚠</span><span>{w}</span>
-        </div>;
-      })}
-    </div>}
-
-    {/* More options: pipette tolerance + dilution ceiling */}
-    <button type="button" onClick={function(){ setShowMore(!showMore); }} style={{
-      background:"none",border:"none",color:TEAL,fontSize:12,cursor:"pointer",
-      padding:"4px 0",fontFamily:"inherit",fontWeight:600,
-    }}>{showMore ? "− Less" : "+ Adjust pipette tolerance"}</button>
-
-    {showMore && <div style={{marginTop:12,padding:"14px 0 4px",borderTop:"1px solid " + BORDER}}>
-      <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:6}}>
-        <input type="number" value={st.minSpikeVol} onChange={function(e){ u("minSpikeVol", e.target.value); }} style={lineInput} />
-        <span style={{fontSize:14,color:SLATE,padding:"0 8px"}}>µL</span>
-      </div>
-      <div style={hint}>Smallest spike volume you're willing to pipette</div>
-
-      <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:6,marginTop:18}}>
-        <input type="number" value={st.maxDilutionPct} onChange={function(e){ u("maxDilutionPct", e.target.value); }} style={lineInput} />
-        <span style={{fontSize:14,color:SLATE,padding:"0 8px"}}>%</span>
-      </div>
-      <div style={hint}>Maximum sample dilution from spike addition (default 5%)</div>
-
-      {recommendations.length > 0 && <div style={{marginTop:16,fontSize:12,color:SLATE,lineHeight:1.7}}>
-        <strong>How it works:</strong>
-        <div style={{marginTop:6,fontFamily:"ui-monospace, monospace",color:NAVY}}>
-          1. Sample volume = {fmt2(protein_ug)} µg ÷ {targetConc} mg/mL = {fmt2(sampleVol_uL)} µL<br/>
-          2. Spike needed = {fmt2(sampleVol_uL)} µL × {targetSpike} fmol/µL = {fmt0(totalSpikeNeeded_fmol)} fmol<br/>
-          3. Stock conc = {fmt0(totalSpikeNeeded_fmol)} fmol ÷ (your chosen spike volume)<br/>
+    {/* SHARED TARGETS */}
+    <div style={sectionLabel}>SHARED TARGETS</div>
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
+      <div>
+        <div style={{display:"flex",alignItems:"center",gap:4}}>
+          <input type="number" value={st.targetProteinConc} onChange={function(e){ u("targetProteinConc", e.target.value); }} style={lineInput} />
+          <span style={{fontSize:13,color:SLATE,padding:"0 4px"}}>mg/mL</span>
         </div>
-      </div>}
-    </div>}
-
-    {/* Backlog hint */}
-    <div style={{marginTop:18,padding:"10px 14px",background:"#fafcfe",border:"1px dashed " + BORDER,borderRadius:8,fontSize:11,color:SLATE,lineHeight:1.6}}>
-      <strong>Single-sample MVP.</strong> If all your samples need the SAME spike stock, find the one with the smallest computed sample volume (smallest spike needed) — that sample dictates the highest acceptable stock concentration. A multi-sample table view is planned for v6.
+        <div style={hint}>Target final protein</div>
+      </div>
+      <div>
+        <div style={{display:"flex",alignItems:"center",gap:4}}>
+          <input type="number" value={st.targetSpikeConc} onChange={function(e){ u("targetSpikeConc", e.target.value); }} style={lineInput} />
+          <span style={{fontSize:13,color:SLATE,padding:"0 4px"}}>fmol/µL</span>
+        </div>
+        <div style={hint}>Target final spike</div>
+      </div>
     </div>
+
+    {/* STOCK CALLOUT — the big number */}
+    <div style={sectionLabel}>SPIKE STOCK TO MAKE</div>
+    <div style={{
+      padding:"14px 16px",
+      background: st.stockMode === "auto" ? "#fafdfe" : "#fff",
+      border: "1.5px solid " + (st.stockMode === "auto" ? TEAL : BORDER),
+      borderRadius: 10,
+      marginBottom: 8,
+    }}>
+      <div style={{display:"flex",alignItems:"baseline",justifyContent:"space-between",marginBottom:8,gap:10,flexWrap:"wrap"}}>
+        <div style={{fontSize:10,fontWeight:700,letterSpacing:1.5,color: st.stockMode === "auto" ? TEAL : SLATE}}>
+          {st.stockMode === "auto" ? "AUTO (RECOMMENDED)" : "MANUAL OVERRIDE"}
+        </div>
+        <div style={{display:"flex",gap:8,fontSize:11}}>
+          <button type="button" onClick={function(){ u("stockMode", "auto"); }} style={{
+            background:"none",border:"none",fontWeight: st.stockMode === "auto" ? 800 : 600,
+            color: st.stockMode === "auto" ? TEAL : SLATE, cursor:"pointer",padding:0,fontFamily:"inherit",
+          }}>Auto</button>
+          <span style={{color:"#8e9bb5"}}>·</span>
+          <button type="button" onClick={function(){
+            // When switching to manual, seed manualStock with the current recommended (so it doesn't jump)
+            setSt(function(prev){
+              var copy = {}; for (var k in prev) copy[k] = prev[k];
+              copy.stockMode = "manual";
+              if (recommendedStock != null && isFinite(recommendedStock)) copy.manualStock = String(recommendedStock);
+              return copy;
+            });
+          }} style={{
+            background:"none",border:"none",fontWeight: st.stockMode === "manual" ? 800 : 600,
+            color: st.stockMode === "manual" ? TEAL : SLATE, cursor:"pointer",padding:0,fontFamily:"inherit",
+          }}>Manual</button>
+        </div>
+      </div>
+      {st.stockMode === "auto" ? <div>
+        {constraintsConflict ? <div>
+          <div style={{display:"flex",alignItems:"baseline",gap:6,marginBottom:6}}>
+            <span style={{fontSize:24,fontWeight:700,color:WARN,lineHeight:1}}>No single stock works</span>
+          </div>
+          <div style={{fontSize:12,color:SLATE,lineHeight:1.6}}>
+            Your constraints conflict:
+            <div style={{marginTop:6,fontFamily:"ui-monospace, monospace",color:NAVY}}>
+              · Min spike vol ({minSpikeVol} µL) requires stock ≤ <strong>{fmt1(stockCeiling)} fmol/µL</strong> (set by smallest sample)<br/>
+              · Max dilution ({maxDilPct}%) requires stock ≥ <strong>{fmt1(stockFloor)} fmol/µL</strong>
+            </div>
+            <div style={{marginTop:8}}>
+              Relax one to proceed: raise the dilution tolerance, lower the min spike volume (smaller pipette), or exclude the constraint-tightest sample (likely the smallest).
+            </div>
+          </div>
+        </div> : (recommendedStock != null && isFinite(recommendedStock)) ? <div>
+          <div style={{display:"flex",alignItems:"baseline",gap:6}}>
+            <span style={{fontSize:36,fontWeight:700,color:NAVY,fontFamily:"ui-monospace, monospace",lineHeight:1}}>{fmt0(recommendedStock)}</span>
+            <span style={{fontSize:16,color:SLATE,fontWeight:600}}>fmol/µL</span>
+          </div>
+          {rawRecommendedStock != null && Math.abs(rawRecommendedStock - recommendedStock) > 0.5 && <div style={{fontSize:11,color:"#8e9bb5",marginTop:4,fontFamily:"ui-monospace, monospace"}}>
+            (raw {fmt1(rawRecommendedStock)} fmol/µL, rounded to clean benchmark)
+          </div>}
+          <div style={{fontSize:11,color:SLATE,marginTop:6,lineHeight:1.5}}>
+            Valid range: {stockFloor != null && isFinite(stockFloor) ? fmt1(stockFloor) + "–" : "≤ "}
+            {stockCeiling != null && isFinite(stockCeiling) ? fmt1(stockCeiling) : "no upper bound"} fmol/µL
+            ({stockFloor != null && isFinite(stockFloor) ? "floor from max dilution, " : ""}
+             {stockCeiling != null && isFinite(stockCeiling) ? "ceiling from smallest sample's spike volume" : ""})
+          </div>
+        </div> : <div style={{fontSize:13,color:"#8e9bb5",fontStyle:"italic"}}>Add at least one included sample with valid protein mass.</div>}
+      </div> : <div>
+        <div style={{display:"flex",alignItems:"baseline",gap:6}}>
+          <input type="number" value={st.manualStock} onChange={function(e){ u("manualStock", e.target.value); }} style={{
+            border:"none",borderBottom:"2px solid " + TEAL, background:"transparent",
+            fontSize:36,fontWeight:700,fontFamily:"ui-monospace, monospace",color:NAVY,
+            outline:"none", width: 130, textAlign: "right", padding: "2px 4px",
+          }} />
+          <span style={{fontSize:16,color:SLATE,fontWeight:600}}>fmol/µL</span>
+        </div>
+        {recommendedStock != null && isFinite(recommendedStock) && !constraintsConflict && Math.abs(parseFloat(st.manualStock) - recommendedStock) > 0.5 && <div style={{fontSize:11,color:AMBER,marginTop:4}}>
+          Recommended: {fmt0(recommendedStock)} fmol/µL ·{" "}
+          <button type="button" onClick={function(){ u("manualStock", String(recommendedStock)); }} style={{
+            background:"none",border:"none",color:TEAL,fontWeight:600,cursor:"pointer",padding:0,fontFamily:"inherit",textDecoration:"underline",
+          }}>use it</button>
+        </div>}
+      </div>}
+    </div>
+
+    {/* FORMULA TOGGLE */}
+    <div style={{display:"flex",alignItems:"center",gap:6,marginTop:10,marginBottom:14,flexWrap:"wrap"}}>
+      <span style={{fontSize:11,color:SLATE,fontWeight:600}}>Formula:</span>
+      <button type="button" onClick={function(){ u("formula", "exact"); }} style={{
+        background: st.formula === "exact" ? TEAL : "transparent",
+        color: st.formula === "exact" ? "#fff" : SLATE,
+        border:"1px solid " + (st.formula === "exact" ? TEAL : BORDER),
+        padding:"4px 10px",borderRadius:5,fontSize:11,fontWeight:600,cursor:"pointer",fontFamily:"inherit",
+      }}>Exact</button>
+      <button type="button" onClick={function(){ u("formula", "approximate"); }} style={{
+        background: st.formula === "approximate" ? TEAL : "transparent",
+        color: st.formula === "approximate" ? "#fff" : SLATE,
+        border:"1px solid " + (st.formula === "approximate" ? TEAL : BORDER),
+        padding:"4px 10px",borderRadius:5,fontSize:11,fontWeight:600,cursor:"pointer",fontFamily:"inherit",
+      }}>Approximate</button>
+      <span style={{fontSize:11,color:"#8e9bb5",marginLeft:6}}>
+        {st.formula === "exact" ? "Accounts for sample dilution from spike addition." : "Ignores spike-volume dilution (~5% under-estimate of spike vol)."}
+      </span>
+    </div>
+
+    {/* SAMPLE TABLE */}
+    <div style={sectionLabel}>SAMPLES</div>
+    <div style={{overflowX:"auto",border:"1px solid " + BORDER,borderRadius:8}}>
+      <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,minWidth:680}}>
+        <thead>
+          <tr style={{background:"#fafcfe",borderBottom:"1px solid " + BORDER}}>
+            <th style={{padding:"8px 6px",textAlign:"center",color:SLATE,fontSize:10,fontWeight:700,letterSpacing:0.5,width:32}}>✓</th>
+            <th style={{padding:"8px 6px",textAlign:"left",color:SLATE,fontSize:10,fontWeight:700,letterSpacing:0.5,width:60}}>ID</th>
+            <th style={{padding:"8px 6px",textAlign:"left",color:SLATE,fontSize:10,fontWeight:700,letterSpacing:0.5}}>Name</th>
+            <th style={{padding:"8px 6px",textAlign:"right",color:SLATE,fontSize:10,fontWeight:700,letterSpacing:0.5}}>Protein µg</th>
+            <th style={{padding:"8px 6px",textAlign:"right",color:SLATE,fontSize:10,fontWeight:700,letterSpacing:0.5}}>Vol µL</th>
+            <th style={{padding:"8px 6px",textAlign:"right",color:SLATE,fontSize:10,fontWeight:700,letterSpacing:0.5}}>Spike µL</th>
+            <th style={{padding:"8px 6px",textAlign:"right",color:SLATE,fontSize:10,fontWeight:700,letterSpacing:0.5}}>Spike fmol</th>
+            <th style={{padding:"8px 6px",textAlign:"right",color:SLATE,fontSize:10,fontWeight:700,letterSpacing:0.5}}>Final fmol/µL</th>
+            <th style={{padding:"8px 6px",textAlign:"center",color:SLATE,fontSize:10,fontWeight:700,letterSpacing:0.5,width:90}}>Status</th>
+            <th style={{padding:"8px 6px",width:24}}></th>
+          </tr>
+        </thead>
+        <tbody>
+          {st.samples.map(function(s, idx){
+            var m = rowMath(s);
+            var rowBg = s.include ? "#fff" : "#f5f7fb";
+            return <span key={idx} style={{display:"contents"}}>
+              <tr style={{background: rowBg, borderBottom:"1px solid #ecf0f6", opacity: s.include ? 1 : 0.6}}>
+                <td style={{padding:"6px 6px",textAlign:"center"}}>
+                  <input type="checkbox" checked={s.include} onChange={function(e){ updateSample(idx, "include", e.target.checked); }} />
+                </td>
+                <td style={{padding:"4px 6px"}}>
+                  <input value={s.id} onChange={function(e){ updateSample(idx, "id", e.target.value); }} style={cellTextInput} />
+                </td>
+                <td style={{padding:"4px 6px"}}>
+                  <input value={s.name} onChange={function(e){ updateSample(idx, "name", e.target.value); }} style={cellTextInput} />
+                </td>
+                <td style={{padding:"4px 6px",textAlign:"right"}}>
+                  <input type="number" value={s.proteinUg} onChange={function(e){ updateSample(idx, "proteinUg", e.target.value); }} style={cellNumInput} />
+                  <button type="button" onClick={function(){ updateSample(idx, "showDigest", !s.showDigest); }} style={{
+                    background:"none",border:"none",color:TEAL,fontSize:10,cursor:"pointer",padding:"0 4px",fontFamily:"inherit",
+                  }} title="Compute from digest concentration × digest volume">
+                    {s.showDigest ? "−" : "+digest"}
+                  </button>
+                </td>
+                <td style={{padding:"6px 6px",textAlign:"right",fontFamily:"ui-monospace, monospace",color:NAVY,background:"#f7fbff",fontWeight:600}}>{fmt2(m.sample_vol)}</td>
+                <td style={{padding:"6px 6px",textAlign:"right",fontFamily:"ui-monospace, monospace",color:NAVY,background:"#f7fbff",fontWeight:600}}>{fmt2(m.spike_vol)}</td>
+                <td style={{padding:"6px 6px",textAlign:"right",fontFamily:"ui-monospace, monospace",color:NAVY,background:"#f7fbff",fontWeight:600}}>{fmt0(m.spike_fmol)}</td>
+                <td style={{padding:"6px 6px",textAlign:"right",fontFamily:"ui-monospace, monospace",color:NAVY,background:"#f7fbff",fontWeight:600}}>{fmt2(m.final_spike_conc)}</td>
+                <td style={{padding:"6px 6px",textAlign:"center"}}>
+                  <span style={{
+                    display:"inline-block",padding:"2px 6px",borderRadius:4,
+                    fontSize:10,fontWeight:700,
+                    background: m.status === "ok" ? "#e7f7ef" : "#fef0ee",
+                    color: m.status === "ok" ? "#1b7f6a" : WARN,
+                  }}>{m.statusMsg}</span>
+                </td>
+                <td style={{padding:"6px 6px",textAlign:"center"}}>
+                  <button type="button" onClick={function(){ removeSample(idx); }} style={{
+                    background:"none",border:"none",color:"#b4332e",fontSize:14,cursor:"pointer",padding:0,fontFamily:"inherit",
+                  }} title="Remove row">×</button>
+                </td>
+              </tr>
+              {s.showDigest && <tr style={{background:"#f7fbff",borderBottom:"1px solid #ecf0f6"}}>
+                <td colSpan={10} style={{padding:"8px 16px"}}>
+                  <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+                    <span style={{fontSize:11,color:SLATE,fontWeight:600}}>From digest:</span>
+                    <input type="number" placeholder="conc" value={s.digestConc} onChange={function(e){ updateSample(idx, "digestConc", e.target.value); }} style={{
+                      width:70,padding:"4px 6px",border:"1px solid " + BORDER, borderRadius:4,
+                      fontSize:12,fontFamily:"ui-monospace, monospace",color:NAVY,outline:"none",
+                    }} />
+                    <span style={{fontSize:11,color:SLATE}}>mg/mL</span>
+                    <span style={{fontSize:11,color:SLATE}}>×</span>
+                    <input type="number" placeholder="vol" value={s.digestVol} onChange={function(e){ updateSample(idx, "digestVol", e.target.value); }} style={{
+                      width:70,padding:"4px 6px",border:"1px solid " + BORDER, borderRadius:4,
+                      fontSize:12,fontFamily:"ui-monospace, monospace",color:NAVY,outline:"none",
+                    }} />
+                    <span style={{fontSize:11,color:SLATE}}>µL = {s.proteinUg} µg</span>
+                    <span style={{fontSize:10,color:"#8e9bb5",marginLeft:8}}>(≈ peptide mass after digestion)</span>
+                  </div>
+                </td>
+              </tr>}
+            </span>;
+          })}
+        </tbody>
+      </table>
+    </div>
+
+    <div style={{display:"flex",alignItems:"center",gap:14,marginTop:10}}>
+      <button type="button" onClick={addSample} style={{
+        background:"none",border:"none",color:TEAL,fontSize:12,cursor:"pointer",
+        padding:"4px 0",fontFamily:"inherit",fontWeight:600,
+      }}>+ Add sample</button>
+      <button type="button" onClick={copyAsCsv} style={{
+        background:"none",border:"1px solid " + BORDER,color:SLATE,fontSize:11,cursor:"pointer",
+        padding:"5px 10px",fontFamily:"inherit",fontWeight:600,borderRadius:5,
+      }}>📋 Copy as CSV</button>
+    </div>
+
+    {/* PIPETTE TOLERANCE */}
+    <div style={sectionLabel}>PIPETTE TOLERANCE</div>
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14,marginBottom:14}}>
+      <div>
+        <div style={{display:"flex",alignItems:"center",gap:4}}>
+          <input type="number" value={st.minSpikeVol} onChange={function(e){ u("minSpikeVol", e.target.value); }} style={lineInput} />
+          <span style={{fontSize:13,color:SLATE,padding:"0 4px"}}>µL</span>
+        </div>
+        <div style={hint}>Min spike volume you'll pipette</div>
+      </div>
+      <div>
+        <div style={{display:"flex",alignItems:"center",gap:4}}>
+          <input type="number" value={st.maxDilutionPct} onChange={function(e){ u("maxDilutionPct", e.target.value); }} style={lineInput} />
+          <span style={{fontSize:13,color:SLATE,padding:"0 4px"}}>%</span>
+        </div>
+        <div style={hint}>Max sample dilution from spike</div>
+      </div>
+    </div>
+
+    {/* MATH EXPLAINER */}
+    <details style={{marginTop:14,padding:"10px 14px",background:"#fafcfe",border:"1px solid " + BORDER,borderRadius:8}}>
+      <summary style={{cursor:"pointer",fontSize:12,fontWeight:700,color:NAVY}}>How the math works</summary>
+      <div style={{marginTop:10,fontSize:12,color:SLATE,lineHeight:1.7}}>
+        <strong>For each sample:</strong>
+        <div style={{marginTop:6,fontFamily:"ui-monospace, monospace",color:NAVY}}>
+          sample_vol = protein_µg ÷ target_protein_conc<br/>
+          {useExact ? <span>spike_vol = (target_spike × sample_vol) ÷ (stock − target_spike)</span> : <span>spike_vol = (target_spike × sample_vol) ÷ stock</span>}<br/>
+          spike_fmol = stock × spike_vol<br/>
+          final_spike_conc = spike_fmol ÷ (sample_vol + spike_vol)
+        </div>
+        <div style={{marginTop:10}}>
+          <strong>Recommender:</strong> for each included sample, find the stock concentration that would give exactly {minSpikeVol} µL of spike. Take the SMALLEST of these — that's the stock the analyst should make. Excluded rows are still shown for traceability.
+        </div>
+        <div style={{marginTop:10,fontStyle:"italic"}}>
+          The "protein µg" column is really the peptide mass after digestion + desalting. Use the "+ digest" expander to compute it from your digest concentration × digest volume (which is approximately the peptide mass after tryptic digestion).
+        </div>
+      </div>
+    </details>
   </div>;
 }
 
