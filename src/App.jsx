@@ -2502,6 +2502,218 @@ function SolutionMakerCard(props){
   </div>;
 }
 
+// ── Spike Planner (MVP, single-sample) ───────────────────────────────
+// Workflow: for an LC-MS TopN experiment, given a digest with X µg of
+// protein and a target final protein conc + target final spike conc,
+// compute what stock concentration of internal peptide standard the
+// analyst needs to make. The "trick" is finding a stock that gives a
+// pipettable spike volume across the range the analyst is willing to
+// tolerate (default 1-4 µL, ~5% max dilution of the sample).
+//
+// MVP scope: single sample. Multi-sample table planner is in backlog
+// for v6 (post-rollout). The math here is the foundation — adding a
+// table later is straightforward.
+function SpikePlannerCard(props){
+  var instructor = !!props.instructor;
+  var customProteins = props.customProteins || [];
+  var saveProtein = props.saveProtein;
+
+  var _s = useState({
+    proteinMass: "52.52",       // µg in digest tube
+    targetProteinConc: "0.66",  // mg/mL final
+    targetSpikeConc: "5",       // fmol/µL final
+    minSpikeVol: "1",           // µL — smallest the analyst is willing to pipette
+    maxDilutionPct: "5",        // % — how much dilution from spike addition is OK
+  });
+  var st = _s[0], setSt = _s[1];
+  var _more = useState(false), showMore = _more[0], setShowMore = _more[1];
+  var u = function(k, v){ setSt(function(p){ var n={}; for(var x in p) n[x]=p[x]; n[k]=v; return n; }); };
+
+  // ── Math ──────────────────────────────────────────────────────────
+  var protein_ug = parseFloat(st.proteinMass);
+  var targetConc = parseFloat(st.targetProteinConc);     // mg/mL
+  var targetSpike = parseFloat(st.targetSpikeConc);      // fmol/µL
+  var minSpikeVol = parseFloat(st.minSpikeVol);          // µL
+  var maxDilPct = parseFloat(st.maxDilutionPct);         // %
+
+  // Sample volume to hit target concentration
+  // µL = µg / (mg/mL) since mg/mL == µg/µL
+  var sampleVol_uL = (isFinite(protein_ug) && isFinite(targetConc) && targetConc > 0)
+    ? protein_ug / targetConc : null;
+
+  // Spike volume range — user's minimum to the max-dilution ceiling
+  var maxSpikeVol_uL = (sampleVol_uL != null && isFinite(maxDilPct))
+    ? sampleVol_uL * (maxDilPct / 100) : null;
+  var hasValidRange = sampleVol_uL != null && isFinite(minSpikeVol) && minSpikeVol > 0 &&
+                      maxSpikeVol_uL != null && maxSpikeVol_uL > minSpikeVol;
+
+  // Total spike needed (fmol) — same regardless of stock concentration
+  var totalSpikeNeeded_fmol = (sampleVol_uL != null && isFinite(targetSpike))
+    ? sampleVol_uL * targetSpike : null;
+
+  // Recommended stock concentrations for a few candidate spike volumes
+  // Build a grid: min, mid, max — analyst picks whichever is most convenient
+  var recommendations = [];
+  if (hasValidRange && totalSpikeNeeded_fmol != null) {
+    var mid = (minSpikeVol + maxSpikeVol_uL) / 2;
+    var candidates = [minSpikeVol, mid, maxSpikeVol_uL];
+    for (var i = 0; i < candidates.length; i++) {
+      var v = candidates[i];
+      var stock = totalSpikeNeeded_fmol / v;  // fmol/µL needed in stock
+      // Post-spike dilution
+      var finalVol = sampleVol_uL + v;
+      var finalProtein = (protein_ug / finalVol);   // mg/mL after dilution
+      var dilPct = (v / sampleVol_uL) * 100;
+      recommendations.push({
+        spikeVol: v,
+        stockConc: stock,
+        finalVol: finalVol,
+        finalProtein: finalProtein,
+        dilPct: dilPct,
+        label: i === 0 ? "tight" : (i === 1 ? "balanced" : "loose"),
+      });
+    }
+  }
+
+  // Sanity warnings
+  var warns = [];
+  if (sampleVol_uL != null && sampleVol_uL < 5) warns.push("Sample volume under 5 µL — your target concentration may be too high for this little protein.");
+  if (sampleVol_uL != null && sampleVol_uL > 500) warns.push("Sample volume over 500 µL — your target concentration may be too dilute for typical LC-MS injection.");
+  if (hasValidRange && recommendations.length > 0) {
+    var midStock = recommendations[1].stockConc;
+    if (midStock > 10000) warns.push("Recommended stock > 10,000 fmol/µL — that's a very concentrated stock to make accurately.");
+    if (midStock < 1) warns.push("Recommended stock < 1 fmol/µL — extremely dilute, MS detection at this level is unreliable.");
+  }
+
+  // Styles (lean aesthetic, matching the other calculators)
+  var NAVY = "#0b2a6f", TEAL = "#139cb6", BORDER = "#dfe7f2", SLATE = "#5a6984";
+  var lineInput = {
+    flex: 1, padding: "10px 12px", border: "none", borderBottom: "2px solid " + BORDER,
+    background: "transparent", fontSize: 18, fontFamily: "ui-monospace, monospace",
+    color: NAVY, outline: "none", minWidth: 0,
+  };
+  var linePicker = {
+    padding: "10px 8px", border: "none", borderBottom: "2px solid " + BORDER,
+    background: "transparent", fontSize: 14, fontFamily: "inherit",
+    color: SLATE, cursor: "pointer", outline: "none",
+  };
+  var hint = { fontSize: 11, color: "#8e9bb5", marginTop: 2 };
+  var monoVal = { fontFamily: "ui-monospace, monospace", color: NAVY, fontWeight: 700 };
+
+  function fmt2(x) { return (x == null || !isFinite(x)) ? "—" : x.toFixed(2); }
+  function fmt0(x) { return (x == null || !isFinite(x)) ? "—" : Math.round(x).toString(); }
+
+  return <div>
+    <h2 style={{fontSize:20,fontWeight:700,color:NAVY,margin:"0 0 4px",letterSpacing:"-0.01em"}}>Spike planner</h2>
+    <div style={{fontSize:12,color:SLATE,marginBottom:22}}>
+      For LC-MS TopN: figure out what stock concentration of internal peptide standard to make,
+      so your spike addition is pipettable and doesn't over-dilute your sample.
+    </div>
+
+    {/* Inputs — flat, lean */}
+    <div style={{marginBottom:24}}>
+      <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:6}}>
+        <input type="number" value={st.proteinMass} onChange={function(e){ u("proteinMass", e.target.value); }} style={lineInput} />
+        <span style={{fontSize:14,color:SLATE,padding:"0 8px"}}>µg</span>
+      </div>
+      <div style={hint}>Protein mass in your digest tube</div>
+
+      <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:6,marginTop:18}}>
+        <input type="number" value={st.targetProteinConc} onChange={function(e){ u("targetProteinConc", e.target.value); }} style={lineInput} />
+        <span style={{fontSize:14,color:SLATE,padding:"0 8px"}}>mg/mL</span>
+      </div>
+      <div style={hint}>Target final protein concentration for LC-MS</div>
+
+      <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:6,marginTop:18}}>
+        <input type="number" value={st.targetSpikeConc} onChange={function(e){ u("targetSpikeConc", e.target.value); }} style={lineInput} />
+        <span style={{fontSize:14,color:SLATE,padding:"0 8px"}}>fmol/µL</span>
+      </div>
+      <div style={hint}>Target final spike concentration (peptide standard in the injection)</div>
+    </div>
+
+    {/* Computed: sample volume + total spike needed */}
+    {sampleVol_uL != null && <div style={{padding:"14px 16px",background:"#f7fbff",border:"1px solid #d7e7fb",borderRadius:10,marginBottom:14}}>
+      <div style={{fontSize:11,color:SLATE,fontWeight:600,marginBottom:6}}>Resuspend your sample</div>
+      <div style={{fontSize:13,color:NAVY,lineHeight:1.7}}>
+        Add <span style={monoVal}>{fmt2(sampleVol_uL)} µL</span> buffer to reach <span style={monoVal}>{targetConc} mg/mL</span>.
+      </div>
+      {totalSpikeNeeded_fmol != null && <div style={{fontSize:13,color:NAVY,lineHeight:1.7,marginTop:4}}>
+        Then spike <span style={monoVal}>{fmt0(totalSpikeNeeded_fmol)} fmol</span> total peptide standard.
+      </div>}
+    </div>}
+
+    {/* Stock recommendations */}
+    {hasValidRange && recommendations.length > 0 && <div style={{padding:"14px 16px",background:"#fff",border:"1px solid " + BORDER,borderRadius:10,marginBottom:14}}>
+      <div style={{fontSize:11,color:SLATE,fontWeight:600,marginBottom:10}}>Stock options — pick what's easiest to make</div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(3, 1fr)",gap:10}}>
+        {recommendations.map(function(r, i){
+          return <div key={i} style={{
+            padding:"10px 12px",
+            border: i === 1 ? "1.5px solid " + TEAL : "1px solid " + BORDER,
+            borderRadius: 8,
+            background: i === 1 ? "#fafdfe" : "#fff",
+          }}>
+            <div style={{fontSize:10,color:i === 1 ? TEAL : SLATE,fontWeight:700,letterSpacing:1,textTransform:"uppercase",marginBottom:4}}>
+              {r.label}
+            </div>
+            <div style={{fontSize:20,fontWeight:700,color:NAVY,fontFamily:"ui-monospace, monospace",lineHeight:1.1}}>
+              {fmt0(r.stockConc)}
+            </div>
+            <div style={{fontSize:11,color:SLATE,marginTop:2}}>fmol/µL stock</div>
+            <div style={{fontSize:11,color:"#8e9bb5",marginTop:8,lineHeight:1.5}}>
+              Add <span style={{...monoVal,fontWeight:600}}>{fmt2(r.spikeVol)} µL</span> per sample
+              <br/>
+              {r.dilPct.toFixed(1)}% dilution
+            </div>
+          </div>;
+        })}
+      </div>
+    </div>}
+
+    {warns.length > 0 && <div style={{marginBottom:14}}>
+      {warns.map(function(w, i){
+        return <div key={i} style={{fontSize:12,color:"#b4332e",padding:"6px 0",display:"flex",gap:6}}>
+          <span>⚠</span><span>{w}</span>
+        </div>;
+      })}
+    </div>}
+
+    {/* More options: pipette tolerance + dilution ceiling */}
+    <button type="button" onClick={function(){ setShowMore(!showMore); }} style={{
+      background:"none",border:"none",color:TEAL,fontSize:12,cursor:"pointer",
+      padding:"4px 0",fontFamily:"inherit",fontWeight:600,
+    }}>{showMore ? "− Less" : "+ Adjust pipette tolerance"}</button>
+
+    {showMore && <div style={{marginTop:12,padding:"14px 0 4px",borderTop:"1px solid " + BORDER}}>
+      <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:6}}>
+        <input type="number" value={st.minSpikeVol} onChange={function(e){ u("minSpikeVol", e.target.value); }} style={lineInput} />
+        <span style={{fontSize:14,color:SLATE,padding:"0 8px"}}>µL</span>
+      </div>
+      <div style={hint}>Smallest spike volume you're willing to pipette</div>
+
+      <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:6,marginTop:18}}>
+        <input type="number" value={st.maxDilutionPct} onChange={function(e){ u("maxDilutionPct", e.target.value); }} style={lineInput} />
+        <span style={{fontSize:14,color:SLATE,padding:"0 8px"}}>%</span>
+      </div>
+      <div style={hint}>Maximum sample dilution from spike addition (default 5%)</div>
+
+      {recommendations.length > 0 && <div style={{marginTop:16,fontSize:12,color:SLATE,lineHeight:1.7}}>
+        <strong>How it works:</strong>
+        <div style={{marginTop:6,fontFamily:"ui-monospace, monospace",color:NAVY}}>
+          1. Sample volume = {fmt2(protein_ug)} µg ÷ {targetConc} mg/mL = {fmt2(sampleVol_uL)} µL<br/>
+          2. Spike needed = {fmt2(sampleVol_uL)} µL × {targetSpike} fmol/µL = {fmt0(totalSpikeNeeded_fmol)} fmol<br/>
+          3. Stock conc = {fmt0(totalSpikeNeeded_fmol)} fmol ÷ (your chosen spike volume)<br/>
+        </div>
+      </div>}
+    </div>}
+
+    {/* Backlog hint */}
+    <div style={{marginTop:18,padding:"10px 14px",background:"#fafcfe",border:"1px dashed " + BORDER,borderRadius:8,fontSize:11,color:SLATE,lineHeight:1.6}}>
+      <strong>Single-sample MVP.</strong> If all your samples need the SAME spike stock, find the one with the smallest computed sample volume (smallest spike needed) — that sample dictates the highest acceptable stock concentration. A multi-sample table view is planned for v6.
+    </div>
+  </div>;
+}
+
 // ── Mass Spec Tools wrapper ──────────────────────────────────────────
 // Single entry point on the Tools tab that opens a tabbed UI with the
 // four MS calculators as sub-tabs. Owns the sub-tab state and the
@@ -2547,6 +2759,7 @@ function LCMSCalculatorsCard(props){
       <button type="button" onClick={function(){ setSubTab("peptide_prep"); }} style={subTabBtn(subTab === "peptide_prep")}>Peptide Prep</button>
       <button type="button" onClick={function(){ setSubTab("mass_col"); }} style={subTabBtn(subTab === "mass_col")}>Mass on Column</button>
       <button type="button" onClick={function(){ setSubTab("solution_maker"); }} style={subTabBtn(subTab === "solution_maker")}>Solution Maker</button>
+      <button type="button" onClick={function(){ setSubTab("spike_planner"); }} style={subTabBtn(subTab === "spike_planner")}>Spike Planner</button>
       <button type="button" onClick={function(){ setSubTab("mass_moles"); }} style={subTabBtn(subTab === "mass_moles")}>Mass ↔ Moles</button>
     </div>
 
@@ -2566,6 +2779,11 @@ function LCMSCalculatorsCard(props){
       saveProtein={saveProtein}
       pendingHandoff={pendingHandoff}
       consumeHandoff={consumeHandoff}
+    />}
+    {subTab === "spike_planner" && <SpikePlannerCard
+      instructor={instructor}
+      customProteins={customProteins}
+      saveProtein={saveProtein}
     />}
     {subTab === "mass_moles" && <MassMolesConverterCard
       instructor={instructor}
