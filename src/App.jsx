@@ -8,7 +8,7 @@ import { LoginGate, HeaderUserBadge, useAuth } from "./auth.jsx";
 //  "Signed in as · sign out" badge in the page header. The auth.jsx
 //  and users.js files are unchanged — only this flag changes the routing.
 // ─────────────────────────────────────────────────────────────────────────
-var AUTH_DISABLED_FOR_TESTING = true;
+var AUTH_DISABLED_FOR_TESTING = false;
 
 // ─────────────────────────────────────────────────────────────────────────
 //  FEATURE FLAGS — visibility toggles for in-progress features
