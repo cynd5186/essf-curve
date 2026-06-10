@@ -45,7 +45,7 @@ export const USERS = [
     email: "sljohns8@ncsu.edu",
     hash: "26077d289339a390726bcd297d9a9e2cfcbfe5a950e240a9bfcebe3f61543ff6",
     label: "Stephanie Johnson",
-    role: "member",
+    role: "admin",
   },
   {
     email: "gkbuhrma@ncsu.edu",
