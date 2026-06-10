@@ -13722,22 +13722,24 @@ function ChooserScreen(props){
   return <div style={{
     minHeight: "100vh",
     width: "100%",
-    background: "linear-gradient(180deg, #d7e7fb 0%, #f4f9fd 45%, #ffffff 100%)",
+    background: "#d7e7fb",
     boxSizing: "border-box",
     display: "flex",
     flexDirection: "column",
     justifyContent: "center",
-    padding: "clamp(0.5rem, 2vh, 1.5rem) 0",
+    padding: "clamp(1rem, 3vh, 2.5rem) 1rem",
   }}>
     <div style={{
       maxWidth: "min(720px, 100%)",
       margin: "0 auto",
-      padding: "0 1rem",
-      boxSizing: "border-box",
       width: "100%",
+      boxSizing: "border-box",
     }}>
     <div style={{
-      padding: "0.75rem 1rem 0.75rem",
+      background: "#ffffff",
+      borderRadius: 18,
+      padding: "1.5rem 1.5rem 1.25rem",
+      boxShadow: "0 12px 32px rgba(11,42,111,0.10), 0 2px 6px rgba(11,42,111,0.04)",
     }}>
 
       {/* Centered illustration — original simple bench scene */}
@@ -13910,7 +13912,6 @@ function App() {
   var _pl=useState([EP()]),pl=_pl[0],setPl=_pl[1];
   var _det=useState([]),det=_det[0],setDet=_det[1];
   var _res=useState(null),res=_res[0],setRes=_res[1];
-  var _acm=useState(false),analysisConfirmOpen=_acm[0],setAnalysisConfirmOpen=_acm[1];
   var _vp=useState(0),vp=_vp[0],setVp=_vp[1];
   var _pm=useState(false),planningMode=_pm[0],setPlanningMode=_pm[1];
   var _tt=useState(null),selectedTool=_tt[0],setSelectedTool=_tt[1];
@@ -15823,47 +15824,10 @@ function App() {
   return (
       <div style={{padding:"1rem 16px",maxWidth:1320,margin:"0 auto",boxSizing:"border-box"}}>
 
-      {/* Analysis confirmation modal */}
-      {analysisConfirmOpen && (function(){
-        // Build readable assay summary
-        var assayKindLabel = cfg.tp === "yes" ? "Total Protein assay"
-                           : cfg.at === "elisa" ? "ELISA"
-                           : "Direct (standard curve) assay";
-        var fitLabel = cfg.fm === "linear" ? "Linear fit"
-                     : cfg.fm === "loglog" ? "Log-log fit"
-                     : cfg.fm === "4pl" ? "4-parameter logistic"
-                     : cfg.fm === "5pl" ? "5-parameter logistic"
-                     : (cfg.fm || "auto");
-        var layoutLabel = cfg.layout === "autosampler" ? "Vials / autosampler" : "96-well plate";
-        var stdLabel = cfg.std || cfg.standardName || "standard curve";
-        return <div style={{position:"fixed",top:0,left:0,right:0,bottom:0,background:"rgba(11,42,111,0.45)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:"20px"}}>
-          <div style={{background:"#fff",borderRadius:16,padding:"28px 32px",maxWidth:480,width:"100%",boxShadow:"0 24px 60px rgba(11,42,111,0.25)"}}>
-            <div style={{fontSize:13,fontWeight:700,color:TEAL,letterSpacing:1.2,marginBottom:6}}>READY TO ANALYZE?</div>
-            <div style={{fontSize:18,fontWeight:700,color:NAVY,marginBottom:16,lineHeight:1.3}}>Confirm your assay setup before we run the analysis.</div>
-            <div style={{background:"#f4f9fd",border:"1px solid "+BORDER,borderRadius:10,padding:"14px 16px",marginBottom:18,fontSize:13,color:NAVY,lineHeight:1.7}}>
-              <div><span style={{color:SLATE,fontSize:11,letterSpacing:0.8,fontWeight:600,textTransform:"uppercase"}}>Assay:</span> <strong>{assayKindLabel}</strong></div>
-              <div><span style={{color:SLATE,fontSize:11,letterSpacing:0.8,fontWeight:600,textTransform:"uppercase"}}>Format:</span> {layoutLabel}</div>
-              <div><span style={{color:SLATE,fontSize:11,letterSpacing:0.8,fontWeight:600,textTransform:"uppercase"}}>Fit:</span> {fitLabel}</div>
-            </div>
-            <div style={{fontSize:12,color:SLATE,marginBottom:18,lineHeight:1.5}}>Take a moment — does this match what you set up? If anything looks off, cancel and review your setup before analyzing.</div>
-            <div style={{display:"flex",gap:10,justifyContent:"flex-end"}}>
-              <button onClick={function(){ setAnalysisConfirmOpen(false); }} style={{background:"#eef3f8",border:"1px solid #d8dfeb",color:"#3a4960",padding:"10px 18px",borderRadius:10,fontSize:13,fontWeight:600,cursor:"pointer"}}>Cancel</button>
-              <button onClick={function(){ setAnalysisConfirmOpen(false); confirmAnalyze(); }} style={{background:"linear-gradient(135deg,"+TEAL+","+NAVY+")",color:"#fff",border:"none",padding:"10px 22px",borderRadius:10,fontSize:13,fontWeight:700,cursor:"pointer",boxShadow:"0 6px 16px rgba(11,42,111,0.18)"}}>Yes, analyze</button>
-            </div>
-          </div>
-        </div>;
-      })()}
-
       <div style={{background:"linear-gradient(180deg,#f4f9fd,#eef5fb)",border:"1px solid "+BORDER,borderRadius:20,marginBottom:"1rem",boxShadow:SHADOW,overflow:"hidden"}}>
         <PageHeader instructor={instructor} setInstructor={setInstructor} onReset={reset} onBack={function(){ setChosenView(null); }} onSecretTap={htc} />
       </div>
       <div style={{display:"flex",gap:6,marginBottom:"1.25rem",background:"#eef3f8",borderRadius:14,padding:5,border:"1px solid #e2e9f2"}}>{TABS.map(function(l,i){return <button key={i} onClick={function(){
-        // Intercept Analysis tab click: if data is valid and we haven't run analysis yet,
-        // show confirmation modal so the analyst confirms her assay setup before running.
-        if (i === 1 && dv && !res) {
-          setAnalysisConfirmOpen(true);
-          return;
-        }
         setTab(i);
       }} onMouseEnter={function(e){ if (i!==tab) { e.currentTarget.style.background="#e3eaf3"; e.currentTarget.style.color=NAVY; }}} onMouseLeave={function(e){ if (i!==tab) { e.currentTarget.style.background="transparent"; e.currentTarget.style.color="#4a5568"; }}} style={{flex:1,padding:"9px 14px",fontSize:12,fontWeight:i===tab?700:600,cursor:"pointer",background:i===tab?"#fff":"transparent",color:i===tab?NAVY:"#4a5568",border:"none",borderRadius:10,boxShadow:i===tab?"0 4px 14px rgba(11,42,111,0.10)":"none",borderBottom:i===tab?"3px solid "+TEAL:"3px solid transparent",transition:"all 0.15s ease"}}>{l}</button>;})}
       {dbg&&<button onClick={function(){setTab(5);}} style={{padding:"9px 14px",fontSize:12,fontWeight:tab===5?700:500,cursor:"pointer",background:tab===5?"#fef3e2":"transparent",color:tab===5?"#a05a00":"#aeaeb2",border:"none",borderRadius:10}}>Debug</button>}</div>
