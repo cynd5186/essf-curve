@@ -3577,7 +3577,6 @@ function SpikePlannerCard(props){
           </div>}
         </div>
       )}
-      )}
     </div>
 
     {/* SAMPLE TABLE */}
