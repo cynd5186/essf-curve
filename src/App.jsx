@@ -13722,24 +13722,22 @@ function ChooserScreen(props){
   return <div style={{
     minHeight: "100vh",
     width: "100%",
-    background: "#d7e7fb",
+    background: "linear-gradient(180deg, #d7e7fb 0%, #f4f9fd 45%, #ffffff 100%)",
     boxSizing: "border-box",
     display: "flex",
     flexDirection: "column",
     justifyContent: "center",
-    padding: "clamp(1rem, 3vh, 2.5rem) 1rem",
+    padding: "clamp(0.5rem, 2vh, 1.5rem) 0",
   }}>
     <div style={{
       maxWidth: "min(720px, 100%)",
       margin: "0 auto",
-      width: "100%",
+      padding: "0 1rem",
       boxSizing: "border-box",
+      width: "100%",
     }}>
     <div style={{
-      background: "#ffffff",
-      borderRadius: 18,
-      padding: "1.5rem 1.5rem 1.25rem",
-      boxShadow: "0 12px 32px rgba(11,42,111,0.10), 0 2px 6px rgba(11,42,111,0.04)",
+      padding: "0.75rem 1rem 0.75rem",
     }}>
 
       {/* Centered illustration — original simple bench scene */}
@@ -13831,6 +13829,15 @@ function ChooserScreen(props){
       </div>
 
       {/* TOOLS section hidden until data layer is ready */}
+
+      {/* Sign-out badge — lets the analyst sign out from the chooser
+          (important on shared lab computers, where leaving the page open
+          could otherwise leave a session unattended). */}
+      {!AUTH_DISABLED_FOR_TESTING && (
+        <div style={{paddingTop: "0.75rem", textAlign: "center", marginBottom: "0.5rem"}}>
+          <HeaderUserBadge />
+        </div>
+      )}
 
       {/* eSSF footer */}
       <div style={{paddingTop: "1rem", borderTop: "1px solid #dfe7f2", textAlign: "center"}}>
