@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────
-//  eSSF Curve — Authentication
+//  eSSF Bench — Authentication
 // ─────────────────────────────────────────────────────────────────────────
 //
 //  Exports:
@@ -194,7 +194,7 @@ function LandingScreen({ onSignIn, logoSrc }) {
         {logoSrc && (
           <img
             src={logoSrc}
-            alt="eSSF Curve"
+            alt="eSSF Bench"
             style={{
               height: 120,
               maxWidth: "100%",
@@ -285,7 +285,7 @@ function LandingScreen({ onSignIn, logoSrc }) {
           letterSpacing: 0.5,
         }}
       >
-        Designed and developed by Cyndell Gracieux-Singleton · &copy; {new Date().getFullYear()} · All rights reserved
+        Designed and developed by [Your Name] · &copy; {new Date().getFullYear()} · All rights reserved
       </div>
     </div>
   );
@@ -370,7 +370,7 @@ function LoginScreen({ onAuth, onCancel }) {
               marginBottom: 4,
             }}
           >
-            eSSF Curve
+            eSSF Bench
           </div>
           <h1
             style={{
@@ -558,7 +558,7 @@ function PendingAccessScreen({ label, onBack }) {
 //
 // Example:
 //   <div className="page-header">
-//     <h1>eSSF Curve</h1>
+//     <h1>eSSF Bench</h1>
 //     <HeaderUserBadge />
 //   </div>
 

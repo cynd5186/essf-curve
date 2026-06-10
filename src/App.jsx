@@ -13691,127 +13691,60 @@ function ChooserScreen(props){
   }
 
   return <div style={{
-    maxWidth: "min(720px, 100%)",
-    margin: "0 auto",
-    padding: "1.5rem 1rem 1rem",
+    minHeight: "100vh",
+    width: "100%",
+    background: "linear-gradient(180deg, #d7e7fb 0%, #f4f9fd 45%, #ffffff 100%)",
     boxSizing: "border-box",
   }}>
     <div style={{
-      background: "#eef5fb",
-      borderRadius: 14,
+      maxWidth: "min(720px, 100%)",
+      margin: "0 auto",
+      padding: "2rem 1rem 2rem",
+      boxSizing: "border-box",
+    }}>
+    <div style={{
       padding: "1.5rem 1.25rem 1.25rem",
-      border: "1px solid #dfe7f2",
     }}>
 
-      {/* Centered illustration — bench with shelf, plate reader, HPLC, Eppendorf rack */}
+      {/* Centered illustration — original simple bench scene */}
       <div style={{textAlign: "center", padding: "0.5rem 0 1.25rem"}}>
-        <svg width="100%" height="200" viewBox="0 0 280 140" style={{display: "block", margin: "0 auto", maxWidth: 420}} aria-hidden="true">
-          {/* Top shelf */}
-          <line x1="20" y1="22" x2="260" y2="22" stroke="#5a6984" strokeWidth="0.5" opacity="0.5"/>
-          <rect x="20" y="22" width="240" height="1.2" fill="#5a6984" opacity="0.3"/>
-
-          {/* Bottle 1 — large blue */}
-          <g transform="translate(36, 4)">
-            <rect x="3" y="0" width="10" height="3" fill="#888780"/>
-            <rect x="5" y="3" width="6" height="2" fill="#B4B2A9"/>
-            <rect x="0" y="5" width="16" height="17" rx="1" fill="#E6F1FB" stroke="#B5D4F4" strokeWidth="0.6"/>
-            <rect x="1" y="9" width="14" height="12" fill="#B5D4F4" opacity="0.45"/>
-          </g>
-
-          {/* Bottle 2 — amber */}
-          <g transform="translate(62, 7)">
-            <rect x="3" y="0" width="8" height="2.5" fill="#888780"/>
-            <rect x="4" y="2.5" width="6" height="2" fill="#B4B2A9"/>
-            <rect x="0" y="4.5" width="14" height="15" rx="1" fill="#FAEEDA" stroke="#FAC775" strokeWidth="0.6"/>
-            <rect x="1" y="8" width="12" height="11" fill="#FAC775" opacity="0.45"/>
-          </g>
-
-          {/* Bottle 3 — slim teal */}
-          <g transform="translate(86, 9)">
-            <rect x="2" y="0" width="6" height="2.5" fill="#888780"/>
-            <rect x="3" y="2.5" width="4" height="1.5" fill="#B4B2A9"/>
-            <rect x="0" y="4" width="10" height="14" rx="0.8" fill="#E1F5EE" stroke="#9FE1CB" strokeWidth="0.6"/>
-            <rect x="0.5" y="7" width="9" height="11" fill="#9FE1CB" opacity="0.45"/>
-          </g>
-
-          {/* Bottle 4 — pink (right) */}
-          <g transform="translate(212, 5)">
-            <rect x="3" y="0" width="8" height="3" fill="#888780"/>
-            <rect x="4" y="3" width="6" height="2" fill="#B4B2A9"/>
-            <rect x="0" y="5" width="14" height="16" rx="1" fill="#FBEAF0" stroke="#F4C0D1" strokeWidth="0.6"/>
-            <rect x="1" y="9" width="12" height="12" fill="#F4C0D1" opacity="0.45"/>
-          </g>
-
-          {/* Bottle 5 — purple */}
-          <g transform="translate(232, 8)">
-            <rect x="2" y="0" width="6" height="2.5" fill="#888780"/>
-            <rect x="3" y="2.5" width="4" height="1.5" fill="#B4B2A9"/>
-            <rect x="0" y="4" width="10" height="14" rx="0.8" fill="#EEEDFE" stroke="#CECBF6" strokeWidth="0.6"/>
-            <rect x="0.5" y="7" width="9" height="11" fill="#CECBF6" opacity="0.45"/>
-          </g>
-
-          {/* Bench surface */}
-          <rect x="8" y="116" width="264" height="4" rx="0.5" fill="#0b2a6f"/>
-          <rect x="8" y="120" width="264" height="2" fill="#5a6984" opacity="0.5"/>
-          <rect x="18" y="122" width="3" height="14" fill="#5a6984"/>
-          <rect x="259" y="122" width="3" height="14" fill="#5a6984"/>
-
-          {/* Plate reader with plate on top */}
-          <g transform="translate(28, 80)">
-            <rect x="0" y="14" width="62" height="22" rx="2" fill="#5a6984"/>
-            <rect x="0" y="14" width="62" height="3" fill="#0b2a6f"/>
-            <rect x="44" y="22" width="14" height="9" rx="1" fill="#9FE1CB"/>
-            <circle cx="6" cy="30" r="1" fill="#1D9E75"/>
-            <rect x="10" y="28" width="3" height="2" fill="#0b2a6f" rx="0.3"/>
-            <rect x="15" y="28" width="3" height="2" fill="#0b2a6f" rx="0.3"/>
-            <rect x="20" y="28" width="3" height="2" fill="#0b2a6f" rx="0.3"/>
-            <rect x="6" y="0" width="44" height="14" rx="1.5" fill="#E6F1FB" stroke="#B5D4F4" strokeWidth="0.7"/>
-            <g fill="#85B7EB">
-              <circle cx="10" cy="4" r="0.9"/><circle cx="15" cy="4" r="0.9"/><circle cx="20" cy="4" r="0.9"/><circle cx="25" cy="4" r="0.9"/><circle cx="30" cy="4" r="0.9"/><circle cx="35" cy="4" r="0.9"/><circle cx="40" cy="4" r="0.9"/><circle cx="45" cy="4" r="0.9"/>
-              <circle cx="10" cy="8" r="0.9"/><circle cx="15" cy="8" r="0.9"/><circle cx="20" cy="8" r="0.9"/><circle cx="25" cy="8" r="0.9"/><circle cx="30" cy="8" r="0.9"/><circle cx="35" cy="8" r="0.9"/><circle cx="40" cy="8" r="0.9"/><circle cx="45" cy="8" r="0.9"/>
-              <circle cx="10" cy="11" r="0.9"/><circle cx="15" cy="11" r="0.9"/><circle cx="20" cy="11" r="0.9"/><circle cx="25" cy="11" r="0.9"/><circle cx="30" cy="11" r="0.9"/><circle cx="35" cy="11" r="0.9"/><circle cx="40" cy="11" r="0.9"/><circle cx="45" cy="11" r="0.9"/>
+        <svg width="220" height="100" viewBox="0 0 200 100" style={{display: "block", margin: "0 auto"}} aria-hidden="true">
+          <line x1="20" y1="20" x2="180" y2="20" stroke="#D3D1C7" strokeWidth="0.5" opacity="0.6"/>
+          <rect x="155" y="6" width="8" height="14" rx="1" fill="#B5D4F4"/>
+          <rect x="153" y="4" width="12" height="3" fill="#888780"/>
+          <rect x="10" y="72" width="180" height="4" rx="1" fill="#5F5E5A"/>
+          <rect x="10" y="76" width="180" height="2" fill="#888780" opacity="0.35"/>
+          <rect x="20" y="76" width="2" height="18" fill="#5F5E5A" opacity="0.5"/>
+          <rect x="178" y="76" width="2" height="18" fill="#5F5E5A" opacity="0.5"/>
+          <g transform="translate(28, 50)">
+            <ellipse cx="22" cy="20" rx="22" ry="3" fill="#888780" opacity="0.2"/>
+            <rect x="0" y="0" width="44" height="22" rx="2" fill="#E1E4EA"/>
+            <rect x="0" y="0" width="44" height="3" fill="#D3D1C7"/>
+            <g fill="#5F5E5A" opacity="0.55">
+              <circle cx="6" cy="9" r="1"/><circle cx="11" cy="9" r="1"/><circle cx="16" cy="9" r="1"/><circle cx="21" cy="9" r="1"/><circle cx="26" cy="9" r="1"/><circle cx="31" cy="9" r="1"/><circle cx="36" cy="9" r="1"/><circle cx="41" cy="9" r="0.8"/>
+              <circle cx="6" cy="14" r="1"/><circle cx="11" cy="14" r="1"/><circle cx="16" cy="14" r="1"/><circle cx="21" cy="14" r="1"/><circle cx="26" cy="14" r="1"/><circle cx="31" cy="14" r="1"/><circle cx="36" cy="14" r="1"/><circle cx="41" cy="14" r="0.8"/>
+              <circle cx="6" cy="19" r="1"/><circle cx="11" cy="19" r="1"/><circle cx="16" cy="19" r="1"/><circle cx="21" cy="19" r="1"/><circle cx="26" cy="19" r="1"/><circle cx="31" cy="19" r="1"/><circle cx="36" cy="19" r="1"/><circle cx="41" cy="19" r="0.8"/>
             </g>
           </g>
-
-          {/* HPLC stack — 4 modules: detector / column oven / pump / autosampler */}
-          <g transform="translate(112, 58)">
-            <rect x="0" y="0" width="44" height="11" rx="1.5" fill="#5a6984"/>
-            <rect x="0" y="0" width="44" height="2.5" fill="#0b2a6f"/>
-            <rect x="32" y="4" width="9" height="5" rx="0.8" fill="#9FE1CB"/>
-            <circle cx="4" cy="6" r="0.8" fill="#1D9E75"/>
-            <rect x="0" y="13" width="44" height="13" rx="1.5" fill="#5a6984"/>
-            <rect x="0" y="13" width="44" height="2.5" fill="#0b2a6f"/>
-            <rect x="6" y="18" width="32" height="6" rx="0.5" fill="#0b2a6f"/>
-            <rect x="6" y="19.5" width="32" height="3" fill="#9FE1CB"/>
-            <rect x="0" y="28" width="44" height="13" rx="1.5" fill="#5a6984"/>
-            <rect x="0" y="28" width="44" height="2.5" fill="#0b2a6f"/>
-            <rect x="6" y="33" width="14" height="6" rx="0.8" fill="#0b2a6f"/>
-            <circle cx="32" cy="36" r="3.5" fill="#0b2a6f" stroke="#9FE1CB" strokeWidth="0.4"/>
-            <line x1="32" y1="36" x2="34" y2="34" stroke="#9FE1CB" strokeWidth="0.5"/>
-            <rect x="0" y="43" width="44" height="15" rx="1.5" fill="#5a6984"/>
-            <rect x="0" y="43" width="44" height="2.5" fill="#0b2a6f"/>
-            <rect x="4" y="48" width="36" height="8" rx="0.5" fill="#0b2a6f"/>
-            <g fill="#FAC775">
-              <circle cx="8" cy="52" r="1"/><circle cx="12" cy="52" r="1"/><circle cx="16" cy="52" r="1"/><circle cx="20" cy="52" r="1"/><circle cx="24" cy="52" r="1"/><circle cx="28" cy="52" r="1"/><circle cx="32" cy="52" r="1"/><circle cx="36" cy="52" r="1"/>
-            </g>
+          <g transform="translate(90, 28)">
+            <rect x="0" y="0" width="6" height="44" rx="0.5" fill="#9FE1CB"/>
+            <rect x="-1" y="0" width="8" height="4" fill="#5F5E5A"/>
+            <rect x="0" y="38" width="6" height="6" fill="#0F6E56"/>
           </g>
-
-          {/* Eppendorf rack with 9 tubes */}
-          <g transform="translate(176, 88)">
-            <rect x="0" y="22" width="76" height="6" rx="0.8" fill="#5a6984"/>
-            <rect x="0" y="22" width="76" height="1.5" fill="#0b2a6f"/>
-            <g fill="#0b2a6f" opacity="0.4">
-              <ellipse cx="6" cy="25" rx="2" ry="0.8"/><ellipse cx="14" cy="25" rx="2" ry="0.8"/><ellipse cx="22" cy="25" rx="2" ry="0.8"/><ellipse cx="30" cy="25" rx="2" ry="0.8"/><ellipse cx="38" cy="25" rx="2" ry="0.8"/><ellipse cx="46" cy="25" rx="2" ry="0.8"/><ellipse cx="54" cy="25" rx="2" ry="0.8"/><ellipse cx="62" cy="25" rx="2" ry="0.8"/><ellipse cx="70" cy="25" rx="2" ry="0.8"/>
-            </g>
-            <g transform="translate(4, 4)"><path d="M 0 4 L 4 4 L 4 14 L 2 18 L 0 14 Z" fill="#FBEAF0" stroke="#F4C0D1" strokeWidth="0.4"/><path d="M 0.5 10 L 3.5 10 L 3.5 14 L 2 17 L 0.5 14 Z" fill="#F4C0D1" opacity="0.6"/><rect x="-0.3" y="0" width="4.6" height="4" rx="0.8" fill="#FBEAF0" stroke="#F4C0D1" strokeWidth="0.4"/><rect x="-1" y="1.5" width="1" height="2" fill="#F4C0D1"/></g>
-            <g transform="translate(12, 4)"><path d="M 0 4 L 4 4 L 4 14 L 2 18 L 0 14 Z" fill="#FAEEDA" stroke="#FAC775" strokeWidth="0.4"/><path d="M 0.5 9 L 3.5 9 L 3.5 14 L 2 17 L 0.5 14 Z" fill="#FAC775" opacity="0.6"/><rect x="-0.3" y="0" width="4.6" height="4" rx="0.8" fill="#FAEEDA" stroke="#FAC775" strokeWidth="0.4"/><rect x="-1" y="1.5" width="1" height="2" fill="#FAC775"/></g>
-            <g transform="translate(20, 4)"><path d="M 0 4 L 4 4 L 4 14 L 2 18 L 0 14 Z" fill="#EEEDFE" stroke="#CECBF6" strokeWidth="0.4"/><path d="M 0.5 11 L 3.5 11 L 3.5 14 L 2 17 L 0.5 14 Z" fill="#CECBF6" opacity="0.6"/><rect x="-0.3" y="0" width="4.6" height="4" rx="0.8" fill="#EEEDFE" stroke="#CECBF6" strokeWidth="0.4"/><rect x="-1" y="1.5" width="1" height="2" fill="#CECBF6"/></g>
-            <g transform="translate(28, 4)"><path d="M 0 4 L 4 4 L 4 14 L 2 18 L 0 14 Z" fill="#E1F5EE" stroke="#9FE1CB" strokeWidth="0.4"/><path d="M 0.5 8 L 3.5 8 L 3.5 14 L 2 17 L 0.5 14 Z" fill="#9FE1CB" opacity="0.6"/><rect x="-0.3" y="0" width="4.6" height="4" rx="0.8" fill="#E1F5EE" stroke="#9FE1CB" strokeWidth="0.4"/><rect x="-1" y="1.5" width="1" height="2" fill="#9FE1CB"/></g>
-            <g transform="translate(36, 4)"><path d="M 0 4 L 4 4 L 4 14 L 2 18 L 0 14 Z" fill="#E6F1FB" stroke="#B5D4F4" strokeWidth="0.4"/><path d="M 0.5 12 L 3.5 12 L 3.5 14 L 2 17 L 0.5 14 Z" fill="#B5D4F4" opacity="0.6"/><rect x="-0.3" y="0" width="4.6" height="4" rx="0.8" fill="#E6F1FB" stroke="#B5D4F4" strokeWidth="0.4"/><rect x="-1" y="1.5" width="1" height="2" fill="#B5D4F4"/></g>
-            <g transform="translate(44, 4)"><path d="M 0 4 L 4 4 L 4 14 L 2 18 L 0 14 Z" fill="#FBEAF0" stroke="#F4C0D1" strokeWidth="0.4"/><path d="M 0.5 9 L 3.5 9 L 3.5 14 L 2 17 L 0.5 14 Z" fill="#F4C0D1" opacity="0.6"/><rect x="-0.3" y="0" width="4.6" height="4" rx="0.8" fill="#FBEAF0" stroke="#F4C0D1" strokeWidth="0.4"/><rect x="-1" y="1.5" width="1" height="2" fill="#F4C0D1"/></g>
-            <g transform="translate(52, 4)"><path d="M 0 4 L 4 4 L 4 14 L 2 18 L 0 14 Z" fill="#FAEEDA" stroke="#FAC775" strokeWidth="0.4"/><path d="M 0.5 13 L 3.5 13 L 3.5 14 L 2 17 L 0.5 14 Z" fill="#FAC775" opacity="0.6"/><rect x="-0.3" y="0" width="4.6" height="4" rx="0.8" fill="#FAEEDA" stroke="#FAC775" strokeWidth="0.4"/><rect x="-1" y="1.5" width="1" height="2" fill="#FAC775"/></g>
-            <g transform="translate(60, 4)"><path d="M 0 4 L 4 4 L 4 14 L 2 18 L 0 14 Z" fill="#ffffff" stroke="#B4B2A9" strokeWidth="0.4"/><rect x="-0.3" y="0" width="4.6" height="4" rx="0.8" fill="#ffffff" stroke="#B4B2A9" strokeWidth="0.4"/><rect x="-1" y="1.5" width="1" height="2" fill="#B4B2A9"/></g>
-            <g transform="translate(68, 4)"><path d="M 0 4 L 4 4 L 4 14 L 2 18 L 0 14 Z" fill="#E1F5EE" stroke="#9FE1CB" strokeWidth="0.4"/><path d="M 0.5 10 L 3.5 10 L 3.5 14 L 2 17 L 0.5 14 Z" fill="#9FE1CB" opacity="0.6"/><rect x="-0.3" y="0" width="4.6" height="4" rx="0.8" fill="#E1F5EE" stroke="#9FE1CB" strokeWidth="0.4"/><rect x="-1" y="1.5" width="1" height="2" fill="#9FE1CB"/></g>
+          <g transform="translate(115, 52)">
+            <rect x="0" y="0" width="9" height="20" rx="1.5" fill="#F4C0D1"/>
+            <rect x="0" y="10" width="9" height="10" rx="1.5" fill="#993556"/>
+            <rect x="-1" y="-2" width="11" height="3" fill="#888780"/>
+          </g>
+          <g transform="translate(130, 47)">
+            <rect x="0" y="0" width="9" height="25" rx="1.5" fill="#FAC775"/>
+            <rect x="0" y="12" width="9" height="13" rx="1.5" fill="#854F0B"/>
+            <rect x="-1" y="-2" width="11" height="3" fill="#888780"/>
+          </g>
+          <g transform="translate(150, 55)">
+            <path d="M 4 0 L 4 6 L 0 16 L 16 16 L 12 6 L 12 0 Z" fill="#CECBF6" opacity="0.85" stroke="#534AB7" strokeWidth="0.6"/>
+            <path d="M 1 14 L 15 14 L 14 16 L 2 16 Z" fill="#534AB7" opacity="0.6"/>
+            <rect x="3" y="-2" width="10" height="3" fill="#888780"/>
           </g>
         </svg>
       </div>
@@ -13861,21 +13794,7 @@ function ChooserScreen(props){
         })}
       </div>
 
-      {/* TOOLS section */}
-      <div style={{marginBottom: "1.5rem"}}>
-        <p style={{fontSize: 11, color: "#8e9bb5", margin: "0 0 10px", letterSpacing: 1.2}}>TOOLS</p>
-
-        {card({
-          stripeColor: FEATURES.benchCalcs ? "#534AB7" : "#D3D1C7",
-          iconBg: FEATURES.benchCalcs ? "#EEEDFE" : "#F1EFE8",
-          iconColor: FEATURES.benchCalcs ? "#534AB7" : "#888780",
-          iconText: "🧮",
-          name: "Bench calculations",
-          desc: FEATURES.benchCalcs ? "Dilutions, mass, moles" : "Not yet available",
-          enabled: FEATURES.benchCalcs,
-          onClick: function(){ onChoose("bench"); },
-        })}
-      </div>
+      {/* TOOLS section hidden until data layer is ready */}
 
       {/* eSSF footer */}
       <div style={{paddingTop: "1rem", borderTop: "1px solid #dfe7f2", textAlign: "center"}}>
@@ -13890,6 +13809,7 @@ function ChooserScreen(props){
       </div>
 
     </div>
+  </div>
   </div>;
 }
 
