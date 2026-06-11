@@ -8,7 +8,7 @@ import { LoginGate, HeaderUserBadge, useAuth } from "./auth.jsx";
 //  "Signed in as · sign out" badge in the page header. The auth.jsx
 //  and users.js files are unchanged — only this flag changes the routing.
 // ─────────────────────────────────────────────────────────────────────────
-var AUTH_DISABLED_FOR_TESTING = true;
+var AUTH_DISABLED_FOR_TESTING = false;
 
 // ─────────────────────────────────────────────────────────────────────────
 //  FEATURE FLAGS — visibility toggles for in-progress features
@@ -13901,7 +13901,7 @@ function ChooserScreen(props){
           <span style={{color: "#8e9bb5", fontSize: 10}}>·</span>
           <a href="#" style={{fontSize: 12, color: "#139cb6", textDecoration: "none"}}>eSSF board</a>
           <span style={{color: "#8e9bb5", fontSize: 10}}>·</span>
-          <a href="go.ncsu.edu/analytical-lims" target="_blank" rel="noopener noreferrer" style={{fontSize: 12, color: "#139cb6", textDecoration: "none"}}>eSSF LIMS</a>
+          <a href="http://go.ncsu.edu/analytical-lims" target="_blank" rel="noopener noreferrer" style={{fontSize: 12, color: "#139cb6", textDecoration: "none"}}>eSSF LIMS</a>
         </div>
       </div>
 
