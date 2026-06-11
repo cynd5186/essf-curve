@@ -15429,11 +15429,11 @@ function App() {
               var totalSamples = leftSamples.length + rightSamples.length;
               var anyPartial = leftSamples.some(function(s){return s.partial;}) || rightSamples.some(function(s){return s.partial;});
               return <div>
-                <label style={{display:"block",fontSize:13,fontWeight:800,marginBottom:7,color:"#18233f"}}>Replicate setup</label>
+                <label style={{display:"block",fontSize:13,fontWeight:800,marginBottom:7,color:"#18233f"}}>How many replicates?</label>
                 <div style={{fontSize:11,color:"#6f7fa0",marginBottom:10,lineHeight:1.5}}>The standard curve takes the first row(s) of the left half. Sample reps fill the rest of the left half, then the rep pattern restarts on the right half. Samples never span halves.</div>
                 <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0.9rem",marginBottom:10}}>
                   <div>
-                    <label style={{display:"block",fontSize:11,fontWeight:700,marginBottom:7,color:"#18233f"}}>Standard replicates</label>
+                    <label style={{display:"block",fontSize:11,fontWeight:700,marginBottom:7,color:"#18233f"}}>Standard</label>
                     <select value={cfg.sr} onChange={function(e){u("sr",e.target.value);}} style={{width:"100%",padding:"10px 11px",borderRadius:12,border:"1px solid #d8dfeb",fontSize:14,color:"#1d1d1f",background:"#fff"}}>
                       <option value="1">Singlicate (1 half-row)</option>
                       <option value="2">Duplicate (2 half-rows)</option>
@@ -15441,7 +15441,7 @@ function App() {
                     </select>
                   </div>
                   <div>
-                    <label style={{display:"block",fontSize:11,fontWeight:700,marginBottom:7,color:"#18233f"}}>Rep mix</label>
+                    <label style={{display:"block",fontSize:11,fontWeight:700,marginBottom:7,color:"#18233f"}}>Sample pattern</label>
                     <input type="text" value={cfg.xrMix} onChange={function(e){u("xrMix",e.target.value);}} placeholder="e.g. 3,3,2" style={{width:"100%",padding:"10px 11px",borderRadius:12,border:"1px solid "+(mixParsed.valid?"#d8dfeb":"#e8b8b8"),fontSize:14,color:"#1d1d1f",background:mixParsed.valid?"#fff":"#fdf3f3",fontFamily:"monospace"}} />
                   </div>
                 </div>
@@ -15451,11 +15451,11 @@ function App() {
                 </div>
               </div>;
             })() : cfg.layout==="transposed" ? <div>
-              <label style={{display:"block",fontSize:13,fontWeight:800,marginBottom:7,color:"#18233f"}}>Replicate setup</label>
+              <label style={{display:"block",fontSize:13,fontWeight:800,marginBottom:7,color:"#18233f"}}>How many replicates?</label>
               <div style={{fontSize:11,color:"#6f7fa0",marginBottom:10,lineHeight:1.5}}>The plate is two side-by-side mini-plates (left half and right half). Each replicate takes one half-row. Replicates of the same analyte stack vertically within a half — duplicate = 2 rows, triplicate = 3 rows.</div>
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0.9rem"}}>
                 <div>
-                  <label style={{display:"block",fontSize:11,fontWeight:700,marginBottom:7,color:"#18233f"}}>Standard replicates</label>
+                  <label style={{display:"block",fontSize:11,fontWeight:700,marginBottom:7,color:"#18233f"}}>Standard</label>
                   <select value={cfg.sr} onChange={function(e){u("sr",e.target.value);}} style={{width:"100%",padding:"10px 11px",borderRadius:12,border:"1px solid #d8dfeb",fontSize:14,color:"#1d1d1f",background:"#fff"}}>
                     <option value="1">Singlicate (1 half-row)</option>
                     <option value="2">Duplicate (2 half-rows)</option>
@@ -15463,7 +15463,7 @@ function App() {
                   </select>
                 </div>
                 <div>
-                  <label style={{display:"block",fontSize:11,fontWeight:700,marginBottom:7,color:"#18233f"}}>Sample replicates</label>
+                  <label style={{display:"block",fontSize:11,fontWeight:700,marginBottom:7,color:"#18233f"}}>Samples</label>
                   <select value={cfg.xr} onChange={function(e){u("xr",e.target.value);}} style={{width:"100%",padding:"10px 11px",borderRadius:12,border:"1px solid #d8dfeb",fontSize:14,color:"#1d1d1f",background:"#fff"}}>
                     <option value="1">Singlicate (1 half-row each)</option>
                     <option value="2">Duplicate (2 half-rows each)</option>
@@ -15485,9 +15485,12 @@ function App() {
                   return <span><strong>This setup:</strong> {sampleCount} samples possible ({repWord}, {xrN} half-row{xrN===1?"":"s"} each). Standard occupies {stdWord}.{leftover>0?" "+leftover+" half-row"+(leftover===1?"":"s")+" unused.":""}</span>;
                 })()}
               </div>
-            </div> : <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0.9rem"}}>
-              <div><label style={{display:"block",fontSize:11,fontWeight:700,marginBottom:7,color:"#18233f"}}>Standard replicates</label><select value={cfg.sr} onChange={function(e){u("sr",e.target.value);}} style={{width:"100%",padding:"10px 11px",borderRadius:12,border:"1px solid #d8dfeb",fontSize:14,color:"#1d1d1f",background:"#fff"}}><option value="1">Singlicate</option><option value="2">Duplicate</option><option value="3">Triplicate</option></select></div>
-              <div><label style={{display:"block",fontSize:11,fontWeight:700,marginBottom:7,color:"#18233f"}}>Sample replicates</label><select value={cfg.xr} onChange={function(e){u("xr",e.target.value);}} style={{width:"100%",padding:"10px 11px",borderRadius:12,border:"1px solid #d8dfeb",fontSize:14,color:"#1d1d1f",background:"#fff"}}><option value="1">Singlicate</option><option value="2">Duplicate</option><option value="3">Triplicate</option></select></div>
+            </div> : <div>
+              <label style={{display:"block",fontSize:13,fontWeight:800,marginBottom:10,color:"#18233f"}}>How many replicates?</label>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0.9rem"}}>
+                <div><label style={{display:"block",fontSize:11,fontWeight:700,marginBottom:7,color:"#18233f"}}>Standard</label><select value={cfg.sr} onChange={function(e){u("sr",e.target.value);}} style={{width:"100%",padding:"10px 11px",borderRadius:12,border:"1px solid #d8dfeb",fontSize:14,color:"#1d1d1f",background:"#fff"}}><option value="1">Singlicate</option><option value="2">Duplicate</option><option value="3">Triplicate</option></select></div>
+                <div><label style={{display:"block",fontSize:11,fontWeight:700,marginBottom:7,color:"#18233f"}}>Samples</label><select value={cfg.xr} onChange={function(e){u("xr",e.target.value);}} style={{width:"100%",padding:"10px 11px",borderRadius:12,border:"1px solid #d8dfeb",fontSize:14,color:"#1d1d1f",background:"#fff"}}><option value="1">Singlicate</option><option value="2">Duplicate</option><option value="3">Triplicate</option></select></div>
+              </div>
             </div>}
           </div>
         </div>}
@@ -15537,7 +15540,7 @@ function App() {
           </div>
         </div>}
         {cfg.layout!=="autosampler" && <div style={{marginTop:"1.25rem",background:"linear-gradient(180deg,#fbfeff,#f4fbff)",border:"1px solid #e5edf7",borderRadius:20,padding:"1.2rem 1.25rem",boxShadow:"inset 0 1px 0 rgba(255,255,255,0.8)"}}>
-          <label style={{display:"block",fontSize:13,fontWeight:800,marginBottom:4,color:"#18233f"}}>Plate orientation</label>
+          <label style={{display:"block",fontSize:13,fontWeight:800,marginBottom:4,color:"#18233f"}}>How is your plate laid out?</label>
           <div style={{fontSize:12,color:"#6f7fa0",marginBottom:14}}>Pick the orientation that matches how you loaded the plate. The math is the same; only the wells map differently.</div>
           <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(280px, 1fr))",gap:14}}>
             {(function(){
