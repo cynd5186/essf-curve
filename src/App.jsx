@@ -1251,9 +1251,25 @@ function PageHeader(props){
   };
   var large = !!props.large;
   var logoH = large ? 96 : 38;
-  return <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:16,flexWrap:"wrap",padding:large?"18px 20px 18px 20px":"10px 16px 12px 16px",background:"#001B5E",borderBottom:"1px solid #0a2470",marginBottom:"1rem",borderRadius:"14px 14px 0 0"}}>
+  // Sticky for workspace (compact) header; static for setup screen (large mode).
+  var stickyStyle = large ? {} : {
+    position: "sticky",
+    top: 0,
+    zIndex: 100,
+  };
+  return <div style={Object.assign({display:"flex",alignItems:"center",justifyContent:"space-between",gap:16,flexWrap:"wrap",padding:large?"18px 20px 18px 20px":"10px 16px 12px 16px",background:"#001B5E",borderBottom:"1px solid #0a2470",marginBottom:large?"1rem":0,borderRadius:large?"14px 14px 0 0":0}, stickyStyle)}>
     <div style={{display:"flex",alignItems:"center",gap:large?16:12,flexShrink:0}}>
       <img src={ESSF_LOGO_B64} alt="eSSF Bench" style={{height:logoH,objectFit:"contain",display:"block"}} />
+      {props.workspaceLabel && <div style={{
+        fontSize: large?11:10,
+        color: "#5fc7e0",
+        letterSpacing: 1.5,
+        fontWeight: 700,
+        textTransform: "uppercase",
+        paddingLeft: large?12:8,
+        borderLeft: "1px solid rgba(255,255,255,0.18)",
+        whiteSpace: "nowrap",
+      }}>{props.workspaceLabel}</div>}
       <div onClick={props.onSecretTap} style={{fontSize:large?12:10,color:"#8aa8d6",fontFamily:"Georgia,serif",letterSpacing:1,paddingLeft:large?12:8,borderLeft:"1px solid rgba(255,255,255,0.18)",cursor:"default",userSelect:"none"}}>{APP_VERSION}</div>
     </div>
     <div style={{display:"flex",alignItems:"center",gap:14,flexWrap:"wrap"}}>
@@ -13900,7 +13916,7 @@ function ChooserScreen(props){
           <span style={{color: "#8e9bb5", fontSize: 10}}>·</span>
           <a href="#" style={{fontSize: 12, color: "#139cb6", textDecoration: "none"}}>eSSF board</a>
           <span style={{color: "#8e9bb5", fontSize: 10}}>·</span>
-          <a href="https://google.com" target="_blank" rel="noopener noreferrer" style={{fontSize: 12, color: "#139cb6", textDecoration: "none"}}>eSSF LIMS</a>
+          <a href="https://go.ncsu.edu/analytical-lims" target="_blank" rel="noopener noreferrer" style={{fontSize: 12, color: "#139cb6", textDecoration: "none"}}>eSSF LIMS</a>
         </div>
       </div>
 
@@ -15362,7 +15378,12 @@ function App() {
   if(!on) return (
     <div style={{padding:"1.25rem 16px 2.5rem",maxWidth:1320,margin:"0 auto",boxSizing:"border-box"}}>
       <div style={{background:"linear-gradient(180deg,#f4f9fd,#eef5fb)",border:"1px solid "+BORDER,borderRadius:20,marginBottom:"1rem",boxShadow:SHADOW,overflow:"hidden"}}>
-        <PageHeader instructor={instructor} setInstructor={setInstructor} onBack={function(){ setChosenView(null); }} large={true} />
+        <PageHeader instructor={instructor} setInstructor={setInstructor} onBack={function(){ setChosenView(null); }} large={true} workspaceLabel={
+          chosenView === "plate" ? "Plate assay" :
+          chosenView === "ms" ? "Mass spec" :
+          chosenView === "hplc" ? "HPLC" :
+          chosenView === "ddpcr" ? "ddPCR" : ""
+        } />
       </div>
       <div style={{background:"linear-gradient(180deg,#ffffff,#fbfdff)",borderRadius:24,border:"1px solid "+BORDER,padding:"1.5rem",boxShadow:"0 18px 44px rgba(11,42,111,0.08)",marginBottom:"1.25rem"}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,marginBottom:"1rem",flexWrap:"wrap"}}>
@@ -15859,11 +15880,16 @@ function App() {
   );
 
   return (
-      <div style={{padding:"1rem 16px",maxWidth:1320,margin:"0 auto",boxSizing:"border-box"}}>
+      <div style={{padding:"0",maxWidth:1320,margin:"0 auto",boxSizing:"border-box"}}>
 
-      <div style={{background:"linear-gradient(180deg,#f4f9fd,#eef5fb)",border:"1px solid "+BORDER,borderRadius:20,marginBottom:"1rem",boxShadow:SHADOW,overflow:"hidden"}}>
-        <PageHeader instructor={instructor} setInstructor={setInstructor} onReset={reset} onBack={function(){ setChosenView(null); }} onSecretTap={htc} />
-      </div>
+      <PageHeader instructor={instructor} setInstructor={setInstructor} onReset={reset} onBack={function(){ setChosenView(null); }} onSecretTap={htc} workspaceLabel={
+        chosenView === "plate" ? "Plate assay" :
+        chosenView === "ms" ? "Mass spec" :
+        chosenView === "hplc" ? "HPLC" :
+        chosenView === "ddpcr" ? "ddPCR" : ""
+      } />
+
+      <div style={{padding:"1rem 16px"}}>
       <div style={{display:"flex",gap:6,marginBottom:"1.25rem",background:"#eef3f8",borderRadius:14,padding:5,border:"1px solid #e2e9f2"}}>{TABS.map(function(l,i){return <button key={i} onClick={function(){
         setTab(i);
       }} onMouseEnter={function(e){ if (i!==tab) { e.currentTarget.style.background="#e3eaf3"; e.currentTarget.style.color=NAVY; }}} onMouseLeave={function(e){ if (i!==tab) { e.currentTarget.style.background="transparent"; e.currentTarget.style.color="#4a5568"; }}} style={{flex:1,padding:"9px 14px",fontSize:12,fontWeight:i===tab?700:600,cursor:"pointer",background:i===tab?"#fff":"transparent",color:i===tab?NAVY:"#4a5568",border:"none",borderRadius:10,boxShadow:i===tab?"0 4px 14px rgba(11,42,111,0.10)":"none",borderBottom:i===tab?"3px solid "+TEAL:"3px solid transparent",transition:"all 0.15s ease"}}>{l}</button>;})}
@@ -18176,6 +18202,7 @@ function App() {
       </div>)}
 
       {tab===5&&dbg&&res&&(<div><h3 style={{fontSize:16,fontWeight:800,color:"#a05a00"}}>Debug</h3>{res.map(function(pp,pi){return <div key={pi} style={{marginBottom:"2rem"}}><h4 style={{fontSize:13,fontWeight:700}}>Plate {pi+1} | Blank: {fm4(pp.bA)}</h4><details><summary style={{fontSize:12,cursor:"pointer",color:"#6e6e73"}}>Standard</summary><table style={{borderCollapse:"collapse",width:"100%",marginTop:6,fontSize:10,fontFamily:"monospace"}}><thead><tr>{["Row","Conc","Raw","Blank","Corr","Avg","SD","CV (%)"].map(function(h){return <th key={h} style={thS}>{h}</th>;})}</tr></thead><tbody>{(pp.dbS||[]).map(function(d,i){return <tr key={i}><td style={tdS}>{d.row}</td><td style={tdS}>{sig3(d.conc)}</td><td style={tdS}>{d.raw.map(function(v){return v.toFixed(3);}).join(", ")}</td><td style={tdS}>{fm4(d.blank)}</td><td style={tdS}>{d.cor.map(function(v){return v.toFixed(4);}).join(", ")}</td><td style={tdS}>{fm4(d.avg)}</td><td style={tdS}>{fm4(d.sd)}</td><td style={tdS}><CVB val={d.cv} /></td></tr>;})}</tbody></table></details>{pp.samps.map(function(s,si){return <details key={si} style={{marginBottom:6}}><summary style={{fontSize:12,cursor:"pointer",color:"#6e6e73"}}>{s.name}</summary><table style={{borderCollapse:"collapse",width:"100%",marginTop:6,fontSize:10,fontFamily:"monospace"}}><thead><tr>{["Dil","Raw","Blank","Corr","Avg","CV (%)","IR","Well","DilF","Smp"].map(function(h){return <th key={h} style={thS}>{h}</th>;})}</tr></thead><tbody>{(s.dbD||[]).map(function(d,i){return <tr key={i}><td style={tdS}>{d.di}</td><td style={tdS}>{d.raw.map(function(v){return v.toFixed(3);}).join(", ")}</td><td style={tdS}>{fm4(d.blank)}</td><td style={tdS}>{d.cor.map(function(v){return v.toFixed(4);}).join(", ")}</td><td style={tdS}>{fmtResponse(d.avgA)}</td><td style={tdS}><CVB val={d.cv} /></td><td style={tdS}>{d.ir?"Y":"N"}</td><td style={tdS}>{sig3(d.cW)}</td><td style={tdS}>{fm4(d.df)}</td><td style={tdS}>{sig3(d.cS)}</td></tr>;})}</tbody></table></details>;})}</div>;})}</div>)}
+      </div>
       </div>
   );
 }
