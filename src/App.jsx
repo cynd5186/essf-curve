@@ -1279,7 +1279,7 @@ function PageHeader(props){
       {SHOW_INSTRUCTOR_MODE && <ModeToggle instructor={props.instructor} setInstructor={props.setInstructor} />}
       {props.onBack && <button
         onClick={props.onBack}
-        title="Return to the chooser (your work is kept)"
+        title="Go back to the previous screen (your work is kept)"
         style={{
           background:"rgba(255,255,255,0.10)",
           border:"1px solid rgba(255,255,255,0.20)",
@@ -13934,7 +13934,7 @@ function ChooserScreen(props){
           <span style={{color: "#8e9bb5", fontSize: 10}}>·</span>
           <a href="#" style={{fontSize: 12, color: "#139cb6", textDecoration: "none"}}>eSSF board</a>
           <span style={{color: "#8e9bb5", fontSize: 10}}>·</span>
-          <a href="https://google.com" target="_blank" rel="noopener noreferrer" style={{fontSize: 12, color: "#139cb6", textDecoration: "none"}}>eSSF LIMS</a>
+          <a href="https://go.ncsu.edu/analytical-lims" target="_blank" rel="noopener noreferrer" style={{fontSize: 12, color: "#139cb6", textDecoration: "none"}}>eSSF LIMS</a>
         </div>
       </div>
 
@@ -15916,7 +15916,7 @@ function App() {
   return (
       <div style={{padding:"0",maxWidth:1320,margin:"0 auto",boxSizing:"border-box"}}>
 
-      <PageHeader instructor={instructor} setInstructor={setInstructor} onReset={reset} onBack={function(){ setChosenView(null); }} onSetup={function(){ setOn(false); setTab(0); }} onSecretTap={htc} workspaceLabel={
+      <PageHeader instructor={instructor} setInstructor={setInstructor} onReset={reset} onBack={function(){ setOn(false); setTab(0); }} onSecretTap={htc} workspaceLabel={
         chosenView === "plate" ? "Plate assay" :
         chosenView === "ms" ? "Mass spec" :
         chosenView === "hplc" ? "HPLC" :
