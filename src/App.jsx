@@ -13901,7 +13901,7 @@ function ChooserScreen(props){
           <span style={{color: "#8e9bb5", fontSize: 10}}>·</span>
           <a href="#" style={{fontSize: 12, color: "#139cb6", textDecoration: "none"}}>eSSF board</a>
           <span style={{color: "#8e9bb5", fontSize: 10}}>·</span>
-          <a href="http://go.ncsu.edu/analytical-lims" target="_blank" rel="noopener noreferrer" style={{fontSize: 12, color: "#139cb6", textDecoration: "none"}}>eSSF LIMS</a>
+          <a href="https://go.ncsu.edu/analytical-lims" target="_blank" rel="noopener noreferrer" style={{fontSize: 12, color: "#139cb6", textDecoration: "none"}}>eSSF LIMS</a>
         </div>
       </div>
 
