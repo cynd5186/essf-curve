@@ -8,7 +8,7 @@ import { LoginGate, HeaderUserBadge, useAuth } from "./auth.jsx";
 //  "Signed in as · sign out" badge in the page header. The auth.jsx
 //  and users.js files are unchanged — only this flag changes the routing.
 // ─────────────────────────────────────────────────────────────────────────
-var AUTH_DISABLED_FOR_TESTING = false;
+var AUTH_DISABLED_FOR_TESTING = true;
 
 // ─────────────────────────────────────────────────────────────────────────
 //  FEATURE FLAGS — visibility toggles for in-progress features
@@ -13689,7 +13689,9 @@ function ChooserScreen(props){
     };
   };
   function card(opts){
-    // opts: { stripeColor, iconBg, iconColor, iconText, name, desc, enabled, onClick, isHero }
+    // opts: { stripeColor, iconBg, iconColor, iconText, iconNode, name, desc, enabled, onClick, isHero }
+    // iconNode (preferred): a React element (e.g. inline SVG) rendered inside the icon circle.
+    // iconText (legacy): a string/emoji used when no iconNode is provided.
     var stripe = { borderTop: "2px solid " + opts.stripeColor };
     var base = Object.assign({}, cardBase, stripe);
     if (opts.isHero) {
@@ -13702,14 +13704,14 @@ function ChooserScreen(props){
       base.cursor = "pointer";
     }
     var ic = iconCircle(opts.iconBg);
-    if (opts.isHero) { ic.width = 40; ic.height = 40; ic.fontSize = 20; }
+    if (opts.isHero) { ic.width = 44; ic.height = 44; ic.fontSize = 20; }
 
     return <div
       onClick={opts.enabled ? opts.onClick : undefined}
       style={base}
     >
       <div style={ic}>
-        <span style={{color: opts.iconColor, fontWeight: 600, fontSize: opts.isHero ? 20 : 18, lineHeight: 1, fontFamily: "ui-sans-serif"}}>{opts.iconText}</span>
+        {opts.iconNode ? opts.iconNode : <span style={{color: opts.iconColor, fontWeight: 600, fontSize: opts.isHero ? 20 : 18, lineHeight: 1, fontFamily: "ui-sans-serif"}}>{opts.iconText}</span>}
       </div>
       <div style={{flex: 1, minWidth: 0}}>
         <p style={{fontSize: opts.isHero ? 15 : 14, fontWeight: 600, margin: 0, color: opts.enabled ? "#0b2a6f" : "#5a6984"}}>{opts.name}</p>
@@ -13794,24 +13796,71 @@ function ChooserScreen(props){
         <p style={{fontSize: 11, color: "#8e9bb5", margin: "0 0 10px", letterSpacing: 1.2}}>ASSAYS</p>
 
         {card({
-          stripeColor: "#185FA5",
+          stripeColor: "#139cb6",
           iconBg: "#E6F1FB",
-          iconColor: "#185FA5",
-          iconText: "📊",
-          name: "Plate assay",
-          desc: "Standard curves & unknowns",
+          iconColor: "#0b2a6f",
+          iconNode: (
+            <svg width="28" height="28" viewBox="0 0 28 28" aria-hidden="true">
+              <rect x="2" y="6" width="24" height="16" rx="1.5" fill="#fff" stroke="#0b2a6f" strokeWidth="0.8"/>
+              <g>
+                <circle cx="5" cy="9.5" r="1.1" fill="#0b2a6f"/><circle cx="8.2" cy="9.5" r="1.1" fill="#1c4496"/><circle cx="11.4" cy="9.5" r="1.1" fill="#3e6cb8"/><circle cx="14.6" cy="9.5" r="1.1" fill="#7099d4"/><circle cx="17.8" cy="9.5" r="1.1" fill="#a8c1e3"/><circle cx="21" cy="9.5" r="1.1" fill="#d7e7fb"/>
+                <circle cx="5" cy="13" r="1.1" fill="#0b2a6f"/><circle cx="8.2" cy="13" r="1.1" fill="#1c4496"/><circle cx="11.4" cy="13" r="1.1" fill="#3e6cb8"/><circle cx="14.6" cy="13" r="1.1" fill="#7099d4"/><circle cx="17.8" cy="13" r="1.1" fill="#a8c1e3"/><circle cx="21" cy="13" r="1.1" fill="#d7e7fb"/>
+                <circle cx="5" cy="16.5" r="1.1" fill="#0b2a6f"/><circle cx="8.2" cy="16.5" r="1.1" fill="#1c4496"/><circle cx="11.4" cy="16.5" r="1.1" fill="#3e6cb8"/><circle cx="14.6" cy="16.5" r="1.1" fill="#7099d4"/><circle cx="17.8" cy="16.5" r="1.1" fill="#a8c1e3"/><circle cx="21" cy="16.5" r="1.1" fill="#d7e7fb"/>
+                <circle cx="5" cy="20" r="1.1" fill="#0b2a6f"/><circle cx="8.2" cy="20" r="1.1" fill="#1c4496"/><circle cx="11.4" cy="20" r="1.1" fill="#3e6cb8"/><circle cx="14.6" cy="20" r="1.1" fill="#7099d4"/><circle cx="17.8" cy="20" r="1.1" fill="#a8c1e3"/><circle cx="21" cy="20" r="1.1" fill="#d7e7fb"/>
+              </g>
+            </svg>
+          ),
+          name: "Running a plate",
+          desc: "BCA · Bradford · 660 · direct fluor · ELISA",
           enabled: FEATURES.plateAssay,
           onClick: function(){ onChoose("plate"); },
           isHero: true,
         })}
 
         {card({
+          stripeColor: "#D3D1C7",
+          iconBg: "#F1EFE8",
+          iconColor: "#888780",
+          iconNode: (
+            <svg width="28" height="28" viewBox="0 0 28 28" aria-hidden="true">
+              <line x1="3" y1="25" x2="25" y2="25" stroke="#888780" strokeWidth="0.5"/>
+              <line x1="3" y1="3" x2="3" y2="25" stroke="#888780" strokeWidth="0.5"/>
+              <line x1="3" y1="13" x2="25" y2="13" stroke="#888780" strokeWidth="0.5" strokeDasharray="1,1" opacity="0.5"/>
+              <g fill="#888780">
+                <circle cx="6" cy="6.5" r="0.9"/><circle cx="8.5" cy="5.5" r="0.9"/><circle cx="10" cy="8" r="0.9"/><circle cx="12" cy="6" r="0.9"/><circle cx="13.5" cy="8.5" r="0.9"/><circle cx="15.5" cy="7" r="0.9"/><circle cx="17" cy="5.5" r="0.9"/><circle cx="19" cy="7" r="0.9"/><circle cx="20.5" cy="6" r="0.9"/><circle cx="22.5" cy="8" r="0.9"/><circle cx="9" cy="9.5" r="0.9"/><circle cx="14" cy="10" r="0.9"/><circle cx="18" cy="9.5" r="0.9"/><circle cx="21.5" cy="10" r="0.9"/>
+                <circle cx="6" cy="20" r="0.9" opacity="0.55"/><circle cx="8" cy="19" r="0.9" opacity="0.55"/><circle cx="10" cy="21" r="0.9" opacity="0.55"/><circle cx="12.5" cy="19.5" r="0.9" opacity="0.55"/><circle cx="14" cy="21" r="0.9" opacity="0.55"/><circle cx="16" cy="19.5" r="0.9" opacity="0.55"/><circle cx="18" cy="21" r="0.9" opacity="0.55"/><circle cx="20" cy="19.5" r="0.9" opacity="0.55"/><circle cx="22" cy="21" r="0.9" opacity="0.55"/><circle cx="8" cy="22.5" r="0.9" opacity="0.55"/><circle cx="11" cy="22.5" r="0.9" opacity="0.55"/><circle cx="15" cy="22.5" r="0.9" opacity="0.55"/><circle cx="19" cy="22.5" r="0.9" opacity="0.55"/><circle cx="22.5" cy="22.5" r="0.9" opacity="0.55"/>
+              </g>
+            </svg>
+          ),
+          name: "Running ddPCR",
+          desc: "Droplet digital PCR",
+          enabled: false,
+          onClick: function(){ onChoose("ddpcr"); },
+        })}
+
+        {card({
           stripeColor: FEATURES.msQuant ? "#0F6E56" : "#D3D1C7",
           iconBg: FEATURES.msQuant ? "#E1F5EE" : "#F1EFE8",
           iconColor: FEATURES.msQuant ? "#0F6E56" : "#888780",
-          iconText: "⚗",
-          name: "Mass spec quant",
-          desc: FEATURES.msQuant ? "Hi3 absolute quantitation" : "Not yet available",
+          iconNode: (
+            <svg width="28" height="28" viewBox="0 0 28 28" aria-hidden="true">
+              <line x1="2" y1="23" x2="26" y2="23" stroke="#888780" strokeWidth="0.6"/>
+              <g stroke="#888780" strokeWidth="1.4" strokeLinecap="round">
+                <line x1="3" y1="23" x2="3" y2="19"/>
+                <line x1="5" y1="23" x2="5" y2="16"/>
+                <line x1="7.5" y1="23" x2="7.5" y2="11"/>
+                <line x1="10.5" y1="23" x2="10.5" y2="6"/>
+                <line x1="13.5" y1="23" x2="13.5" y2="5"/>
+                <line x1="16.5" y1="23" x2="16.5" y2="8"/>
+                <line x1="19" y1="23" x2="19" y2="13"/>
+                <line x1="21" y1="23" x2="21" y2="17"/>
+                <line x1="23" y1="23" x2="23" y2="20"/>
+                <line x1="25" y1="23" x2="25" y2="21.5"/>
+              </g>
+            </svg>
+          ),
+          name: "Running mass spec",
+          desc: FEATURES.msQuant ? "Intact mass · peptide map · LC-MS" : "Not yet available",
           enabled: FEATURES.msQuant,
           onClick: function(){ onChoose("ms"); },
         })}
@@ -13820,9 +13869,14 @@ function ChooserScreen(props){
           stripeColor: FEATURES.hplcQuant ? "#854F0B" : "#D3D1C7",
           iconBg: FEATURES.hplcQuant ? "#FAEEDA" : "#F1EFE8",
           iconColor: FEATURES.hplcQuant ? "#854F0B" : "#888780",
-          iconText: "📈",
-          name: "HPLC quant",
-          desc: FEATURES.hplcQuant ? "Peak integration & quantitation" : "Not yet available",
+          iconNode: (
+            <svg width="28" height="28" viewBox="0 0 28 28" aria-hidden="true">
+              <line x1="2" y1="23" x2="26" y2="23" stroke="#888780" strokeWidth="0.6"/>
+              <path d="M 2 23 L 5 22.8 L 6 22.5 L 6.5 17 L 7 22.5 L 7.5 22.8 L 10 22.6 L 11 22 L 11.5 9 L 12 21.5 L 12.5 22.6 L 14 22.5 L 15 21.5 L 15.5 14 L 16 21 L 16.5 22.5 L 18 22.4 L 19 21 L 19.5 12 L 20 21 L 20.5 22.4 L 22 22.3 L 23 21.8 L 23.5 19 L 24 22 L 24.5 22.4 L 26 22.4" stroke="#888780" strokeWidth="1.2" fill="none" strokeLinejoin="round" strokeLinecap="round"/>
+            </svg>
+          ),
+          name: "Running HPLC",
+          desc: FEATURES.hplcQuant ? "Peak-area quant · column performance" : "Not yet available",
           enabled: FEATURES.hplcQuant,
           onClick: function(){ onChoose("hplc"); },
         })}
@@ -13847,7 +13901,7 @@ function ChooserScreen(props){
           <span style={{color: "#8e9bb5", fontSize: 10}}>·</span>
           <a href="#" style={{fontSize: 12, color: "#139cb6", textDecoration: "none"}}>eSSF board</a>
           <span style={{color: "#8e9bb5", fontSize: 10}}>·</span>
-          <a href="#" style={{fontSize: 12, color: "#139cb6", textDecoration: "none"}}>eSSF-LIMS</a>
+          <a href="go.ncsu.edu/analytical-lims" target="_blank" rel="noopener noreferrer" style={{fontSize: 12, color: "#139cb6", textDecoration: "none"}}>eSSF LIMS</a>
         </div>
       </div>
 
@@ -15292,7 +15346,15 @@ function App() {
   // what they're working on. Once they pick a tile, set chosenView and
   // proceed to the existing routing (setup screen → workspace for plate).
   if (chosenView === null) {
-    return <ChooserScreen onChoose={function(view){ setChosenView(view); }} />;
+    return <ChooserScreen onChoose={function(view){
+      // Ensure cfg.layout matches the chosen workflow. Today only "plate" is
+      // reachable, but this guard prevents the user from landing on a setup
+      // screen that's stuck in autosampler mode from earlier in the session.
+      if (view === "plate" && cfg.layout === "autosampler") {
+        u("layout", "classical");
+      }
+      setChosenView(view);
+    }} />;
   }
   // Note: for 2026-06-07 only "plate" reaches this point (other tiles are
   // gated by FEATURES flags as grayed-out). When other tiles are unblocked,
@@ -15301,50 +15363,19 @@ function App() {
   if(!on) return (
     <div style={{padding:"1.25rem 16px 2.5rem",maxWidth:1320,margin:"0 auto",boxSizing:"border-box"}}>
       <div style={{background:"linear-gradient(180deg,#f4f9fd,#eef5fb)",border:"1px solid "+BORDER,borderRadius:20,marginBottom:"1rem",boxShadow:SHADOW,overflow:"hidden"}}>
-        <PageHeader instructor={instructor} setInstructor={setInstructor} large={true} />
+        <PageHeader instructor={instructor} setInstructor={setInstructor} onBack={function(){ setChosenView(null); }} large={true} />
       </div>
       <div style={{background:"linear-gradient(180deg,#ffffff,#fbfdff)",borderRadius:24,border:"1px solid "+BORDER,padding:"1.5rem",boxShadow:"0 18px 44px rgba(11,42,111,0.08)",marginBottom:"1.25rem"}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,marginBottom:"1rem",flexWrap:"wrap"}}>
           <div>
             <div style={{fontSize:21,fontWeight:800,color:"#18233f",marginBottom:5}}>Assay setup</div>
-            <div style={{fontSize:13,color:"#6f7fa0"}}>{cfg.layout==="autosampler"?"Vials and injections — each row in your data is one injection.":"Pick your format, plate count, and replicate layout."}</div>
+            <div style={{fontSize:13,color:"#6f7fa0"}}>{cfg.layout==="autosampler"?"Vials and injections — each row in your data is one injection.":"Configure your plate count and replicate layout."}</div>
           </div>
         </div>
-        {/* ── Step 1: Assay mode toggle ──
-            Top-level Plate vs Vials picker. Drives everything else on the page. Switching modes
-            also nudges cfg.fm to a sensible default (loglog for vials, linear for plates) so the
-            user doesn't get stuck with a stale fit choice from the other mode.
-        */}
-        <div style={{background:"linear-gradient(180deg,#fbfeff,#f4fbff)",border:"1px solid #e5edf7",borderRadius:20,padding:"1.2rem 1.25rem",boxShadow:"inset 0 1px 0 rgba(255,255,255,0.8)",marginBottom:"1rem"}}>
-          <label style={{display:"block",fontSize:13,fontWeight:800,marginBottom:10,color:"#18233f"}}>What are you doing today?</label>
-          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(220px, 1fr))",gap:12}}>
-            {[
-              {id:"plate",   title:"Plate assay",  desc:"96-well plate, microplate reader. Classical or transposed orientation, multi-plate support.", isSel: cfg.layout!=="autosampler", color:TEAL},
-              {id:"vials",   title:"Vials / autosampler",  desc:"LC-MS, intact mass quant, or LC peak-area quant. Each row in your data is one injection.", isSel: cfg.layout==="autosampler", color:TEAL},
-              (SHOW_TOOLS_TAB ? {id:"tools",   title:"Tools (no data needed)", desc:"Plan a validation experiment, calculate spike volumes, design a dilution series, or convert units — without setting up an assay.", isSel:false, color:"#6337b9"} : null)
-            ].filter(function(x){ return x !== null; }).map(function(opt){
-              return <button key={opt.id} onClick={function(){
-                if (opt.id === "vials") {
-                  u("layout","autosampler");
-                  if (cfg.fm !== "linear" && cfg.fm !== "loglog" && cfg.fm !== "auto" && cfg.fm !== "4pl" && cfg.fm !== "5pl") u("fm","linear");
-                  else if (cfg.fm === "loglog" || cfg.fm === "auto") u("fm","linear");
-                } else if (opt.id === "tools") {
-                  // Skip assay setup. Jump to Tools tab in planning mode.
-                  setOn(true); setTab(4); setPlanningMode(true);
-                } else {
-                  if (cfg.layout === "autosampler") u("layout","classical");
-                  if (cfg.fm === "loglog" || cfg.fm === "auto") u("fm", cfg.at === "elisa" ? "4pl" : "linear");
-                }
-              }} style={{textAlign:"left",cursor:"pointer",border:"2px solid "+(opt.isSel?opt.color:"#d8dfeb"),background:opt.isSel?(opt.color===TEAL?"#eefcfd":"#f5f0ff"):"#fff",borderRadius:14,padding:"14px 16px",boxShadow:opt.isSel?"0 8px 20px rgba(19,156,182,0.10)":"none",transition:"all 0.15s"}}>
-                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
-                  <span style={{fontSize:14,fontWeight:800,color:opt.isSel?NAVY:"#18233f"}}>{opt.title}</span>
-                  {opt.isSel && <span style={{fontSize:10,color:opt.color,fontWeight:700,padding:"2px 7px",background:"#fff",borderRadius:10,border:"1px solid "+opt.color}}>SELECTED</span>}
-                </div>
-                <div style={{fontSize:12,color:"#5a6984",lineHeight:1.5}}>{opt.desc}</div>
-              </button>;
-            })}
-          </div>
-        </div>
+        {/* Format picker removed — analyst arrives here from the chooser with
+            "plate" already selected. To run autosampler/MS work, pick that
+            workflow from the chooser instead. Back button in header returns
+            to chooser if they got here by mistake. */}
         {cfg.layout!=="autosampler" && <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(320px, 1fr))",gap:"1rem"}}>
           <div style={{background:"linear-gradient(180deg,#fbfeff,#f4fbff)",border:"1px solid #e5edf7",borderRadius:20,padding:"1.2rem 1.25rem",boxShadow:"inset 0 1px 0 rgba(255,255,255,0.8)"}}>
             <label style={{display:"block",fontSize:13,fontWeight:800,marginBottom:12,color:"#18233f"}}>How many plates?</label>
