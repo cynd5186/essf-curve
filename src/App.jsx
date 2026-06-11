@@ -1250,14 +1250,15 @@ function PageHeader(props){
     }
   };
   var large = !!props.large;
-  var logoH = large ? 96 : 38;
-  // Sticky for workspace (compact) header; static for setup screen (large mode).
-  var stickyStyle = large ? {} : {
+  var logoH = 48;
+  // Sticky on BOTH setup and workspace. Now that overflow:hidden has been
+  // removed from the parents, sticky can actually escape and stick to top.
+  var stickyStyle = {
     position: "sticky",
     top: 0,
     zIndex: 100,
   };
-  return <div style={Object.assign({display:"flex",alignItems:"center",justifyContent:"space-between",gap:16,flexWrap:"wrap",padding:large?"18px 20px 18px 20px":"10px 16px 12px 16px",background:"#001B5E",borderBottom:"1px solid #0a2470",marginBottom:large?"1rem":0,borderRadius:large?"14px 14px 0 0":0}, stickyStyle)}>
+  return <div style={Object.assign({display:"flex",alignItems:"center",justifyContent:"space-between",gap:16,flexWrap:"wrap",padding:large?"14px 20px 14px 20px":"10px 16px 12px 16px",background:"#001B5E",borderBottom:"1px solid #0a2470",marginBottom:0,borderRadius:0}, stickyStyle)}>
     <div style={{display:"flex",alignItems:"center",gap:large?16:12,flexShrink:0}}>
       <img src={ESSF_LOGO_B64} alt="eSSF Bench" style={{height:logoH,objectFit:"contain",display:"block"}} />
       {props.workspaceLabel && <div style={{
@@ -1293,6 +1294,23 @@ function PageHeader(props){
         onMouseEnter={function(e){e.currentTarget.style.background="rgba(255,255,255,0.18)";}}
         onMouseLeave={function(e){e.currentTarget.style.background="rgba(255,255,255,0.10)";}}
       >← Back</button>}
+      {props.onSetup && <button
+        onClick={props.onSetup}
+        title="Edit your setup — your data is kept"
+        style={{
+          background:"rgba(95,199,224,0.18)",
+          border:"1px solid rgba(95,199,224,0.40)",
+          color:"#bce8f3",
+          padding:"7px 14px",
+          borderRadius:8,
+          fontSize:12,
+          fontWeight:600,
+          cursor:"pointer",
+          letterSpacing:0.3,
+        }}
+        onMouseEnter={function(e){e.currentTarget.style.background="rgba(95,199,224,0.28)";e.currentTarget.style.color="#dbf2f8";}}
+        onMouseLeave={function(e){e.currentTarget.style.background="rgba(95,199,224,0.18)";e.currentTarget.style.color="#bce8f3";}}
+      >⚙ Setup</button>}
       {props.onReset && <button
         onClick={doReset}
         title="Clear data and return to setup"
@@ -13916,7 +13934,7 @@ function ChooserScreen(props){
           <span style={{color: "#8e9bb5", fontSize: 10}}>·</span>
           <a href="#" style={{fontSize: 12, color: "#139cb6", textDecoration: "none"}}>eSSF board</a>
           <span style={{color: "#8e9bb5", fontSize: 10}}>·</span>
-          <a href="https://go.ncsu.edu/analytical-lims" target="_blank" rel="noopener noreferrer" style={{fontSize: 12, color: "#139cb6", textDecoration: "none"}}>eSSF LIMS</a>
+          <a href="https://google.com" target="_blank" rel="noopener noreferrer" style={{fontSize: 12, color: "#139cb6", textDecoration: "none"}}>eSSF LIMS</a>
         </div>
       </div>
 
@@ -13929,6 +13947,19 @@ function ChooserScreen(props){
 function App() {
   // Pulls analyst's first name from auth session (falls back to "you")
   var displayName = useDisplayName();
+
+  // Disable iOS rubber-band overscroll so the sticky header feels rock-solid.
+  // Injects a tiny global style block on mount; removes on unmount.
+  useEffect(function(){
+    var styleEl = document.createElement('style');
+    styleEl.id = 'essf-bench-no-bounce';
+    styleEl.textContent = 'html, body { overscroll-behavior: none; }';
+    document.head.appendChild(styleEl);
+    return function(){
+      var existing = document.getElementById('essf-bench-no-bounce');
+      if (existing) existing.remove();
+    };
+  }, []);
 
   // Chooser screen state — null means show the chooser; otherwise the chosen
   // workspace ("plate" | "ms" | "hplc" | "bench"). For 2026-06-07 analyst test
@@ -15376,15 +15407,14 @@ function App() {
   // add their respective branches here.
 
   if(!on) return (
-    <div style={{padding:"1.25rem 16px 2.5rem",maxWidth:1320,margin:"0 auto",boxSizing:"border-box"}}>
-      <div style={{background:"linear-gradient(180deg,#f4f9fd,#eef5fb)",border:"1px solid "+BORDER,borderRadius:20,marginBottom:"1rem",boxShadow:SHADOW,overflow:"hidden"}}>
-        <PageHeader instructor={instructor} setInstructor={setInstructor} onBack={function(){ setChosenView(null); }} large={true} workspaceLabel={
-          chosenView === "plate" ? "Plate assay" :
-          chosenView === "ms" ? "Mass spec" :
-          chosenView === "hplc" ? "HPLC" :
-          chosenView === "ddpcr" ? "ddPCR" : ""
-        } />
-      </div>
+    <div style={{padding:"0 0 2.5rem",maxWidth:1320,margin:"0 auto",boxSizing:"border-box"}}>
+      <PageHeader instructor={instructor} setInstructor={setInstructor} onBack={function(){ setChosenView(null); }} large={true} workspaceLabel={
+        chosenView === "plate" ? "Plate assay" :
+        chosenView === "ms" ? "Mass spec" :
+        chosenView === "hplc" ? "HPLC" :
+        chosenView === "ddpcr" ? "ddPCR" : ""
+      } />
+      <div style={{padding:"1.25rem 16px 0"}}>
       <div style={{background:"linear-gradient(180deg,#ffffff,#fbfdff)",borderRadius:24,border:"1px solid "+BORDER,padding:"1.5rem",boxShadow:"0 18px 44px rgba(11,42,111,0.08)",marginBottom:"1.25rem"}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,marginBottom:"1rem",flexWrap:"wrap"}}>
           <div>
@@ -15879,13 +15909,14 @@ function App() {
           <span style={{fontSize:11,color:"#6f7fa0"}}>The app will wait here until setup is confirmed.</span>
         </div>
       </div>
+      </div>
     </div>
   );
 
   return (
       <div style={{padding:"0",maxWidth:1320,margin:"0 auto",boxSizing:"border-box"}}>
 
-      <PageHeader instructor={instructor} setInstructor={setInstructor} onReset={reset} onBack={function(){ setChosenView(null); }} onSecretTap={htc} workspaceLabel={
+      <PageHeader instructor={instructor} setInstructor={setInstructor} onReset={reset} onBack={function(){ setChosenView(null); }} onSetup={function(){ setOn(false); setTab(0); }} onSecretTap={htc} workspaceLabel={
         chosenView === "plate" ? "Plate assay" :
         chosenView === "ms" ? "Mass spec" :
         chosenView === "hplc" ? "HPLC" :
@@ -17440,6 +17471,13 @@ function App() {
       {tab===2&&res&&(function(){
         var qc=runQC();
         return (<div>
+        {/* Export buttons at top — primary action; she can grab her data immediately without scrolling */}
+        <div style={{display:"flex",gap:10,flexWrap:"wrap",marginBottom:"1.25rem"}}>
+          <button onClick={doExport} style={{background:"linear-gradient(135deg,#1b7f6a,#3478F6)",color:"#fff",border:"none",padding:"12px 32px",borderRadius:12,fontWeight:700,fontSize:14,cursor:"pointer"}}>Export CSV (full)</button>
+          <button onClick={doDetailedExport} title="Excel-shaped: one block per sample with all dilutions, slope/intercept/R²" style={{background:"#fff",color:NAVY,border:"1px solid "+BORDER,padding:"12px 28px",borderRadius:12,fontWeight:700,fontSize:14,cursor:"pointer"}}>Export CSV (detailed)</button>
+          <button onClick={doSimpleExport} title="Bare-bones: sample name, concentration, CV" style={{background:"#fff",color:NAVY,border:"1px solid "+BORDER,padding:"12px 28px",borderRadius:12,fontWeight:700,fontSize:14,cursor:"pointer"}}>Export CSV (simple)</button>
+        </div>
+
         {/* Run-level QC banner (if spike recovery was performed). Detailed validation moved to Method Review tab. */}
         {qc && <div style={{marginBottom:"1.25rem",padding:"16px 18px",borderRadius:14,background:qc.status==="pass"?"linear-gradient(180deg,#e8f5ea,#d6eedf)":qc.status==="fail"?"linear-gradient(180deg,#ffeaed,#fcdce0)":"linear-gradient(180deg,#fff6e8,#fbe9cd)",border:"1px solid "+(qc.status==="pass"?"#8fc4a1":qc.status==="fail"?"#d98a8f":"#d4a76a")}}>
           <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
@@ -17669,11 +17707,6 @@ function App() {
           </span></span>
         </div>
 
-        <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
-          <button onClick={doExport} style={{background:"linear-gradient(135deg,#1b7f6a,#3478F6)",color:"#fff",border:"none",padding:"12px 32px",borderRadius:12,fontWeight:700,fontSize:14,cursor:"pointer"}}>Export CSV (full)</button>
-          <button onClick={doDetailedExport} title="Excel-shaped: one block per sample with all dilutions, slope/intercept/R²" style={{background:"#fff",color:NAVY,border:"1px solid "+BORDER,padding:"12px 28px",borderRadius:12,fontWeight:700,fontSize:14,cursor:"pointer"}}>Export CSV (detailed)</button>
-          <button onClick={doSimpleExport} title="Bare-bones: sample name, concentration, CV" style={{background:"#fff",color:NAVY,border:"1px solid "+BORDER,padding:"12px 28px",borderRadius:12,fontWeight:700,fontSize:14,cursor:"pointer"}}>Export CSV (simple)</button>
-        </div>
       </div>);
       })()}
       {tab===2&&!res&&<div style={{padding:"3rem",textAlign:"center",color:"#aeaeb2"}}>Run analysis first.</div>}
