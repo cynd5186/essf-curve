@@ -233,7 +233,7 @@ function LandingScreen({ onSignIn, logoSrc }) {
             lineHeight: 1.6,
           }}
         >
-          A unified browser-based workbench for ICH M10 validation, plate-reader analysis, and analytical method development.
+          A unified browser based workbench for ICH M10 validation, plate-reader analysis, and analytical method development. Created for BTEC-Analytical.
         </p>
       </div>
 
@@ -294,7 +294,7 @@ function LandingScreen({ onSignIn, logoSrc }) {
           letterSpacing: 0.5,
         }}
       >
-        Designed and developed by [Your Name] · &copy; {new Date().getFullYear()} · All rights reserved
+        Designed and developed by Cyndell Gracieux-Singleton · &copy; {new Date().getFullYear()} · All rights reserved
       </div>
     </div>
   );
@@ -406,7 +406,6 @@ function LoginScreen({ onAuth, onCancel }) {
               onChange={(e) => setEmail(e.target.value)}
               required
               autoFocus
-              placeholder="stephanie"
               style={inputStyle}
             />
           </div>
