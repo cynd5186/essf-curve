@@ -38,7 +38,7 @@ export const USERS = [
   {
     email: "mcgracie@ncsu.edu",
     hash: "8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918",
-    label: "Lab Lead",
+    label: "Cyndell Gracieux-Singleton",
     role: "admin",
   },
   {
