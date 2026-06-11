@@ -36,26 +36,26 @@ export const SESSION_MAX_AGE_DAYS = 60;
 
 export const USERS = [
   {
-    email: "mcgracie@ncsu.edu",
+    email: "mcgracie",
     hash: "8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918",
     label: "Cyndell Gracieux-Singleton",
     role: "admin",
   },
   {
-    email: "sljohns8@ncsu.edu",
+    email: "sljohns8",
     hash: "26077d289339a390726bcd297d9a9e2cfcbfe5a950e240a9bfcebe3f61543ff6",
     label: "Stephanie Johnson",
     role: "admin",
   },
   {
-    email: "gkbuhrma@ncsu.edu",
+    email: "gkbuhrma",
     hash: "26077d289339a390726bcd297d9a9e2cfcbfe5a950e240a9bfcebe3f61543ff6",
     label: "Greg Buhrman",
     role: "member",
   },
 
  {
-    email: "rrbarton@ncsu.edu",
+    email: "rrbarton",
     hash: "Ryan Barton",
     label: "Guest",
     role: "guest",

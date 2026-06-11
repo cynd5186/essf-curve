@@ -11,7 +11,7 @@
 //
 //  Flow:
 //    1. Branded landing page (logo, tagline, sign-in button)
-//    2. Click "Sign in" → login form (email + password)
+//    2. Click "Sign in" → login form (username + password)
 //    3. Submit credentials → check against users.js
 //       - admin role: proceed into the app
 //       - member role: shown "Pending access" screen; cannot proceed
@@ -46,13 +46,22 @@ async function sha256(text) {
     .join("");
 }
 
-function findUser(email) {
-  const lower = (email || "").trim().toLowerCase();
-  return USERS.find((u) => u.email.toLowerCase() === lower) || null;
+// Login uses username only (e.g. "stephanie"). The user's full email is still
+// stored in users.js as email: "stephanie@ncsu.edu" for any future email
+// features, but during login we only compare the part before the @.
+// If someone types their full email by habit, we strip the @... part so it
+// still works.
+function findUser(usernameInput) {
+  const raw = (usernameInput || "").trim().toLowerCase();
+  const username = raw.split("@")[0]; // strip @ncsu.edu if they typed it
+  return USERS.find((u) => {
+    const userUsername = (u.email || "").toLowerCase().split("@")[0];
+    return userUsername === username;
+  }) || null;
 }
 
-async function verifyCredentials(email, password) {
-  const user = findUser(email);
+async function verifyCredentials(usernameInput, password) {
+  const user = findUser(usernameInput);
   if (!user) return null;
   const inputHash = await sha256(password);
   if (inputHash !== user.hash) return null;
@@ -307,7 +316,7 @@ function LoginScreen({ onAuth, onCancel }) {
       const user = await verifyCredentials(email, password);
       await new Promise((r) => setTimeout(r, 350)); // mask timing differences
       if (!user) {
-        setError("Email or password not recognized. Please check both and try again.");
+        setError("Username or password not recognized. Please check both and try again.");
         setBusy(false);
         return;
       }
@@ -388,15 +397,16 @@ function LoginScreen({ onAuth, onCancel }) {
 
         <form onSubmit={handleSubmit}>
           <div style={{ marginBottom: 14 }}>
-            <label htmlFor="email" style={labelStyle}>Email</label>
+            <label htmlFor="email" style={labelStyle}>Username</label>
             <input
               id="email"
-              type="email"
+              type="text"
               autoComplete="username"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               required
               autoFocus
+              placeholder="e.g. stephanie"
               style={inputStyle}
             />
           </div>
