@@ -406,7 +406,7 @@ function LoginScreen({ onAuth, onCancel }) {
               onChange={(e) => setEmail(e.target.value)}
               required
               autoFocus
-              placeholder="e.g. stephanie"
+              placeholder="stephanie"
               style={inputStyle}
             />
           </div>
@@ -572,11 +572,19 @@ function PendingAccessScreen({ label, onBack }) {
 //     <HeaderUserBadge />
 //   </div>
 
-export function HeaderUserBadge({ compact = false }) {
+export function HeaderUserBadge({ compact = false, darkMode = false }) {
   const { session, logout } = useAuth();
   const [confirming, setConfirming] = useState(false);
 
   if (!session) return null;
+
+  // Color tokens vary by surface. On a dark navy header we need light text
+  // so the badge is readable; on a light surface we use the brand navy.
+  const labelColor = darkMode ? "#b8c7df" : SLATE;
+  const nameColor = darkMode ? "#ffffff" : NAVY;
+  const whisperColor = darkMode ? "#8aa8d6" : WHISPER;
+  const signoutColor = darkMode ? "#ff9b94" : TEAL;
+  const rustColor = darkMode ? "#ff9b94" : RUST;
 
   return (
     <div
@@ -586,23 +594,23 @@ export function HeaderUserBadge({ compact = false }) {
         gap: 8,
         fontFamily: "system-ui, -apple-system, sans-serif",
         fontSize: compact ? 10 : 11,
-        color: SLATE,
+        color: labelColor,
         whiteSpace: "nowrap",
       }}
     >
-      <span style={{ color: WHISPER }}>Signed in as</span>
-      <span style={{ color: NAVY, fontWeight: 700 }}>
+      <span style={{ color: labelColor }}>Signed in as</span>
+      <span style={{ color: nameColor, fontWeight: 700 }}>
         {session.label || session.email}
       </span>
-      <span style={{ color: WHISPER }}>·</span>
+      <span style={{ color: whisperColor }}>·</span>
       {confirming ? (
         <>
-          <span style={{ color: RUST, fontWeight: 600 }}>Sign out?</span>
-          <button onClick={logout} style={linkBtn(RUST)}>yes</button>
-          <button onClick={() => setConfirming(false)} style={linkBtn(WHISPER)}>no</button>
+          <span style={{ color: rustColor, fontWeight: 600 }}>Sign out?</span>
+          <button onClick={logout} style={linkBtn(rustColor)}>yes</button>
+          <button onClick={() => setConfirming(false)} style={linkBtn(whisperColor)}>no</button>
         </>
       ) : (
-        <button onClick={() => setConfirming(true)} style={linkBtn(TEAL)}>
+        <button onClick={() => setConfirming(true)} style={linkBtn(signoutColor)}>
           sign out
         </button>
       )}
