@@ -13971,29 +13971,74 @@ function App() {
   var _s=useState(false),on=_s[0],setOn=_s[1];
   var _t=useState(0),tab=_t[0],setTab=_t[1];
 
+  // Fix: when the analyst clicks Analyze (or any tab change), the page lands
+  // mid-scroll instead of at the top. Scroll to top on every tab change.
+  useEffect(function(){
+    try { window.scrollTo({ top: 0, behavior: "instant" }); }
+    catch (e) { window.scrollTo(0, 0); }
+  }, [tab]);
+
   // ============================================================
   // LIMS REPORT state — narrative fields the analyst types into.
   // Auto-fields (Data QC, Results date, Standard Curve, SSS) are
   // computed from cfg/res at render time, NOT stored here.
   // Persisted to localStorage so navigating away doesn't lose work.
   // ============================================================
-  var LIMS_STORAGE_KEY = "essf-bench-lims-report-v1";
+  var LIMS_STORAGE_KEY = "essf-bench-methods-v2";   // bumped from v1 — new schema
+  var LIMS_REMEMBER_KEY = "essf-bench-methods-remembered-v1";
+
+  // Default slot structure — one set of values per field that uses madlibs.
+  var defaultSlots = function(){
+    return {
+      sampleReceival: {
+        receivedDate: "",
+        storageTemp: "4 ± 2 °C",
+        processedDate: "",
+        labelMatch: "matched",     // or "did not match"
+        labelResolution: "",       // optional clarifying clause
+      },
+      protocolUsed: {
+        protocol: "",              // populated via auto-detect or user override
+        requester: "submitter",
+      },
+      samplePrep: {
+        tempLabel: "room temperature (22 ± 2 °C)",
+        standardName: "",
+        standardConc: "",
+        preparedBy: "",            // "CGS on 04-Apr-2026" style
+        diluent: "",
+        dilutionScheme: "serially diluted 1:2 through row H",
+        pipette: "8-channel multichannel pipette",
+        replicates: "technical duplicate",
+        detection: "",             // protocol-cascaded
+      },
+      sssDescription: { description: "" },
+      standardCurve: {
+        fitType: "linear",
+        levels: "",
+        range: "",
+        acceptance: "R² ≥ 0.99",
+      },
+      notes: { content: "" },
+    };
+  };
+
   var _limsInit = function(){
     try {
       var raw = localStorage.getItem(LIMS_STORAGE_KEY);
-      if (raw) return JSON.parse(raw);
+      if (raw) {
+        var parsed = JSON.parse(raw);
+        // If new schema (has slots), use directly
+        if (parsed && parsed.slots) return parsed;
+      }
     } catch (e) {}
     return {
-      sampleReceival: "",
-      protocolUsed: "",       // user-confirmed protocol (may be auto-suggested)
-      protocolConfirmed: false, // whether user has explicitly confirmed the auto-suggestion
-      sampleAssay: "BCA",     // when total protein ambiguous: BCA / Bradford / 660-nm
-      samplePrep: "",         // can be pre-drafted from setup
-      assayVolume: "",        // required input — no default
-      notes: "",              // deviations etc.
-      reportTimestamp: "",    // when this was last generated
+      slots: defaultSlots(),
+      assayVolume: "",
+      sampleAssayType: "BCA",      // when total protein ambiguous
     };
   };
+
   var _l = useState(_limsInit()), limsReport = _l[0], setLimsReportRaw = _l[1];
   var setLimsReport = function(updater){
     setLimsReportRaw(function(prev){
@@ -14002,15 +14047,62 @@ function App() {
       return next;
     });
   };
-  var updateLims = function(field, value){
+  var updateLimsTop = function(field, value){
     setLimsReport(function(prev){
       var next = Object.assign({}, prev);
       next[field] = value;
       return next;
     });
   };
-  // Visual feedback for "Copied ✓" buttons; key = which LIMS field was just copied
+  var updateLimsSlot = function(fieldKey, slotKey, value){
+    setLimsReport(function(prev){
+      var next = Object.assign({}, prev);
+      next.slots = Object.assign({}, prev.slots);
+      next.slots[fieldKey] = Object.assign({}, prev.slots[fieldKey]);
+      next.slots[fieldKey][slotKey] = value;
+      return next;
+    });
+  };
+
+  // Remember-next-time storage, keyed by (protocol × field × slot).
+  // Loaded once on mount; updated when user checks "remember this".
+  var _rememInit = function(){
+    try {
+      var raw = localStorage.getItem(LIMS_REMEMBER_KEY);
+      if (raw) return JSON.parse(raw);
+    } catch (e) {}
+    return {};
+  };
+  var _rem = useState(_rememInit()), remembered = _rem[0], setRememberedRaw = _rem[1];
+  var setRemembered = function(updater){
+    setRememberedRaw(function(prev){
+      var next = typeof updater === "function" ? updater(prev) : updater;
+      try { localStorage.setItem(LIMS_REMEMBER_KEY, JSON.stringify(next)); } catch (e) {}
+      return next;
+    });
+  };
+  // Save a value for next time, keyed by protocol+field+slot
+  var rememberValue = function(protocolKey, fieldKey, slotKey, value){
+    if (!protocolKey || !value) return;
+    setRemembered(function(prev){
+      var next = Object.assign({}, prev);
+      var k = protocolKey + "::" + fieldKey + "::" + slotKey;
+      next[k] = value;
+      return next;
+    });
+  };
+  // Look up a remembered value
+  var recallValue = function(protocolKey, fieldKey, slotKey){
+    if (!protocolKey) return null;
+    var k = protocolKey + "::" + fieldKey + "::" + slotKey;
+    return remembered[k] || null;
+  };
+
+  // Visual feedback for "Copied ✓" links; key = which field was just copied
   var _ck = useState(null), copiedKey = _ck[0], setCopiedKey = _ck[1];
+
+  // Active editor — { fieldKey, slotKey } or null
+  var _ae0 = useState(null), activeSlot = _ae0[0], setActiveSlot = _ae0[1];
 
   var _ae=useState(""),analyzeError=_ae[0],setAnalyzeError=_ae[1];
   var _pra=useState(false),pendingReanalyze=_pra[0],setPendingReanalyze=_pra[1];
@@ -18152,54 +18244,66 @@ function App() {
           return <div style={{padding:"3rem",textAlign:"center",color:"#aeaeb2"}}>
             <div style={{fontSize:32,marginBottom:12}}>📝</div>
             <div style={{fontSize:14,fontWeight:600,color:"#5a6984"}}>Run analysis first.</div>
-            <div style={{fontSize:12,color:"#8e9bb5",marginTop:6}}>Once you have results, this tab will help you generate LIMS-ready text.</div>
+            <div style={{fontSize:12,color:"#8e9bb5",marginTop:6}}>Once you have results, this tab will help you fill the Methods tab of your LIMS draft.</div>
           </div>;
         }
 
         // ============================================================
-        // Helper: detect assay type from setup state
+        // Helpers
         // ============================================================
         var detectAssayType = function(){
-          if (cfg.tp === "yes") return "total_protein";              // BCA/Bradford/660 ambiguity
+          if (cfg.tp === "yes") return "total_protein";
           if (cfg.at === "elisa") return "elisa";
-          // direct measurement; check if GFP-like (standard and target both GFP)
           var sn = (cfg.sn || "").toLowerCase();
           var tgt = (cfg.target || "").toLowerCase();
           if (sn.indexOf("gfp") !== -1 && tgt.indexOf("gfp") !== -1) return "direct_gfp";
           return "direct_other";
         };
 
-        // ============================================================
-        // Protocol mapping. PLACEHOLDER — C will provide real mapping.
-        // Keys are detected assay types; values are { id, label }.
-        // For total_protein, the user picks BCA/Bradford/660 via dropdown.
-        // ============================================================
+        // PROTOCOL MAP — placeholder until C provides the real table.
+        // Each protocol entry can include a `detection` sentence used by
+        // the Sample Prep cascade.
         var PROTOCOL_MAP = {
           total_protein: {
-            "BCA":       { id: "BTEC AN-???",  label: "BTEC AN-??? (BCA Total Protein) [placeholder — confirm protocol ID]" },
-            "Bradford":  { id: "BTEC AN-???",  label: "BTEC AN-??? (Bradford Protein Assay) [placeholder — confirm protocol ID]" },
-            "660-nm":    { id: "BTEC AN-011",  label: "BTEC AN-011 (660-nm Protein Assay)" },
+            "BCA":       { id: "BTEC AN-???", label: "BTEC AN-??? (BCA Total Protein)",
+                           detection: "" },
+            "Bradford":  { id: "BTEC AN-???", label: "BTEC AN-??? (Bradford Protein Assay)",
+                           detection: "" },
+            "660-nm":    { id: "BTEC AN-011", label: "BTEC AN-011 (660-nm Protein Assay)",
+                           detection: "10 µL of each well was transferred to a clear 96-well plate, mixed with 150 µL of 660 Reagent, gently agitated for 5 min, and read at 660 nm" },
           },
-          elisa:        { id: "(see kit insert)", label: "(see kit insert)" },
-          direct_gfp:   { id: "BTEC AN-003",      label: "BTEC AN-003 (Direct GFP Quantitation)" },
-          direct_other: { id: "",                 label: "" },
+          elisa: { id: "(see kit insert)", label: "(see kit insert)", detection: "" },
+          direct_gfp: { id: "BTEC AN-003", label: "BTEC AN-003 (Direct GFP Quantitation)",
+                         detection: "fluorescence was measured at the wavelengths specified in BTEC AN-003" },
+          direct_other: { id: "", label: "", detection: "" },
         };
 
         var assayType = detectAssayType();
+        // Resolve the active protocol object (depends on user's total-protein choice)
+        var activeProtocol = null;
+        if (assayType === "total_protein") {
+          activeProtocol = PROTOCOL_MAP.total_protein[limsReport.sampleAssayType] || PROTOCOL_MAP.total_protein["BCA"];
+        } else if (PROTOCOL_MAP[assayType]) {
+          activeProtocol = PROTOCOL_MAP[assayType];
+        }
+        var protocolKey = activeProtocol ? activeProtocol.id : "unknown";
 
         // ============================================================
-        // Compute auto fields
+        // Date formatting helpers
         // ============================================================
-        // Results date — current timestamp at render
-        var nowDate = new Date();
-        var months = ["January","February","March","April","May","June","July","August","September","October","November","December"];
-        var hr = nowDate.getHours();
-        var ampm = hr >= 12 ? "PM" : "AM";
-        var hr12 = hr % 12; if (hr12 === 0) hr12 = 12;
-        var mins = nowDate.getMinutes(); if (mins < 10) mins = "0" + mins;
-        var resultsDateStr = months[nowDate.getMonth()] + " " + nowDate.getDate() + ", " + nowDate.getFullYear() + " " + hr12 + ":" + mins + " " + ampm;
+        var monthsShort = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+        var fmtDateAcademic = function(d){
+          if (!d) return "";
+          var dd = (d instanceof Date) ? d : new Date(d);
+          if (isNaN(dd.getTime())) return d;
+          var day = dd.getDate(); if (day < 10) day = "0" + day;
+          return day + "-" + monthsShort[dd.getMonth()] + "-" + dd.getFullYear();
+        };
+        var todayAcademic = fmtDateAcademic(new Date());
 
-        // Standard curve — average across plates
+        // ============================================================
+        // Compute auto fields from analysis state
+        // ============================================================
         var nP = res.length;
         var slopes = res.map(function(p){return p.slope && p.slope.m;}).filter(function(v){return typeof v === "number" && !isNaN(v);});
         var yints  = res.map(function(p){return p.slope && p.slope.b;}).filter(function(v){return typeof v === "number" && !isNaN(v);});
@@ -18212,161 +18316,213 @@ function App() {
         };
         var avgM = avg(slopes), avgB = avg(yints), avgR2 = avg(r2s);
 
-        // SSS auto-detect: pattern-match sample names
+        // SSS auto-detect
         var sssPattern = /\b(sss|sst|sys[\s-]?suit|system[\s-]?suitability)\b/i;
         var sssSamples = [];
         res.forEach(function(pp, pi){
           (pp.samps || []).forEach(function(s){
             if (sssPattern.test(s.name)) {
-              // pull the primary concentration result (most strategies report .conc)
-              var conc = null, unit = "mg/mL";
+              var conc = null;
               if (s.aS) {
-                // pick first strategy that has a conc
                 for (var k in s.aS) {
-                  if (s.aS[k] && s.aS[k].conc != null) {
-                    conc = s.aS[k].conc;
-                    break;
-                  }
+                  if (s.aS[k] && s.aS[k].conc != null) { conc = s.aS[k].conc; break; }
                 }
               }
               sssSamples.push({ name: s.name, conc: conc, plateIdx: pi });
             }
           });
         });
+        var sssText = sssSamples.length ? sssSamples.map(function(s){
+          return s.name + ": " + (s.conc != null ? fmtNum(s.conc, 3) + " " + (cfg.cu || "mg/mL") : "—");
+        }).join("; ") : "";
 
-        // Sample count
-        var totalSamples = 0;
-        res.forEach(function(pp){ totalSamples += (pp.samps || []).length; });
-
-        // Standard curve QC summary
-        var minR2 = r2s.length ? Math.min.apply(null, r2s) : null;
+        // SSS recovery — if user gave a nominal value via slot description, we don't know it;
+        // for now, recovery is a freeform slot.
 
         // ============================================================
-        // Generate field text (the actual prose copied to LIMS)
+        // Get a slot value with fallback chain:
+        // user-typed → remembered → default placeholder
         // ============================================================
-        var dataQCText = (function(){
-          if (avgR2 == null) return "—";
-          var parts = [];
-          parts.push("Pass.");
-          parts.push("R² = " + fmtNum(avgR2, 4) + (nP > 1 ? " (average across " + nP + " plates; min = " + fmtNum(minR2,4) + ")" : "") + ".");
-          parts.push("Standards and samples evaluated for replicate %CV; results within acceptance criteria.");
-          return parts.join(" ");
+        var slotValue = function(fieldKey, slotKey, defaultValue){
+          var v = limsReport.slots[fieldKey] && limsReport.slots[fieldKey][slotKey];
+          if (v != null && v !== "") return v;
+          var r = recallValue(protocolKey, fieldKey, slotKey);
+          if (r) return r;
+          return defaultValue || "";
+        };
+        // Is the slot CURRENTLY empty (no user value AND no remember)?
+        var isSlotEmpty = function(fieldKey, slotKey){
+          var v = limsReport.slots[fieldKey] && limsReport.slots[fieldKey][slotKey];
+          if (v != null && v !== "") return false;
+          var r = recallValue(protocolKey, fieldKey, slotKey);
+          if (r) return false;
+          return true;
+        };
+
+        // Default values pulled from setup state
+        var defaultStandardName = cfg.sn || "";
+        var defaultStandardConc = cfg.std ? (cfg.std + " " + (cfg.cu || "mg/mL")) : "";
+        var defaultReplicates = (function(){
+          var n = cfg.xr;
+          if (!n) return "technical duplicate";
+          if (n === "1" || n === 1) return "in singlicate";
+          if (n === "2" || n === 2) return "in technical duplicate";
+          if (n === "3" || n === 3) return "in technical triplicate";
+          return "in " + n + " technical replicates";
         })();
+        var defaultFitType = (cfg.fm === "linear") ? "linear" :
+                             (cfg.fm === "4pl") ? "four-parameter logistic (4PL)" :
+                             (cfg.fm === "5pl") ? "five-parameter logistic (5PL)" : "linear";
+        var defaultLevels = (cfg.sl || cfg.nl || "8");
+        var defaultDetection = activeProtocol ? activeProtocol.detection : "";
 
-        var standardCurveText = (function(){
-          var lines = [];
-          lines.push("Protein standard: " + (cfg.sn || "—") + (cfg.std ? " (" + cfg.std + " " + (cfg.cu||"mg/mL") + ")" : "") + ".");
-          lines.push("Average slope (m): " + fmtNum(avgM, 5));
-          lines.push("Average y-intercept: " + fmtNum(avgB, 5));
-          lines.push("R²: " + fmtNum(avgR2, 4) + (nP > 1 ? " (avg, " + nP + " plates)" : ""));
-          return lines.join("\n");
-        })();
-
-        var sssText = (function(){
-          if (sssSamples.length === 0) return "";
-          return sssSamples.map(function(s){
-            return s.name + ": measured concentration " + (s.conc != null ? fmtNum(s.conc, 3) + " " + (cfg.cu || "mg/mL") : "—");
-          }).join("\n");
-        })();
-
-        // Resolved protocol value (for display & copying)
-        var resolvedProtocol = "";
-        if (assayType === "total_protein") {
-          var pm = PROTOCOL_MAP.total_protein[limsReport.sampleAssay] || PROTOCOL_MAP.total_protein["BCA"];
-          resolvedProtocol = pm.label;
-        } else if (PROTOCOL_MAP[assayType]) {
-          resolvedProtocol = PROTOCOL_MAP[assayType].label;
-        }
-
-        // Pre-drafted sample prep (suggested) based on setup
-        var samplePrepDraft = (function(){
-          var parts = [];
-          parts.push("All sample prep was performed at room temperature.");
-          if (cfg.sn) parts.push("Standard: " + cfg.sn + (cfg.std ? " (" + cfg.std + " " + (cfg.cu||"mg/mL") + ")" : "") + ".");
-          if (cfg.xr) {
-            var repWord = cfg.xr === "1" ? "singlicate" : cfg.xr === "2" ? "duplicate" : cfg.xr === "3" ? "triplicate" : (cfg.xr + " replicates");
-            parts.push("Samples were run in " + repWord + ".");
+        // ============================================================
+        // Generate the prose for copy
+        // ============================================================
+        var composeSampleReceival = function(){
+          var s = limsReport.slots.sampleReceival || {};
+          var rd = slotValue("sampleReceival", "receivedDate", "[date]");
+          var st = slotValue("sampleReceival", "storageTemp", "4 ± 2 °C");
+          var pd = slotValue("sampleReceival", "processedDate", "[date]");
+          var lm = slotValue("sampleReceival", "labelMatch", "matched");
+          var lr = slotValue("sampleReceival", "labelResolution", "");
+          var sentence1 = "Samples were received on " + rd + " and held at " + st + " until processing on " + pd + ".";
+          var sentence2 = "";
+          if (lm === "did not match") {
+            sentence2 = " Sample identifiers on the primary containers did not match those recorded in the eSSF submission system; " + (lr || "the container labels were used as the reference identifiers") + " for analysis and reporting.";
+          } else if (lm === "matched") {
+            sentence2 = " Sample identifiers on the primary containers matched those recorded in the eSSF submission system.";
           }
-          if (cfg.np && +cfg.np > 1) parts.push("Assay was run across " + cfg.np + " plates.");
-          return parts.join(" ");
-        })();
+          return sentence1 + sentence2;
+        };
+
+        var composeProtocolUsed = function(){
+          var p = slotValue("protocolUsed", "protocol", activeProtocol ? activeProtocol.label : "");
+          var r = slotValue("protocolUsed", "requester", "submitter");
+          return "Analysis was performed per " + p + ", requested by the " + r + ".";
+        };
+
+        var composeSamplePrep = function(){
+          var tempL = slotValue("samplePrep", "tempLabel", "room temperature (22 ± 2 °C)");
+          var stdN = slotValue("samplePrep", "standardName", defaultStandardName || "[standard]");
+          var stdC = slotValue("samplePrep", "standardConc", defaultStandardConc || "[concentration]");
+          var prepBy = slotValue("samplePrep", "preparedBy", "");
+          var diluent = slotValue("samplePrep", "diluent", "[diluent]");
+          var dilScheme = slotValue("samplePrep", "dilutionScheme", "serially diluted 1:2 through row H");
+          var pip = slotValue("samplePrep", "pipette", "8-channel multichannel pipette");
+          var reps = slotValue("samplePrep", "replicates", defaultReplicates);
+          var det = slotValue("samplePrep", "detection", defaultDetection);
+
+          var s1 = "Sample preparation was performed at " + tempL + ".";
+          var s2 = " The protein standard was " + stdN + " (" + stdC + (prepBy ? ", prepared by " + prepBy : "") + ") in " + diluent + ", which also served as the sample diluent.";
+          var s3 = " Standards and samples were dispensed neat into row A of a 96-well plate and " + dilScheme + " using an " + pip + ", each " + reps + ".";
+          var s4 = det ? " Per " + (activeProtocol ? activeProtocol.id : "the protocol") + ", " + det + "." : "";
+          return s1 + s2 + s3 + s4;
+        };
+
+        var composeSSS = function(){
+          var desc = slotValue("sssDescription", "description", sssText || "");
+          if (!desc) return "";
+          return "A system suitability standard (" + desc + ") was processed alongside the submitted samples using the same dilution scheme.";
+        };
+
+        var composeStandardCurve = function(){
+          var fit = slotValue("standardCurve", "fitType", defaultFitType);
+          var lvls = slotValue("standardCurve", "levels", defaultLevels);
+          var rng = slotValue("standardCurve", "range", "");
+          var stdN = slotValue("samplePrep", "standardName", defaultStandardName || "[standard]");
+          var stdC = slotValue("samplePrep", "standardConc", defaultStandardConc || "");
+          var acc = slotValue("standardCurve", "acceptance", "R² ≥ 0.99");
+
+          var rngClause = rng ? (" spanning " + rng) : "";
+          var s1 = "A " + fit + " standard curve was generated from " + stdN + (stdC ? " (" + stdC + ")" : "") + " using " + lvls + " calibration levels" + rngClause + ".";
+          var s2 = " The mean curve parameters across " + nP + " independent plate" + (nP > 1 ? "s" : "") + " were: slope = " + fmtNum(avgM, 5) + ", y-intercept = " + fmtNum(avgB, 5) + ", R² = " + fmtNum(avgR2, 4) + ".";
+          var s3 = acc ? (" The curve met the acceptance criterion of " + acc + ".") : "";
+          return s1 + s2 + s3;
+        };
+
+        var composeNotes = function(){
+          return slotValue("notes", "content", "");
+        };
 
         // ============================================================
-        // Copy-to-clipboard utility (copiedKey state lives at App scope)
+        // Copy-to-clipboard
         // ============================================================
         var doCopy = function(key, text){
+          var safeText = text || "";
           try {
             if (navigator.clipboard && navigator.clipboard.writeText) {
-              navigator.clipboard.writeText(text || "").then(function(){
+              navigator.clipboard.writeText(safeText).then(function(){
                 setCopiedKey(key);
-                setTimeout(function(){ setCopiedKey(function(prev){ return prev === key ? null : prev; }); }, 1800);
+                setTimeout(function(){ setCopiedKey(function(p){ return p === key ? null : p; }); }, 1800);
               });
             } else {
-              // Fallback: textarea selection
               var ta = document.createElement("textarea");
-              ta.value = text || "";
+              ta.value = safeText;
               ta.style.position = "fixed"; ta.style.left = "-9999px";
               document.body.appendChild(ta);
               ta.select();
               try { document.execCommand("copy"); } catch (e) {}
               document.body.removeChild(ta);
               setCopiedKey(key);
-              setTimeout(function(){ setCopiedKey(function(prev){ return prev === key ? null : prev; }); }, 1800);
+              setTimeout(function(){ setCopiedKey(function(p){ return p === key ? null : p; }); }, 1800);
             }
           } catch (e) {
-            alert("Copy failed. You can select and copy the text manually.");
+            alert("Copy failed.");
           }
         };
 
         // ============================================================
-        // Cleaner Direction 2 styling: text "copy" links, no green
-        // dashed boxes, lowercase tags, soft visual hierarchy.
+        // Shared styles
         // ============================================================
         var fieldStyle = {
-          padding: "14px 18px",
+          display: "grid",
+          gridTemplateColumns: "110px 1fr",
+          gap: 12,
+          padding: "14px 16px",
           borderBottom: "1px solid #f4f6fa",
-        };
-        var fieldHeaderStyle = {
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          marginBottom: 6,
+          alignItems: "start",
         };
         var fieldLabelStyle = {
           fontSize: 12,
           fontWeight: 700,
           color: "#0b2a6f",
           letterSpacing: -0.1,
+          lineHeight: 1.35,
+          paddingTop: 4,
         };
-        var fieldSourceStyle = function(variant){
-          var color = "#a8b2c5";
-          if (variant === "required") color = "#b4332e";
-          return {
-            fontSize: 9,
-            fontWeight: 600,
-            color: color,
-            letterSpacing: 0.6,
-            textTransform: "uppercase",
-            marginLeft: 6,
-          };
-        };
-        var valueTextStyle = {
+        var proseStyle = {
           fontSize: 13,
-          lineHeight: 1.55,
-          color: "#1d1d1f",
-          whiteSpace: "pre-wrap",
+          lineHeight: 1.85,
+          color: "#2d3748",
+          padding: "2px 0",
         };
-        var inputStyle = {
-          width: "100%",
-          boxSizing: "border-box",
-          padding: "8px 10px",
-          border: "1px solid #e5edf7",
-          borderRadius: 7,
-          fontSize: 13,
-          background: "#fbfdff",
-          fontFamily: "inherit",
-          lineHeight: 1.55,
-          color: "#1d1d1f",
+        var slotBaseStyle = {
+          color: "#0b2a6f",
+          borderBottom: "2px dashed #5fc7e0",
+          cursor: "pointer",
+          fontWeight: 700,
+          padding: "0 2px",
+        };
+        var slotEmptyStyle = {
+          color: "#b35900",
+          background: "#fff6e6",
+          borderBottom: "2px dashed #f0c87a",
+          fontStyle: "italic",
+          padding: "1px 5px",
+          borderRadius: 3,
+          cursor: "pointer",
+          fontWeight: 600,
+        };
+        var slotActiveStyle = {
+          background: "#fff",
+          border: "1px solid #6337b9",
+          boxShadow: "0 0 0 3px rgba(99,55,185,0.12)",
+          borderRadius: 3,
+          padding: "0 4px",
+          color: "#0b2a6f",
+          fontWeight: 700,
+          cursor: "pointer",
         };
         var copyLinkStyle = function(key){
           var isCopied = copiedKey === key;
@@ -18381,18 +18537,175 @@ function App() {
             textDecoration: "underline",
             textDecorationColor: isCopied ? "#0f6e56" : "#d8dfeb",
             textUnderlineOffset: 2,
-            transition: "color 0.15s",
             fontFamily: "inherit",
+            whiteSpace: "nowrap",
           };
         };
-        var copyLinkText = function(key){
-          return copiedKey === key ? "copied ✓" : "copy";
+        var copyLinkText = function(key){ return copiedKey === key ? "copied ✓" : "copy"; };
+        var metaStyle = {
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          marginTop: 8,
+          gap: 8,
         };
-        var disabledCopyLinkStyle = Object.assign({}, copyLinkStyle("__none__"), {
-          color: "#c1cad9",
-          textDecorationColor: "transparent",
-          cursor: "not-allowed",
-        });
+        var metaLeftStyle = { fontSize: 10, color: "#8e9bb5" };
+
+        // ============================================================
+        // Slot component — renders one editable span + optional inline editor
+        // ============================================================
+        var Slot = function(props){
+          var fieldKey = props.fieldKey;
+          var slotKey = props.slotKey;
+          var defaultValue = props.defaultValue || "";
+          var displayValue = slotValue(fieldKey, slotKey, defaultValue);
+          var empty = isSlotEmpty(fieldKey, slotKey);
+          var active = activeSlot && activeSlot.fieldKey === fieldKey && activeSlot.slotKey === slotKey;
+          var emptyLabel = props.emptyLabel || "edit";
+
+          var style = empty ? slotEmptyStyle : (active ? slotActiveStyle : slotBaseStyle);
+
+          var onClick = function(){
+            if (active) setActiveSlot(null);
+            else setActiveSlot({ fieldKey: fieldKey, slotKey: slotKey, type: props.type, options: props.options, units: props.units, hint: props.hint });
+          };
+
+          return <span style={style} onClick={onClick}>
+            {empty ? "✎ " + emptyLabel : displayValue}
+          </span>;
+        };
+
+        // ============================================================
+        // Inline editor — renders when activeSlot matches
+        // ============================================================
+        var renderActiveEditor = function(forFieldKey){
+          if (!activeSlot || activeSlot.fieldKey !== forFieldKey) return null;
+          var fk = activeSlot.fieldKey, sk = activeSlot.slotKey;
+          var current = slotValue(fk, sk, "");
+          var type = activeSlot.type || "text";
+          var options = activeSlot.options || [];
+          var hint = activeSlot.hint || "";
+          var units = activeSlot.units || [];
+
+          var commit = function(value, rememberIt){
+            updateLimsSlot(fk, sk, value);
+            if (rememberIt) rememberValue(protocolKey, fk, sk, value);
+            setActiveSlot(null);
+          };
+
+          var editorWrap = {
+            marginTop: 10,
+            padding: 12,
+            background: "#fff",
+            border: "1px solid #d4bce8",
+            borderRadius: 7,
+            boxShadow: "0 2px 10px rgba(99,55,185,0.10)",
+          };
+          var qStyle = { fontSize: 12, fontWeight: 700, color: "#4a2d8f", margin: 0 };
+          var qSubStyle = { fontSize: 10, color: "#8e9bb5", margin: "4px 0 8px", lineHeight: 1.4 };
+
+          return <div style={editorWrap}>
+            <div style={qStyle}>Editing: {sk.replace(/([A-Z])/g, " $1").toLowerCase()}</div>
+            {hint && <div style={qSubStyle}>{hint}</div>}
+            <EditorBody type={type} current={current} options={options} units={units} onCommit={commit} protocolKey={protocolKey} fk={fk} sk={sk} />
+          </div>;
+        };
+
+        // ============================================================
+        // Editor body — switches by type (text / select / number)
+        // ============================================================
+        function EditorBody(p){
+          var [val, setVal] = useState(p.current || "");
+          var [unit, setUnit] = useState((p.units && p.units[0]) || "");
+          var [rem, setRem] = useState(false);
+
+          var pillRow = { display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 6 };
+          var pill = function(selected){
+            return {
+              padding: "4px 10px",
+              borderRadius: 12,
+              fontSize: 11,
+              fontWeight: 600,
+              cursor: "pointer",
+              background: selected ? "#6337b9" : "#fff",
+              color: selected ? "#fff" : "#5a6984",
+              border: "1px solid " + (selected ? "#6337b9" : "#e5edf7"),
+              fontFamily: "inherit",
+            };
+          };
+          var inp = {
+            width: "100%",
+            padding: "7px 10px",
+            border: "1px solid #e5edf7",
+            borderRadius: 6,
+            fontSize: 12,
+            fontFamily: "inherit",
+            background: "#fbfdff",
+            boxSizing: "border-box",
+          };
+          var rememRow = {
+            marginTop: 8,
+            paddingTop: 8,
+            borderTop: "1px dashed #e5edf7",
+            fontSize: 11,
+            color: "#5a6984",
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+          };
+          var actions = { display: "flex", justifyContent: "flex-end", gap: 6, marginTop: 8 };
+          var btn = function(primary){
+            return {
+              padding: "4px 11px",
+              borderRadius: 6,
+              fontSize: 11,
+              fontWeight: 600,
+              cursor: "pointer",
+              fontFamily: "inherit",
+              background: primary ? "#6337b9" : "#fff",
+              color: primary ? "#fff" : "#5a6984",
+              border: "1px solid " + (primary ? "#6337b9" : "#e5edf7"),
+            };
+          };
+
+          var apply = function(){
+            var v = val;
+            if (p.units && p.units.length > 0 && unit) v = val + " " + unit;
+            p.onCommit(v, rem);
+          };
+
+          return <div>
+            {p.options && p.options.length > 0 && (
+              <div style={pillRow}>
+                {p.options.map(function(opt, i){
+                  return <button key={i}
+                    onClick={function(){ setVal(opt); }}
+                    style={pill(val === opt)}>{opt}</button>;
+                })}
+              </div>
+            )}
+            {p.type === "date" ? (
+              <input type="date" style={inp} value={val} onChange={function(e){ setVal(e.target.value); }} />
+            ) : p.type === "number" && p.units && p.units.length > 0 ? (
+              <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                <input type="text" style={Object.assign({}, inp, {flex:1})} value={val} onChange={function(e){ setVal(e.target.value); }} placeholder="value" />
+                <select value={unit} onChange={function(e){ setUnit(e.target.value); }} style={Object.assign({}, inp, {flex:"0 0 auto", width:"auto"})}>
+                  {p.units.map(function(u,i){return <option key={i} value={u}>{u}</option>;})}
+                </select>
+              </div>
+            ) : (
+              <input type="text" style={inp} value={val} onChange={function(e){ setVal(e.target.value); }} placeholder="type or pick above" />
+            )}
+            <div style={rememRow}>
+              <input type="checkbox" id={"rem-" + p.fk + "-" + p.sk} checked={rem} onChange={function(e){ setRem(e.target.checked); }} />
+              <label htmlFor={"rem-" + p.fk + "-" + p.sk}>Remember for next {protocolKey !== "unknown" ? protocolKey : "run"}</label>
+            </div>
+            <div style={actions}>
+              <button style={btn(false)} onClick={function(){ p.onCommit(p.current, false); }}>Cancel</button>
+              <button style={btn(true)} onClick={apply}>Apply</button>
+            </div>
+          </div>;
+        }
 
         // ============================================================
         // RENDER
@@ -18402,22 +18715,17 @@ function App() {
             <div style={{background:"#fff",border:"1px solid #e5edf7",borderRadius:14,overflow:"hidden"}}>
 
               {/* Intro */}
-              <div style={{padding:"16px 18px 14px",borderBottom:"1px solid #f1f4f9",display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:12,flexWrap:"wrap"}}>
+              <div style={{padding:"18px 20px 14px",borderBottom:"1px solid #eef3f8",display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:12,flexWrap:"wrap"}}>
                 <div style={{flex:1, minWidth: 220}}>
-                  <div style={{fontSize:17,fontWeight:800,color:"#0b2a6f",letterSpacing:-0.2,marginBottom:4}}>Methods</div>
-                  <div style={{fontSize:12,color:"#6f7fa0",lineHeight:1.5}}>Fills the Methods tab of your eSSF report draft in LIMS. Click <em>copy</em> next to each field and paste into LIMS. Your inputs save as you type.</div>
+                  <div style={{fontSize:18,fontWeight:800,color:"#0b2a6f",letterSpacing:-0.3,marginBottom:4}}>Methods</div>
+                  <div style={{fontSize:12,color:"#6f7fa0",lineHeight:1.5}}>Fills the Methods tab of your LIMS draft. Tap any underlined word to change. Greyed fields are picked in LIMS.</div>
                 </div>
                 <button onClick={function(){
-                  if (window.confirm("Clear your typed inputs? Auto-filled values are not affected.")) {
+                  if (window.confirm("Clear all your typed entries on this Methods tab? (Remembered defaults for next time are kept.)")) {
                     setLimsReport({
-                      sampleReceival: "",
-                      protocolUsed: "",
-                      protocolConfirmed: false,
-                      sampleAssay: "BCA",
-                      samplePrep: "",
+                      slots: defaultSlots(),
                       assayVolume: "",
-                      notes: "",
-                      reportTimestamp: "",
+                      sampleAssayType: "BCA",
                     });
                   }
                 }} style={{background:"#fff",border:"1px solid #e5edf7",color:"#5a6984",padding:"6px 12px",borderRadius:7,fontSize:11,fontWeight:600,cursor:"pointer"}}>
@@ -18425,158 +18733,217 @@ function App() {
                 </button>
               </div>
 
-              {/* Data QC */}
+              {/* ANALYST — LIMS */}
               <div style={fieldStyle}>
-                <div style={fieldHeaderStyle}>
-                  <div><span style={fieldLabelStyle}>Data QC</span><span style={fieldSourceStyle()}>auto</span></div>
-                  <button onClick={function(){ doCopy("dataQC", dataQCText); }} style={copyLinkStyle("dataQC")}>{copyLinkText("dataQC")}</button>
-                </div>
-                <div style={valueTextStyle}>{dataQCText}</div>
-              </div>
-
-              {/* Results date */}
-              <div style={fieldStyle}>
-                <div style={fieldHeaderStyle}>
-                  <div><span style={fieldLabelStyle}>Results date</span><span style={fieldSourceStyle()}>auto</span></div>
-                  <button onClick={function(){ doCopy("resultsDate", resultsDateStr); }} style={copyLinkStyle("resultsDate")}>{copyLinkText("resultsDate")}</button>
-                </div>
-                <div style={valueTextStyle}>{resultsDateStr}</div>
-              </div>
-
-              {/* Sample Receival */}
-              <div style={fieldStyle}>
-                <div style={fieldHeaderStyle}>
-                  <div><span style={fieldLabelStyle}>Sample Receival</span></div>
-                  <button onClick={function(){ doCopy("sampleReceival", limsReport.sampleReceival); }} style={copyLinkStyle("sampleReceival")}>{copyLinkText("sampleReceival")}</button>
-                </div>
-                <textarea
-                  value={limsReport.sampleReceival}
-                  onChange={function(e){ updateLims("sampleReceival", e.target.value); }}
-                  placeholder="Anything notable about how samples arrived? Drop-off context, labeling issues, condition on arrival. Leave blank to skip."
-                  rows={3}
-                  style={Object.assign({}, inputStyle, {minHeight:50, resize:"vertical"})}
-                />
-              </div>
-
-              {/* Protocol Used */}
-              <div style={fieldStyle}>
-                <div style={fieldHeaderStyle}>
-                  <div><span style={fieldLabelStyle}>Protocol Used</span><span style={fieldSourceStyle()}>suggested</span></div>
-                  <button onClick={function(){ doCopy("protocolUsed", limsReport.protocolUsed || resolvedProtocol); }} style={copyLinkStyle("protocolUsed")}>{copyLinkText("protocolUsed")}</button>
-                </div>
-                {assayType === "total_protein" && (
-                  <div style={{marginBottom: 8}}>
-                    <div style={{fontSize:11,color:"#6f7fa0",marginBottom:6}}>
-                      Total protein assay detected. Which one?
-                    </div>
-                    <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
-                      {["BCA","Bradford","660-nm"].map(function(opt){
-                        var selected = limsReport.sampleAssay === opt;
-                        return <button key={opt} onClick={function(){ updateLims("sampleAssay", opt); }} style={{
-                          padding:"4px 10px",
-                          borderRadius:6,
-                          fontSize:11,
-                          fontWeight:600,
-                          cursor:"pointer",
-                          background: selected ? "#0b2a6f" : "#fff",
-                          color: selected ? "#fff" : "#5a6984",
-                          border: "1px solid " + (selected ? "#0b2a6f" : "#e5edf7"),
-                        }}>{opt}</button>;
-                      })}
-                    </div>
+                <div style={fieldLabelStyle}>Analyst</div>
+                <div>
+                  <div style={{padding:"7px 10px",background:"#f6f8fc",border:"1px dashed #d8dfeb",borderRadius:7,fontSize:12,color:"#8e9bb5",fontStyle:"italic"}}>
+                    Pick from the LIMS dropdown.
                   </div>
-                )}
-                <div style={valueTextStyle}>{resolvedProtocol || (assayType === "direct_other" ? "No protocol mapped for this configuration." : "—")}</div>
-                <input
-                  value={limsReport.protocolUsed}
-                  onChange={function(e){ updateLims("protocolUsed", e.target.value); }}
-                  placeholder="Override if different (leave blank to use above)"
-                  style={Object.assign({}, inputStyle, {marginTop:8})}
-                />
+                </div>
               </div>
 
-              {/* Sample Prep */}
+              {/* DATA QC — LIMS */}
               <div style={fieldStyle}>
-                <div style={fieldHeaderStyle}>
-                  <div><span style={fieldLabelStyle}>Sample Prep</span><span style={fieldSourceStyle()}>pre-drafted</span></div>
-                  <button onClick={function(){
-                    var fullText = samplePrepDraft + (limsReport.samplePrep ? " " + limsReport.samplePrep : "");
-                    doCopy("samplePrep", fullText);
-                  }} style={copyLinkStyle("samplePrep")}>{copyLinkText("samplePrep")}</button>
+                <div style={fieldLabelStyle}>Data QC</div>
+                <div>
+                  <div style={{padding:"7px 10px",background:"#f6f8fc",border:"1px dashed #d8dfeb",borderRadius:7,fontSize:12,color:"#8e9bb5",fontStyle:"italic"}}>
+                    Pick the QC reviewer from the LIMS dropdown.
+                  </div>
                 </div>
-                <div style={{fontSize:10,color:"#8e9bb5",marginBottom:4,fontStyle:"italic"}}>
-                  Auto-draft from setup: {samplePrepDraft}
-                </div>
-                <textarea
-                  value={limsReport.samplePrep}
-                  onChange={function(e){ updateLims("samplePrep", e.target.value); }}
-                  placeholder="Add run-specific details — diluent, dilution scheme, incubation, reading conditions..."
-                  rows={4}
-                  style={Object.assign({}, inputStyle, {minHeight:70, resize:"vertical"})}
-                />
               </div>
 
-              {/* Assay Volume — REQUIRED */}
+              {/* SAMPLE RECEIVAL */}
               <div style={fieldStyle}>
-                <div style={fieldHeaderStyle}>
-                  <div><span style={fieldLabelStyle}>Assay Volume</span><span style={fieldSourceStyle("required")}>required</span></div>
-                  <button onClick={function(){ doCopy("assayVolume", limsReport.assayVolume); }} style={copyLinkStyle("assayVolume")}>{copyLinkText("assayVolume")}</button>
+                <div style={fieldLabelStyle}>Sample Receival Storage Cond</div>
+                <div>
+                  <div style={proseStyle}>
+                    Samples were received on <Slot fieldKey="sampleReceival" slotKey="receivedDate" type="date" emptyLabel="date received" hint="When did samples arrive at the lab?" />
+                    {" "}and held at <Slot fieldKey="sampleReceival" slotKey="storageTemp" type="text" options={["4 ± 2 °C","−20 °C","−80 °C","Room temperature (22 ± 2 °C)"]} defaultValue="4 ± 2 °C" hint="Storage temperature before processing." />
+                    {" "}until processing on <Slot fieldKey="sampleReceival" slotKey="processedDate" type="date" emptyLabel="date processed" defaultValue={todayAcademic} hint="When were samples actually analyzed?" />
+                    .{" "}Sample identifiers on the primary containers <Slot fieldKey="sampleReceival" slotKey="labelMatch" type="text" options={["matched","did not match"]} defaultValue="matched" hint="Did container labels match the eSSF submission?" />
+                    {" "}those recorded in the eSSF submission system
+                    {limsReport.slots.sampleReceival && limsReport.slots.sampleReceival.labelMatch === "did not match" && <span>
+                      ; <Slot fieldKey="sampleReceival" slotKey="labelResolution" type="text" emptyLabel="how was it resolved" defaultValue="the container labels were used as the reference identifiers" hint="How did you resolve the mismatch?" /> for analysis and reporting
+                    </span>}
+                    .
+                  </div>
+                  {renderActiveEditor("sampleReceival")}
+                  <div style={metaStyle}>
+                    <span style={metaLeftStyle}>Tap any underlined word to edit</span>
+                    <button onClick={function(){ doCopy("sampleReceival", composeSampleReceival()); }} style={copyLinkStyle("sampleReceival")}>{copyLinkText("sampleReceival")}</button>
+                  </div>
                 </div>
-                <input
-                  value={limsReport.assayVolume}
-                  onChange={function(e){ updateLims("assayVolume", e.target.value); }}
-                  placeholder='e.g. "5 mL submitted" or "see protocol"'
-                  style={Object.assign({}, inputStyle, {borderColor: limsReport.assayVolume ? "#e5edf7" : "#f0c8c8", background: limsReport.assayVolume ? "#fbfdff" : "#fef7f7"})}
-                />
-                {!limsReport.assayVolume && <div style={{fontSize:10,color:"#b4332e",marginTop:3}}>Required — needed for downstream back-calculation.</div>}
+              </div>
+
+              {/* PROTOCOL USED — editable, cascades */}
+              <div style={fieldStyle}>
+                <div style={fieldLabelStyle}>Protocol Used</div>
+                <div>
+                  {/* Smart banner */}
+                  <div style={{background:"#f4f9fd",borderLeft:"3px solid #139cb6",padding:"9px 12px",borderRadius:4,fontSize:12,color:"#0b2a6f",marginBottom:8,lineHeight:1.5}}>
+                    <strong style={{color:"#001B5E"}}>{activeProtocol ? activeProtocol.label : "Unknown — please pick below"}</strong>
+                    <div style={{marginTop:4,fontSize:10,color:"#5a6984",fontStyle:"italic"}}>↳ Detection, incubation, and wavelength are inferred from this protocol — change if wrong.</div>
+                  </div>
+
+                  {/* Total-protein picker if ambiguous */}
+                  {assayType === "total_protein" && (
+                    <div style={{marginBottom:10}}>
+                      <div style={{fontSize:11,color:"#6f7fa0",marginBottom:6}}>Total protein assay detected — which one?</div>
+                      <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
+                        {["BCA","Bradford","660-nm"].map(function(opt){
+                          var selected = limsReport.sampleAssayType === opt;
+                          return <button key={opt} onClick={function(){ updateLimsTop("sampleAssayType", opt); }} style={{
+                            padding:"4px 10px",
+                            borderRadius:6,
+                            fontSize:11,
+                            fontWeight:600,
+                            cursor:"pointer",
+                            background: selected ? "#0b2a6f" : "#fff",
+                            color: selected ? "#fff" : "#5a6984",
+                            border: "1px solid " + (selected ? "#0b2a6f" : "#e5edf7"),
+                          }}>{opt}</button>;
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  <div style={proseStyle}>
+                    Analysis was performed per <Slot fieldKey="protocolUsed" slotKey="protocol" type="text" defaultValue={activeProtocol ? activeProtocol.label : ""} emptyLabel="protocol ID" hint="Override the auto-detected protocol." />
+                    , requested by the <Slot fieldKey="protocolUsed" slotKey="requester" type="text" options={["submitter","PI","internal QC"]} defaultValue="submitter" />.
+                  </div>
+                  {renderActiveEditor("protocolUsed")}
+                  <div style={metaStyle}>
+                    <span style={metaLeftStyle}>Also pick this in LIMS — they need to match</span>
+                    <button onClick={function(){ doCopy("protocolUsed", composeProtocolUsed()); }} style={copyLinkStyle("protocolUsed")}>{copyLinkText("protocolUsed")}</button>
+                  </div>
+                </div>
+              </div>
+
+              {/* SAMPLE PREP */}
+              <div style={fieldStyle}>
+                <div style={fieldLabelStyle}>Sample Prep</div>
+                <div>
+                  <div style={proseStyle}>
+                    Sample preparation was performed at <Slot fieldKey="samplePrep" slotKey="tempLabel" type="text" options={["room temperature (22 ± 2 °C)","4 ± 2 °C","On ice","37 °C"]} defaultValue="room temperature (22 ± 2 °C)" hint="What temperature was prep done at?" />
+                    . The protein standard was <Slot fieldKey="samplePrep" slotKey="standardName" type="text" defaultValue={defaultStandardName} emptyLabel="standard name" hint="BSA, IgG, GFP, etc." />
+                    {" "}(<Slot fieldKey="samplePrep" slotKey="standardConc" type="text" defaultValue={defaultStandardConc} emptyLabel="concentration" hint="e.g. 1.0 mg/mL" />
+                    {limsReport.slots.samplePrep && limsReport.slots.samplePrep.preparedBy ?
+                      <span>, prepared by <Slot fieldKey="samplePrep" slotKey="preparedBy" type="text" defaultValue="" emptyLabel="initials + date" hint="e.g. CGS on 04-Apr-2026" /></span> :
+                      <span>, <Slot fieldKey="samplePrep" slotKey="preparedBy" type="text" defaultValue="" emptyLabel="add prep info if in-house" hint="If made in-house: initials + date, e.g. CGS on 04-Apr-2026. Leave blank if commercial." /></span>
+                    }) in <Slot fieldKey="samplePrep" slotKey="diluent" type="text" options={["PBS (1×)","50 mM sodium phosphate buffer, pH 7.2","DPBS (1×)","Tris-buffered saline"]} defaultValue="" emptyLabel="diluent" hint="What buffer was used to dilute samples and standards?" />
+                    , which also served as the sample diluent. Standards and samples were dispensed neat into row A of a 96-well plate and <Slot fieldKey="samplePrep" slotKey="dilutionScheme" type="text" options={["serially diluted 1:2 through row H","serially diluted 1:3 through row H","diluted at discrete points"]} defaultValue="serially diluted 1:2 through row H" />
+                    {" "}using an <Slot fieldKey="samplePrep" slotKey="pipette" type="text" options={["8-channel multichannel pipette","12-channel multichannel pipette","single-channel pipette"]} defaultValue="8-channel multichannel pipette" />
+                    , each <Slot fieldKey="samplePrep" slotKey="replicates" type="text" options={["in singlicate","in technical duplicate","in technical triplicate"]} defaultValue={defaultReplicates} />.
+                    {defaultDetection && <span> Per {activeProtocol ? activeProtocol.id : "the protocol"}, <Slot fieldKey="samplePrep" slotKey="detection" type="text" defaultValue={defaultDetection} hint="Detection method — auto-filled from protocol. Edit if your run differed." />.</span>}
+                  </div>
+                  {renderActiveEditor("samplePrep")}
+                  <div style={metaStyle}>
+                    <span style={metaLeftStyle}>Tap underlined parts to refine</span>
+                    <button onClick={function(){ doCopy("samplePrep", composeSamplePrep()); }} style={copyLinkStyle("samplePrep")}>{copyLinkText("samplePrep")}</button>
+                  </div>
+                </div>
+              </div>
+
+              {/* ASSAY VOLUME */}
+              <div style={fieldStyle}>
+                <div style={fieldLabelStyle}>Assay Volume</div>
+                <div>
+                  {(function(){
+                    var rememVal = recallValue(protocolKey, "assayVolume", "value");
+                    if (rememVal && !limsReport.assayVolume) {
+                      return <div style={{background:"#e1f5ee",color:"#0a4d3c",borderRadius:5,padding:"6px 9px",fontSize:11,marginBottom:6,display:"flex",alignItems:"center",gap:6}}>
+                        💡 <strong>Last time:</strong> {rememVal}
+                        <button onClick={function(){ updateLimsTop("assayVolume", rememVal); }} style={{background:"#0f6e56",color:"#fff",border:"none",padding:"3px 8px",borderRadius:4,fontSize:10,fontWeight:700,cursor:"pointer",marginLeft:"auto"}}>Use this</button>
+                      </div>;
+                    }
+                    return null;
+                  })()}
+                  <input
+                    value={limsReport.assayVolume}
+                    onChange={function(e){ updateLimsTop("assayVolume", e.target.value); }}
+                    onBlur={function(e){
+                      if (e.target.value) rememberValue(protocolKey, "assayVolume", "value", e.target.value);
+                    }}
+                    placeholder='e.g. "1.0 mL submitted"'
+                    style={{
+                      width:"100%",
+                      padding:"8px 11px",
+                      border: "1px solid " + (limsReport.assayVolume ? "#e5edf7" : "#f0c8c8"),
+                      borderRadius:7,
+                      fontSize:13,
+                      background: limsReport.assayVolume ? "#fbfdff" : "#fef7f7",
+                      fontFamily:"inherit",
+                      boxSizing:"border-box",
+                    }}
+                  />
+                  {!limsReport.assayVolume && <div style={{fontSize:10,color:"#b4332e",marginTop:4}}>Required — needed for back-calculation.</div>}
+                  <div style={metaStyle}>
+                    <span style={metaLeftStyle}>{limsReport.assayVolume ? "Saved for next time when you leave this field" : ""}</span>
+                    <button onClick={function(){ doCopy("assayVolume", limsReport.assayVolume); }} style={copyLinkStyle("assayVolume")}>{copyLinkText("assayVolume")}</button>
+                  </div>
+                </div>
               </div>
 
               {/* SSS */}
               <div style={fieldStyle}>
-                <div style={fieldHeaderStyle}>
-                  <div><span style={fieldLabelStyle}>System Suitability (SSS)</span><span style={fieldSourceStyle()}>{sssSamples.length ? "auto" : "—"}</span></div>
-                  {sssText ? (
-                    <button onClick={function(){ doCopy("sss", sssText); }} style={copyLinkStyle("sss")}>{copyLinkText("sss")}</button>
-                  ) : (
-                    <span style={disabledCopyLinkStyle}>copy</span>
-                  )}
-                </div>
-                {sssSamples.length > 0 ? (
-                  <div style={valueTextStyle}>{sssText}</div>
-                ) : (
-                  <div style={{fontSize:11,color:"#8e9bb5",fontStyle:"italic"}}>
-                    No SSS sample detected. (Name a sample with "SSS", "SST", or "system suitability" in it and it will appear here.)
+                <div style={fieldLabelStyle}>System Suitability Std. Used</div>
+                <div>
+                  {sssText && <div style={{fontSize:11,color:"#0a4d3c",marginBottom:6,fontStyle:"italic"}}>Auto-detected from sample names: {sssText}</div>}
+                  <div style={proseStyle}>
+                    {sssText ? <span>A system suitability standard (<Slot fieldKey="sssDescription" slotKey="description" type="text" defaultValue={sssText} hint="Brief description of the SSS." />) was processed alongside the submitted samples using the same dilution scheme.</span>
+                            : <span>No SSS sample detected. <Slot fieldKey="sssDescription" slotKey="description" type="text" emptyLabel="describe SSS if used" hint="Brief description of the SSS, if one was run." /></span>}
                   </div>
-                )}
+                  {renderActiveEditor("sssDescription")}
+                  <div style={metaStyle}>
+                    <span style={metaLeftStyle}>{sssText ? "Auto-detected — edit description if needed" : "Name a sample with \"SSS\" or \"sys suit\" to auto-fill"}</span>
+                    <button onClick={function(){ doCopy("sss", composeSSS()); }} style={copyLinkStyle("sss")}>{copyLinkText("sss")}</button>
+                  </div>
+                </div>
               </div>
 
-              {/* Standard Curve */}
+              {/* STANDARD CURVE */}
               <div style={fieldStyle}>
-                <div style={fieldHeaderStyle}>
-                  <div><span style={fieldLabelStyle}>Standard Curve</span><span style={fieldSourceStyle()}>auto</span></div>
-                  <button onClick={function(){ doCopy("standardCurve", standardCurveText); }} style={copyLinkStyle("standardCurve")}>{copyLinkText("standardCurve")}</button>
+                <div style={fieldLabelStyle}>Standard Curve Information</div>
+                <div>
+                  <div style={proseStyle}>
+                    A <Slot fieldKey="standardCurve" slotKey="fitType" type="text" options={["linear","four-parameter logistic (4PL)","five-parameter logistic (5PL)"]} defaultValue={defaultFitType} />
+                    {" "}standard curve was generated from {(slotValue("samplePrep","standardName", defaultStandardName) || "[standard]")}
+                    {" "}using <Slot fieldKey="standardCurve" slotKey="levels" type="text" defaultValue={defaultLevels} emptyLabel="# levels" /> calibration levels
+                    {(function(){
+                      var rng = slotValue("standardCurve","range","");
+                      return rng ? <span> spanning <Slot fieldKey="standardCurve" slotKey="range" type="text" defaultValue="" emptyLabel="range" hint="e.g. 0.0156 to 1.0 mg/mL" /></span>
+                                 : <span> spanning <Slot fieldKey="standardCurve" slotKey="range" type="text" defaultValue="" emptyLabel="add range" hint="e.g. 0.0156 to 1.0 mg/mL" /></span>;
+                    })()}
+                    . The mean curve parameters across {nP} independent plate{nP > 1 ? "s" : ""} were: slope = <strong>{fmtNum(avgM, 5)}</strong>, y-intercept = <strong>{fmtNum(avgB, 5)}</strong>, R² = <strong>{fmtNum(avgR2, 4)}</strong>.{" "}
+                    The curve met the acceptance criterion of <Slot fieldKey="standardCurve" slotKey="acceptance" type="text" options={["R² ≥ 0.99","R² ≥ 0.995","R² ≥ 0.98"]} defaultValue="R² ≥ 0.99" />.
+                  </div>
+                  {renderActiveEditor("standardCurve")}
+                  <div style={metaStyle}>
+                    <span style={metaLeftStyle}>Slope, intercept, R² pulled from your analysis</span>
+                    <button onClick={function(){ doCopy("standardCurve", composeStandardCurve()); }} style={copyLinkStyle("standardCurve")}>{copyLinkText("standardCurve")}</button>
+                  </div>
                 </div>
-                <div style={valueTextStyle}>{standardCurveText}</div>
               </div>
 
-              {/* Notes */}
+              {/* NOTES */}
               <div style={fieldStyle}>
-                <div style={fieldHeaderStyle}>
-                  <div><span style={fieldLabelStyle}>Notes</span></div>
-                  <button onClick={function(){ doCopy("notes", limsReport.notes); }} style={copyLinkStyle("notes")}>{copyLinkText("notes")}</button>
+                <div style={fieldLabelStyle}>Additional Notes</div>
+                <div>
+                  <div style={proseStyle}>
+                    <Slot fieldKey="notes" slotKey="content" type="text" defaultValue="" emptyLabel="add deviations, substitutions, or instrument observations" hint="Anything notable. Numbered list format is conventional: (1) ... (2) ..." />
+                  </div>
+                  {renderActiveEditor("notes")}
+                  <div style={metaStyle}>
+                    <span style={metaLeftStyle}>Cover: deviations · substitutions · instrument observations</span>
+                    <button onClick={function(){ doCopy("notes", composeNotes()); }} style={copyLinkStyle("notes")}>{copyLinkText("notes")}</button>
+                  </div>
                 </div>
-                <textarea
-                  value={limsReport.notes}
-                  onChange={function(e){ updateLims("notes", e.target.value); }}
-                  placeholder="Deviations, reagent substitutions, instrument issues. Leave blank to skip."
-                  rows={3}
-                  style={Object.assign({}, inputStyle, {minHeight:50, resize:"vertical"})}
-                />
               </div>
 
               {/* Footer */}
-              <div style={{padding:"12px 18px",background:"#fbfdff",fontSize:11,color:"#5a6984",borderTop:"1px solid #f1f4f9"}}>
-                <strong style={{color:"#0b2a6f"}}>Tip:</strong> Open your eSSF report draft in LIMS, then click <em>copy</em> next to each field above and paste into the matching field in the Methods tab.
+              <div style={{padding:"12px 20px",background:"#fbfdff",fontSize:11,color:"#5a6984",borderTop:"1px solid #eef3f8"}}>
+                <strong style={{color:"#0b2a6f"}}>Tip:</strong> Open your LIMS draft, then click <em>copy</em> next to each field and paste. Your remembered choices will pre-fill next time you run the same protocol.
               </div>
             </div>
           </div>
