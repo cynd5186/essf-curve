@@ -14005,21 +14005,30 @@ function App() {
         tempLabel: "room temperature (22 ± 2 °C)",
         standardName: "",
         standardConc: "",
-        preparedBy: "",            // "CGS on 04-Apr-2026" style
+        standardVendor: "",        // e.g. "Thermo Fisher" — for vendor-verified standards
+        standardVerification: "",  // e.g. "NIST-verified" or "vendor-verified with Bradford"
+        preparedBy: "",            // "CGS on 04-Apr-2026" for in-house preps
         diluent: "",
-        dilutionScheme: "serially diluted 1:2 through row H",
+        dilutionScheme: "serially diluted 1:2 from row A through row G",  // row G default; H is blank
         pipette: "8-channel multichannel pipette",
-        replicates: "technical duplicate",
         detection: "",             // protocol-cascaded
       },
-      sssDescription: { description: "" },
+      sstDescription: {            // renamed from sssDescription — see SST/SSS naming
+        description: "",
+        calibrationLevels: "",
+        calibrationRange: "",
+      },
       standardCurve: {
         fitType: "linear",
         levels: "",
-        range: "",
+        range: "",                 // not used directly; working range is computed
         acceptance: "R² ≥ 0.99",
+        cvThreshold: "10%",
+        dilutionSelection: "upper portion",    // or "less-dilute portion" for DF
+        pointsExcluded: "",        // optional disclosure when curve points dropped
       },
       notes: { content: "" },
+      software: { name: "" },      // analysis software used (e.g. eSSF Bench, GraphPad, Excel)
     };
   };
 
@@ -14036,6 +14045,7 @@ function App() {
       slots: defaultSlots(),
       assayVolume: "",
       sampleAssayType: "BCA",      // when total protein ambiguous
+      sstUsed: false,              // analyst-toggled when no auto-detected SST sample
     };
   };
 
@@ -14161,6 +14171,17 @@ function App() {
   var _sp=useState([{plate:"1",endo:"0",spiked:"1",spikeProtein:"GFP",stockConc:"500",stockUnit:"ug/uL",spikeVol:"10",spikeVolUnit:"uL",sampleVol:"1000",sampleVolUnit:"uL",noEndo:false}]),spikeSets=_sp[0],setSpikeSets=_sp[1];
   var _activePlate=useState(0),activePlate=_activePlate[0],setActivePlate=_activePlate[1];
   var _collapsedPlate=useState(false),collapsedPlate=_collapsedPlate[0],setCollapsedPlate=_collapsedPlate[1];
+  // Standard-curve point exclusions per plate. Shape: { "0": [2, 5], "1": [] } where keys are
+  // plate indices and values are arrays of point row-indices (0-based) to omit from the regression.
+  // Analyst toggles via checkboxes in the Standard Curve data table; refit is manual via button.
+  var _xstd=useState({}),excludedStdPts=_xstd[0],setExcludedStdPts=_xstd[1];
+  // Alternative standard source per plate. Shape: { "0": "default" | sampleIndexNumber }.
+  // When set to a sample index (0, 1, 2...), that sample group is used as the standard
+  // source for that plate's curve fit instead of the default standard column. Useful for
+  // "what would my data look like if I used Sample 3 as my standard?" comparisons.
+  // When a sample is used as the standard, it is also excluded from the sample results
+  // (back-calculating a curve against itself is trivial and uninformative).
+  var _alts=useState({}),altStdSrc=_alts[0],setAltStdSrc=_alts[1];
 
   var u=function(k,v){setCfg(function(p){var n={};for(var x in p)n[x]=p[x];n[k]=v;return n;});};
   useEffect(function(){if(activePlate>=np)setActivePlate(np-1);},[np]);
@@ -14494,6 +14515,14 @@ function App() {
   var removeSpike=function(i){setSpikeSets(function(p){return p.filter(function(_,idx){return idx!==i;});});};
 
   var analyze=useCallback(function(){
+    // ─── DEFERRED FEATURE (planned, not yet built) ───
+    // TODO #4 — Side-by-side curve comparison.
+    //   Extension of #3 (alt standard source, now built). Add state: `compareCurves`:
+    //   array of {plateIdx, altSrcChoice} pairs. When 2+ entries are set, render a
+    //   comparison view in Results showing each sample's back-calculated concentration
+    //   under each curve choice. StdChart already supports multi-series overlay via
+    //   props.series — that's the rendering primitive to reuse.
+
     // ── AUTOSAMPLER PATH ───────────────────────────────────────────────────
     // For vials/LC-MS mode, build the result from cfg.msInjections (flat list of injection rows).
     // Each row: {sampleType, sampleName, levelOrDilution, reps:[]}.
@@ -14724,6 +14753,33 @@ function App() {
       var plate=pl[pi];if(!plate)continue;var ly=getLayout();
       var stdG=ly.groups.find(function(g){return g.type==="std";});
       var smpG=ly.groups.filter(function(g){return g.type==="smp";});
+
+      // ─── Alternative standard source override (Task #3) ─────────────────
+      // If the analyst has set an alternative source for this plate, swap stdG
+      // to point at that sample group instead. The chosen sample is also
+      // removed from smpG to avoid back-calculating it against itself.
+      var altSrcRaw = altStdSrc[String(pi)];
+      var altSrcIdx = (altSrcRaw != null && altSrcRaw !== "default" && altSrcRaw !== "") ? parseInt(altSrcRaw) : null;
+      if (altSrcIdx != null && !isNaN(altSrcIdx) && altSrcIdx >= 0 && altSrcIdx < smpG.length) {
+        var pickedAsStd = smpG[altSrcIdx];
+        // Build a synthetic stdG that mirrors the structure but pulls cells from the picked sample
+        stdG = {
+          type: "std",
+          name: pickedAsStd.name + " (used as standard)",
+          dilutions: pickedAsStd.dilutions,
+          blankCells: stdG ? stdG.blankCells : [],  // keep the original blank reference if it exists
+          startCol: pickedAsStd.startCol,
+          cols: pickedAsStd.cols,
+          axis: pickedAsStd.axis,
+          _isAlt: true,
+          _origSampleIdx: altSrcIdx,
+          _origSampleName: pickedAsStd.name,
+        };
+        // Remove this sample from the analyzed sample list — it's now the curve, not a sample
+        smpG = smpG.filter(function(_, idx){ return idx !== altSrcIdx; });
+      }
+      // ─── end alternative standard source ───────────────────────────────
+
       var sRows=ly.dilsPerRep; // number of dilution levels (excludes blank)
       var concs=[],c2=sc*df1;for(var i=0;i<sRows;i++){concs.push(c2);c2*=ds;}
       // Read replicate values for a group's dilutions: returns [[v,v,..], [v,v,..], ...] one array per dilution level
@@ -14741,14 +14797,21 @@ function App() {
       var bA=readBlankAvg(stdG);
       if(bA==null) bA=0;
       var sP=[],xR=[],yR=[],dbS=[];
+      // Honor per-plate exclusions from analyst-toggled checkboxes in the standard curve table.
+      // Excluded points STILL appear in the data table (with a strikethrough), but are omitted
+      // from the regression input arrays (xR, yR).
+      var plateExclusions = (excludedStdPts && excludedStdPts[pi]) || [];
       for(i=0;i<sRows;i++){
         var raw=stdDils[i].filter(function(v){return v!==null;});
         if(!raw.length)continue;
         var cor=raw.map(function(v){return v-bA;});
         var a=avg(cor),sd=sdc(cor),cv=cor.length>1?cvc(cor):0;
-        sP.push({conc:concs[i],avg:a,sd:sd,cv:cv});
-        xR.push(concs[i]);yR.push(a);
-        dbS.push({row:i,conc:concs[i],raw:raw,blank:bA,cor:cor,avg:a,sd:sd,cv:cv});
+        var isExcluded = plateExclusions.indexOf(i) !== -1;
+        sP.push({conc:concs[i],avg:a,sd:sd,cv:cv,excluded:isExcluded,rowIdx:i});
+        if (!isExcluded) {
+          xR.push(concs[i]);yR.push(a);
+        }
+        dbS.push({row:i,conc:concs[i],raw:raw,blank:bA,cor:cor,avg:a,sd:sd,cv:cv,excluded:isExcluded});
       }
       // Curve model selection priority:
       //   - cfg.fm "auto" → fit all four models, pick highest R²
@@ -14817,24 +14880,36 @@ function App() {
           curveModel="linear";
         }
       }
-      var fFn=function(x){
-        if(lf.model==="linear") return lf.slope*x+lf.intercept;
-        if(lf.model==="loglog"){
-          if(x<=0||!isFinite(x)) return null;
-          return Math.pow(10, lf.slope*Math.log10(x) + lf.intercept);
-        }
-        return logisticY(x,lf.params,lf.model);
-      };
-      var iFn=function(y){
-        if(lf.model==="linear") return lf.slope?(y-lf.intercept)/lf.slope:null;
-        if(lf.model==="loglog"){
-          if(y<=0||!isFinite(y)||!lf.slope) return null;
-          var lx = (Math.log10(y) - lf.intercept) / lf.slope;
-          var xv = Math.pow(10, lx);
-          return isFinite(xv) && xv > 0 ? xv : null;
-        }
-        return logisticInv(y,lf.params,lf.model);
-      };
+      // Closure capture fix: wrap fFn/iFn creation in an IIFE so each plate's pair
+      // of functions binds its OWN lf, not the loop-shared reference. Without this,
+      // subsequent iterations overwrite the same `lf` and ALL plates' fFn/iFn end
+      // up using the last plate's fit. Visible symptom: when 2 plates have different
+      // assays (e.g. Bradford + BCA), one plate's curve line is drawn with the
+      // wrong slope/intercept even though the equation text shows the right values.
+      var fitFns = (function(lfLocal){
+        return {
+          fFn: function(x){
+            if(lfLocal.model==="linear") return lfLocal.slope*x+lfLocal.intercept;
+            if(lfLocal.model==="loglog"){
+              if(x<=0||!isFinite(x)) return null;
+              return Math.pow(10, lfLocal.slope*Math.log10(x) + lfLocal.intercept);
+            }
+            return logisticY(x,lfLocal.params,lfLocal.model);
+          },
+          iFn: function(y){
+            if(lfLocal.model==="linear") return lfLocal.slope?(y-lfLocal.intercept)/lfLocal.slope:null;
+            if(lfLocal.model==="loglog"){
+              if(y<=0||!isFinite(y)||!lfLocal.slope) return null;
+              var lx = (Math.log10(y) - lfLocal.intercept) / lfLocal.slope;
+              var xv = Math.pow(10, lx);
+              return isFinite(xv) && xv > 0 ? xv : null;
+            }
+            return logisticInv(y,lfLocal.params,lfLocal.model);
+          }
+        };
+      })(lf);
+      var fFn = fitFns.fFn;
+      var iFn = fitFns.iFn;
       var mxA=Math.max.apply(null,yR),mnA=Math.min.apply(null,yR),midA=(mxA+mnA)/2;
       var samps=[];
       for(var si=0;si<smpG.length;si++){
@@ -14873,7 +14948,7 @@ function App() {
         }
         samps.push({name:nm,dils:dils,aS:selAll(dils,midA,assayKind),dbD:dbD});
       }
-      all.push({sc:{slope:lf.slope,intercept:lf.intercept,r2:lf.r2,pts:sP,model:lf.model,params:lf.params,fallback:lf.fallback},fFn:fFn,iFn:iFn,fL:lf.model==="linear"?"Linear":(lf.model==="loglog"?"Log-log":(lf.model==="5pl"?"5PL":"4PL")),samps:samps,dbS:dbS,bA:bA,mxA:mxA,mnA:mnA});
+      all.push({sc:{slope:lf.slope,intercept:lf.intercept,r2:lf.r2,pts:sP,model:lf.model,params:lf.params,fallback:lf.fallback},fFn:fFn,iFn:iFn,fL:lf.model==="linear"?"Linear":(lf.model==="loglog"?"Log-log":(lf.model==="5pl"?"5PL":"4PL")),samps:samps,dbS:dbS,bA:bA,mxA:mxA,mnA:mnA, altStdInfo: stdG._isAlt ? {origSampleIdx: stdG._origSampleIdx, origSampleName: stdG._origSampleName} : null});
     }
     if(all.length===0){window.alert("Analysis produced no results — the plates may be empty or missing standard curve data. Try loading the demo to verify setup.");return;}
     var anyCurve = all.some(function(p){return p.sc && p.sc.pts && p.sc.pts.length>=2;});
@@ -14881,7 +14956,7 @@ function App() {
     setRes(all);setVp(0);setTab(1);setMathRow(null);setPicks({});
     var ex={};all.forEach(function(p,pi){p.samps.forEach(function(_,si){ex[pi+"-"+si]=true;});});setExpanded(ex);
     var rex={};all.forEach(function(p,pi){p.samps.forEach(function(_,si){rex[pi+"-"+si]=true;});});setResultsExpanded(rex);
-  },[cfg,pl,np,sr,xr,nl,det]);
+  },[cfg,pl,np,sr,xr,nl,det,excludedStdPts,altStdSrc]);
 
   var gsc=function(pi,si){
     var apk=pi+"-"+si;
@@ -16060,9 +16135,48 @@ function App() {
       } />
 
       <div style={{padding:"1rem 16px"}}>
-      <div style={{display:"flex",gap:6,marginBottom:"1.25rem",background:"#eef3f8",borderRadius:14,padding:5,border:"1px solid #e2e9f2"}}>{TABS.map(function(l,i){return <button key={i} onClick={function(){
-        setTab(i);
-      }} onMouseEnter={function(e){ if (i!==tab) { e.currentTarget.style.background="#e3eaf3"; e.currentTarget.style.color=NAVY; }}} onMouseLeave={function(e){ if (i!==tab) { e.currentTarget.style.background="transparent"; e.currentTarget.style.color="#4a5568"; }}} style={{flex:1,padding:"9px 14px",fontSize:12,fontWeight:i===tab?700:600,cursor:"pointer",background:i===tab?"#fff":"transparent",color:i===tab?NAVY:"#4a5568",border:"none",borderRadius:10,boxShadow:i===tab?"0 4px 14px rgba(11,42,111,0.10)":"none",borderBottom:i===tab?"3px solid "+TEAL:"3px solid transparent",transition:"all 0.15s ease"}}>{l}</button>;})}
+      <div style={{display:"flex",gap:6,marginBottom:"1.25rem",background:"#eef3f8",borderRadius:14,padding:5,border:"1px solid #e2e9f2"}}>{TABS.map(function(l,i){
+        // Detect whether the Analysis tab should show a "ready to analyze" dot:
+        // any plate has at least one non-empty cell AND results haven't been computed yet
+        var showReadyDot = false;
+        if (i === 1 && !res && cfg.layout !== "autosampler") {
+          var anyData = false;
+          for (var pi=0; pi<np && !anyData; pi++) {
+            var d = pl[pi];
+            if (!d) continue;
+            for (var rr=0; rr<8 && !anyData; rr++) {
+              for (var cc=0; cc<12 && !anyData; cc++) {
+                if (d[rr] && d[rr][cc] && String(d[rr][cc]).trim()) anyData = true;
+              }
+            }
+          }
+          showReadyDot = anyData;
+        }
+        return <button key={i} onClick={function(){
+          // Click Analysis tab (i===1): if no results yet but data is present, auto-run analyze
+          if (i === 1 && !res && cfg.layout !== "autosampler") {
+            var hasAnyData = false;
+            for (var pi2=0; pi2<np && !hasAnyData; pi2++) {
+              var d2 = pl[pi2];
+              if (!d2) continue;
+              for (var rr2=0; rr2<8 && !hasAnyData; rr2++) {
+                for (var cc2=0; cc2<12 && !hasAnyData; cc2++) {
+                  if (d2[rr2] && d2[rr2][cc2] && String(d2[rr2][cc2]).trim()) hasAnyData = true;
+                }
+              }
+            }
+            if (hasAnyData) {
+              // analyze() sets tab to 1 internally on success
+              analyze();
+              return;
+            }
+          }
+          setTab(i);
+        }} onMouseEnter={function(e){ if (i!==tab) { e.currentTarget.style.background="#e3eaf3"; e.currentTarget.style.color=NAVY; }}} onMouseLeave={function(e){ if (i!==tab) { e.currentTarget.style.background="transparent"; e.currentTarget.style.color="#4a5568"; }}} style={{flex:1,padding:"9px 14px",fontSize:12,fontWeight:i===tab?700:600,cursor:"pointer",background:i===tab?"#fff":"transparent",color:i===tab?NAVY:"#4a5568",border:"none",borderRadius:10,boxShadow:i===tab?"0 4px 14px rgba(11,42,111,0.10)":"none",borderBottom:i===tab?"3px solid "+TEAL:"3px solid transparent",transition:"all 0.15s ease",position:"relative"}}>
+          {l}
+          {showReadyDot && <span title="Data is ready — click to analyze" style={{display:"inline-block",width:7,height:7,borderRadius:"50%",background:TEAL,marginLeft:6,verticalAlign:"middle",animation:"none"}} />}
+        </button>;
+      })}
       {dbg&&<button onClick={function(){setTab(5);}} style={{padding:"9px 14px",fontSize:12,fontWeight:tab===5?700:500,cursor:"pointer",background:tab===5?"#fef3e2":"transparent",color:tab===5?"#a05a00":"#aeaeb2",border:"none",borderRadius:10}}>Debug</button>}</div>
 
       {/* DATA ENTRY */}
@@ -16258,6 +16372,43 @@ function App() {
             <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6,gap:10,flexWrap:"wrap"}}>
               <div style={{fontSize:14,fontWeight:700,color:"#30437a"}}>Plate {pi+1}{isTransposed?<span style={{fontSize:11,fontWeight:500,color:"#6337b9",marginLeft:8,padding:"2px 8px",background:"#f7f1ff",borderRadius:4}}>Transposed (Andrew+) layout</span>:null}</div>
               <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                <button onClick={function(){
+                  // Build TSV: row letters in first column, columns 1-12 across
+                  var d = pl[pi];
+                  if(!d) { return; }
+                  var rows = [];
+                  // Header row: blank corner + column numbers
+                  rows.push(["", "1","2","3","4","5","6","7","8","9","10","11","12"].join("\t"));
+                  var letters = ["A","B","C","D","E","F","G","H"];
+                  for(var r=0; r<8; r++){
+                    var rowVals = [letters[r]];
+                    for(var c=0; c<12; c++){
+                      rowVals.push((d[r] && d[r][c]) ? d[r][c] : "");
+                    }
+                    rows.push(rowVals.join("\t"));
+                  }
+                  var tsv = rows.join("\n");
+                  try {
+                    if(navigator.clipboard && navigator.clipboard.writeText){
+                      navigator.clipboard.writeText(tsv).then(function(){
+                        // Brief visual confirmation via the button text
+                      });
+                    } else {
+                      var ta = document.createElement("textarea");
+                      ta.value = tsv;
+                      ta.style.position = "fixed"; ta.style.left = "-9999px";
+                      document.body.appendChild(ta);
+                      ta.select();
+                      try { document.execCommand("copy"); } catch(e){}
+                      document.body.removeChild(ta);
+                    }
+                  } catch(e) {
+                    window.alert("Copy failed.");
+                  }
+                }} style={{background:"#fff",border:"1px solid #d8dfeb",color:"#0b2a6f",padding:"4px 10px",borderRadius:8,fontSize:11,fontWeight:600,cursor:"pointer",display:"inline-flex",alignItems:"center",gap:5}} title={"Copy Plate "+(pi+1)+" as tab-separated values (paste into Excel, email, or notebook)"}>
+                  <span style={{fontSize:13,lineHeight:1}}>📋</span>
+                  Copy plate
+                </button>
                 <button onClick={function(){
                   var hasData = pl[pi] && pl[pi].some(function(row){return row && row.some(function(v){return v && v.trim();});});
                   if(!hasData) return;
@@ -17384,6 +17535,41 @@ function App() {
           };
         });
         return (<div>
+        {/* Alternative standard source picker — lets analyst pick a sample as the curve source
+            for the focused plate without re-pasting data. Used to explore "what if Sample N
+            were my standard?" comparisons. The picked sample is excluded from sample results
+            for that plate, since back-calculating against itself is circular. */}
+        {smpGroups.length > 0 && (function(){
+          var currentAlt = altStdSrc[String(vp)] || "default";
+          var currentAltInfo = res[vp] && res[vp].altStdInfo;
+          var pendingChange = String(currentAlt) !== (currentAltInfo ? String(currentAltInfo.origSampleIdx) : "default");
+          return <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,marginBottom:10,padding:"9px 14px",background:currentAltInfo?"#fff8e6":"#f7fbff",border:"1px solid "+(currentAltInfo?"#f0d99e":"#dfe7f2"),borderRadius:10,flexWrap:"wrap"}}>
+            <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+              <span style={{fontSize:11,fontWeight:700,color:currentAltInfo?"#7a5a00":"#5a6984",textTransform:"uppercase",letterSpacing:1}}>Standards from:</span>
+              <select value={String(currentAlt)} onChange={function(e){
+                var v = e.target.value;
+                setAltStdSrc(function(prev){
+                  var next = Object.assign({},prev);
+                  if (v === "default") delete next[String(vp)];
+                  else next[String(vp)] = v;
+                  return next;
+                });
+              }} style={{padding:"5px 9px",borderRadius:7,border:"1px solid #d8dfeb",fontSize:12,background:"#fff",fontFamily:"inherit",cursor:"pointer"}}>
+                <option value="default">Default — plate's standard column ({cfg.sn || "BSA"})</option>
+                {smpGroups.map(function(g,si){
+                  return <option key={si} value={String(si)}>{g.name || ("Sample "+(si+1))} — use as standard</option>;
+                })}
+              </select>
+              {currentAltInfo && <span style={{fontSize:11,color:"#7a5a00",fontStyle:"italic"}}>Plate {vp+1}'s curve was built from <strong>{currentAltInfo.origSampleName}</strong> instead of the default standard. {currentAltInfo.origSampleName} is excluded from sample results for this plate.</span>}
+            </div>
+            <div style={{display:"flex",gap:6}}>
+              {pendingChange && <button onClick={function(){analyze();}} style={{background:"#0b2a6f",color:"#fff",border:"none",padding:"5px 12px",borderRadius:6,fontSize:11,fontWeight:700,cursor:"pointer"}}>Refit with new source</button>}
+              {currentAltInfo && !pendingChange && <button onClick={function(){
+                setAltStdSrc(function(prev){var next=Object.assign({},prev);delete next[String(vp)];return next;});
+              }} style={{background:"#fff",border:"1px solid #d8dfeb",color:"#5a6984",padding:"5px 10px",borderRadius:6,fontSize:11,fontWeight:600,cursor:"pointer"}}>Back to default</button>}
+            </div>
+          </div>;
+        })()}
         {assayKind==="elisa"&&<div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,marginBottom:12,padding:"10px 14px",background:"#f7f1ff",border:"1px solid #e2d7fb",borderRadius:12,flexWrap:"wrap"}}>
           <div>
             <div style={{fontSize:12,fontWeight:800,color:"#6337b9"}}>ELISA standard curve fit</div>
@@ -17454,7 +17640,45 @@ function App() {
           <span style={{flex:1}}></span>
           <span style={{fontSize:10,color:"#8e9bb5",fontStyle:"italic"}}>{(function(){var t=0;res.forEach(function(pp){t+=pp.samps.length;});return t;})()} sample{(function(){var t=0;res.forEach(function(pp){t+=pp.samps.length;});return t===1?"":"s";})()} total{res.length>1?" across "+res.length+" plates":""}</span>
         </div>}
-        <details style={{marginBottom:"1rem"}}><summary style={{fontSize:13,fontWeight:700,cursor:"pointer"}}>Standard curve data {res.length>1 ? "— "+stdDisplayName(vp) : ""}</summary><div style={{fontSize:11,color:"#6e6e73",marginTop:8}}>Optical responses shown here are <strong>blank/background-corrected</strong> before fitting.{res.length>1 ? " Showing focused plate only — change focus in the dropdown on the chart to see another plate's data." : ""}</div><table style={{borderCollapse:"collapse",width:"100%",marginTop:8}}><thead><tr><th style={{...thS,textAlign:"center"}}>[{cfg.sn}] (<UnitPill unit={displayUnitChart} onChange={setDisplayUnitChart} size={11} color="#6e6e73" hoverColor="#0b2a6f" weight={700} />)</th><th style={{...thS,textAlign:"center",lineHeight:1.3}}><div>Avg corrected</div><div>optical response</div></th><th style={{...thS,textAlign:"center"}}>SD</th><th style={{...thS,textAlign:"center"}}>CV (%)</th></tr></thead><tbody>{p.sc.pts.map(function(pt,i){var concDisp = convertConc(pt.conc, unit, displayUnitChart); return <tr key={i}><td style={tdS}>{sig3(concDisp)}</td><td style={{...tdS,textAlign:"center"}}>{fmtResponse(pt.avg)}</td><td style={{...tdS,textAlign:"center"}}>{fmtResponse(pt.sd)}</td><td style={{...tdS,textAlign:"center"}}><CVB val={pt.cv} /></td></tr>;})}</tbody></table>
+        <details style={{marginBottom:"1rem"}}><summary style={{fontSize:13,fontWeight:700,cursor:"pointer"}}>Standard curve data {res.length>1 ? "— "+stdDisplayName(vp) : ""}</summary><div style={{fontSize:11,color:"#6e6e73",marginTop:8}}>Optical responses shown here are <strong>blank/background-corrected</strong> before fitting.{res.length>1 ? " Showing focused plate only — change focus in the dropdown on the chart to see another plate's data." : ""} <strong style={{color:"#0b2a6f"}}>Uncheck a row</strong> to exclude that calibration point from the regression; click <strong>Refit</strong> to apply.</div><table style={{borderCollapse:"collapse",width:"100%",marginTop:8}}><thead><tr><th style={{...thS,textAlign:"center",width:60}} title="Include this point in the curve fit?">Include</th><th style={{...thS,textAlign:"center"}}>[{cfg.sn}] (<UnitPill unit={displayUnitChart} onChange={setDisplayUnitChart} size={11} color="#6e6e73" hoverColor="#0b2a6f" weight={700} />)</th><th style={{...thS,textAlign:"center",lineHeight:1.3}}><div>Avg corrected</div><div>optical response</div></th><th style={{...thS,textAlign:"center"}}>SD</th><th style={{...thS,textAlign:"center"}}>CV (%)</th></tr></thead><tbody>{p.sc.pts.map(function(pt,i){var concDisp = convertConc(pt.conc, unit, displayUnitChart); var rowIdx = pt.rowIdx != null ? pt.rowIdx : i; var isExcluded = !!pt.excluded; var rowStyle = isExcluded ? {textDecoration:"line-through",color:"#aeaeb2",opacity:0.7} : {}; return <tr key={i} style={rowStyle}><td style={{...tdS,textAlign:"center"}}><input type="checkbox" checked={!isExcluded} title={isExcluded?"Excluded from fit — check to include":"Included in fit — uncheck to exclude"} onChange={function(e){
+              var include = e.target.checked;
+              setExcludedStdPts(function(prev){
+                var next = Object.assign({}, prev);
+                var plateKey = String(vp);
+                var arr = (next[plateKey] || []).slice();
+                if (include) {
+                  arr = arr.filter(function(x){return x !== rowIdx;});
+                } else {
+                  if (arr.indexOf(rowIdx) === -1) arr.push(rowIdx);
+                }
+                next[plateKey] = arr;
+                return next;
+              });
+            }} /></td><td style={tdS}>{sig3(concDisp)}</td><td style={{...tdS,textAlign:"center"}}>{fmtResponse(pt.avg)}</td><td style={{...tdS,textAlign:"center"}}>{fmtResponse(pt.sd)}</td><td style={{...tdS,textAlign:"center"}}><CVB val={pt.cv} /></td></tr>;})}</tbody></table>
+        {(function(){
+          // Show "Refit" button when there are any exclusions OR when the rendered curve doesn't reflect current exclusions.
+          var plateKey = String(vp);
+          var currentExclusions = (excludedStdPts[plateKey] || []);
+          var renderedExclusions = (p.sc.pts || []).filter(function(pt){return pt.excluded;}).map(function(pt){return pt.rowIdx;});
+          // Sort and compare to detect drift
+          var sortedCur = currentExclusions.slice().sort(function(a,b){return a-b;});
+          var sortedRen = renderedExclusions.slice().sort(function(a,b){return a-b;});
+          var needsRefit = JSON.stringify(sortedCur) !== JSON.stringify(sortedRen);
+          if (currentExclusions.length === 0 && !needsRefit) return null;
+          return <div style={{marginTop:10,padding:"10px 12px",background:needsRefit?"#fef9eb":"#f4faf4",border:"1px solid "+(needsRefit?"#f0d99e":"#c8e6d8"),borderRadius:8,display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,flexWrap:"wrap"}}>
+            <div style={{fontSize:11,color:needsRefit?"#7a5a00":"#1b5a4d",lineHeight:1.5}}>
+              {needsRefit
+                ? <span><strong>Exclusions changed.</strong> {currentExclusions.length} point{currentExclusions.length===1?"":"s"} marked for exclusion on this plate — click Refit to apply.</span>
+                : <span><strong>{currentExclusions.length} point{currentExclusions.length===1?"":"s"} excluded</strong> from this plate's regression. The Scribe Methods section will disclose this automatically.</span>}
+            </div>
+            <div style={{display:"flex",gap:6}}>
+              {currentExclusions.length>0 && <button onClick={function(){
+                setExcludedStdPts(function(prev){var next=Object.assign({},prev);next[plateKey]=[];return next;});
+              }} style={{background:"#fff",border:"1px solid #d8dfeb",color:"#5a6984",padding:"5px 10px",borderRadius:6,fontSize:11,fontWeight:600,cursor:"pointer"}}>Clear exclusions</button>}
+              {needsRefit && <button onClick={function(){analyze();}} style={{background:"#0b2a6f",color:"#fff",border:"none",padding:"5px 14px",borderRadius:6,fontSize:11,fontWeight:700,cursor:"pointer"}}>Refit curve</button>}
+            </div>
+          </div>;
+        })()}
         {/* Regression parameters table — fitted-curve coefficients for the focused plate.
             Shape depends on the fit model: linear shows slope/intercept/R²; 4PL adds A/B/C/D; 5PL adds G as well.
             C (the half-maximal concentration) is shown in the active display unit so it's directly interpretable.
@@ -17546,9 +17770,9 @@ function App() {
                 // Row tooltip prioritizes BQL (technical-but-actionable) over OOR.
                 var rowTitle = "";
                 if (isBQL) {
-                  rowTitle = "BQL (Below Quantification Limit): response is technically within the calibrated range, but the curve fit can't reliably invert at this signal level. Common at the very low end of log-log or 4PL fits, near the curve's lower asymptote. Do not report this value.";
+                  rowTitle = "Reading is in the curve range, but the curve here is too flat to convert it to a concentration reliably. Don't report this value — try a different dilution.";
                 } else if (!d.ir && instructor) {
-                  rowTitle = "OOR — back-calculated value shown for teaching only. Do not report (extrapolated outside the standard curve range).";
+                  rowTitle = "Out of curve range — the back-calculated value shown is for teaching only. Don't report it (it's extrapolated outside what the standards covered).";
                 }
                 return [
                   <tr key={di} style={{background:bg,cursor:instructor?"pointer":"default"}} onClick={function(){if(!instructor)return;if(isMO)setMathRow(null);else setMathRow({pi:vp,si:si,di:d.di});}} title={rowTitle}>
@@ -17557,7 +17781,7 @@ function App() {
                     <td style={{...tdS,textAlign:"center"}}><CVB val={d.cv} /></td>
                     <td style={{...tdS,textAlign:"center",color:!d.ir&&instructor?"#a05a00":"inherit",fontStyle:!d.ir&&instructor?"italic":"normal"}}>{d.cW!=null?(d.ir?sig3(convertConc(d.cW, unit, displayUnitChart)):(instructor?sig3(convertConc(d.cW, unit, displayUnitChart)):"---")):"---"}</td>
                     <td style={{...tdS,textAlign:"center",fontWeight:isRec||isPk?700:400,color:!d.ir&&instructor?"#a05a00":"inherit",fontStyle:!d.ir&&instructor?"italic":"normal"}}>{d.cS!=null?(d.ir?sig3(convertConc(d.cS, unit, displayUnitChart)):(instructor?sig3(convertConc(d.cS, unit, displayUnitChart)):"---")):"---"}</td>
-                    <td style={{...tdS,textAlign:"center"}}>{isBQL?<span style={{color:"#d70015",fontWeight:700}} title="BQL: response is in the curve's calibrated range but the curve fit can't invert here. Click row in instructor mode for math.">BQL</span>:(d.ir?<span style={{color:"#1b7f6a",fontWeight:700}}>IR</span>:<span style={{color:"#d70015"}}>OOR</span>)}</td>
+                    <td style={{...tdS,textAlign:"center"}}>{isBQL?<span style={{color:"#d70015",fontWeight:700,cursor:"help"}} title="Reading is in range, but the curve here is too flat to reliably convert it to a concentration. Try a different dilution.">BQL</span>:(d.ir?<span style={{color:"#1b7f6a",fontWeight:700,cursor:"help"}} title="In range — reading falls within the calibrated standard curve, can be reported.">IR</span>:<span style={{color:"#d70015",cursor:"help"}} title="Out of range — reading is outside the calibrated standard curve. Don't report this value; pick a different dilution that falls within the curve.">OOR</span>)}</td>
                   </tr>,
                   isMO&&dbD2?<tr key={di+"m"}><td colSpan={6} style={{padding:0,border:"none"}}><MathWalk d={dbD2} slope={p.sc.slope} intercept={p.sc.intercept} params={p.sc.params} curveModel={p.sc.model} sn={cfg.sn} target={targetP} unit={unit} displayUnit={displayUnitChart} instructor={instructor} /></td></tr>:null
                 ];})}</tbody></table>
@@ -17611,6 +17835,160 @@ function App() {
             <span style={{fontSize:14}}>→</span>
           </button>
         </div>}
+
+        {/* ─── Export full Analysis as CSV ─────────────────────────────────────
+            Reviewers / QA / instructors often need to see EVERY dilution row
+            for EVERY sample — not just the analyst's pick that lands in Results.
+            This export captures the entire Analysis page state: per-plate curve
+            fit, all calibration points (including excluded ones), and every
+            sample's full dilution table with back-calculated values, CV, in-range
+            status, and BQL flagging. Matches the existing CSV-via-Blob pattern
+            used elsewhere in the codebase. */}
+        <div style={{marginTop:"1.25rem",padding:"14px 18px",background:"#fff",border:"1px solid #dfe7f2",borderRadius:12,display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:10}}>
+          <div style={{fontSize:11,color:"#5a6984",lineHeight:1.5,flex:1,minWidth:240}}>
+            <strong style={{color:"#0b2a6f"}}>Export Analysis</strong> — full per-sample dilution data, curve fit parameters, and calibration points for all plates. For QA review or instructor walkthrough.
+          </div>
+          <button onClick={function(){
+            // Build CSV with section headers separated by blank lines.
+            var esc = function(v){
+              var s = String(v == null ? "" : v);
+              if (s.indexOf(",")>=0 || s.indexOf('"')>=0 || s.indexOf("\n")>=0) {
+                return '"' + s.replace(/"/g, '""') + '"';
+              }
+              return s;
+            };
+            var lines = [];
+            // Header
+            lines.push(esc("eSSF Bench — Analysis Export"));
+            lines.push(esc("Generated") + "," + esc(new Date().toISOString().replace("T"," ").slice(0,16)));
+            lines.push(esc("Assay") + "," + esc(cfg.target || "—") + "," + esc(cfg.sn ? "Standard: "+cfg.sn : ""));
+            lines.push(esc("Concentration unit") + "," + esc(unit) + "," + esc("Display unit: " + (displayUnitChart || unit)));
+            lines.push(esc("Plates analyzed") + "," + esc(res.length));
+            lines.push("");
+
+            // Per-plate sections
+            res.forEach(function(pp, pi){
+              var plateLabel = stdDisplayName(pi);
+              lines.push(esc("━━━ PLATE " + (pi+1) + " — " + plateLabel + " ━━━"));
+              lines.push("");
+
+              // Alt standard source disclosure
+              if (pp.altStdInfo) {
+                lines.push(esc("⚠ Curve source override") + "," + esc("Curve was built from " + pp.altStdInfo.origSampleName + " instead of the default standard column. That sample is excluded from sample results for this plate."));
+                lines.push("");
+              }
+
+              // Fit summary
+              lines.push(esc("— Curve fit —"));
+              lines.push(esc("Model") + "," + esc(pp.fL || pp.sc.model));
+              if (pp.sc.model === "linear") {
+                var slopeDisp = pp.sc.slope != null ? pp.sc.slope / (convertConc(1, unit, displayUnitChart || unit) || 1) : null;
+                lines.push(esc("Equation") + "," + esc("y = " + sig3(slopeDisp) + " · x + " + sig3(pp.sc.intercept)));
+                lines.push(esc("Slope (per " + (displayUnitChart || unit) + ")") + "," + esc(sig3(slopeDisp)));
+                lines.push(esc("Intercept") + "," + esc(sig3(pp.sc.intercept)));
+              } else if (pp.sc.model === "loglog") {
+                lines.push(esc("Equation") + "," + esc("log10(y) = " + sig3(pp.sc.slope) + " · log10(x) + " + sig3(pp.sc.intercept)));
+                lines.push(esc("Slope") + "," + esc(sig3(pp.sc.slope)));
+                lines.push(esc("Intercept") + "," + esc(sig3(pp.sc.intercept)));
+              } else if (pp.sc.params) {
+                lines.push(esc("Params (4PL/5PL)") + "," + esc(JSON.stringify(pp.sc.params)));
+              }
+              lines.push(esc("R²") + "," + esc(pp.sc.r2 != null ? pp.sc.r2.toFixed(4) : "—"));
+              lines.push(esc("Blank-corrected curve range (avg signal)") + "," + esc(pp.mnA != null && pp.mxA != null ? sig3(pp.mnA) + " — " + sig3(pp.mxA) : "—"));
+              if (pp.sc.fallback) {
+                lines.push(esc("Note") + "," + esc("Fit fell back to linear (preferred model did not converge)"));
+              }
+              lines.push("");
+
+              // Calibration points
+              lines.push(esc("— Standard curve points —"));
+              lines.push([esc("Point #"), esc("[" + (cfg.sn || "Standard") + "] (" + (displayUnitChart || unit) + ")"), esc("Avg corrected response"), esc("SD"), esc("CV (%)"), esc("Status")].join(","));
+              (pp.sc.pts || []).forEach(function(pt, i){
+                var concDisp = convertConc(pt.conc, unit, displayUnitChart || unit);
+                lines.push([
+                  esc(i+1),
+                  esc(sig3(concDisp)),
+                  esc(fmtResponse(pt.avg)),
+                  esc(fmtResponse(pt.sd)),
+                  esc(pt.cv != null ? (pt.cv*100).toFixed(1) : "—"),
+                  esc(pt.excluded ? "EXCLUDED from fit" : "Included")
+                ].join(","));
+              });
+              lines.push("");
+
+              // Per-sample dilution tables — the headline content
+              lines.push(esc("— Sample dilutions (all rows shown) —"));
+              lines.push([
+                esc("Sample"),
+                esc("Dilution #"),
+                esc("Avg corrected signal"),
+                esc("CV (%)"),
+                esc("In range?"),
+                esc("Back-calc conc on plate (" + (displayUnitChart || unit) + ")"),
+                esc("Dilution factor"),
+                esc("Concentration in sample (" + (displayUnitChart || unit) + ")"),
+                esc("Status"),
+                esc("Picked?")
+              ].join(","));
+              (pp.samps || []).forEach(function(s, si){
+                var apk = pi + "-" + si;
+                (s.dils || []).forEach(function(d){
+                  var isBQL = d.ir && d.cW == null;
+                  var status = isBQL ? "BQL (in range but curve too flat)" : (d.ir ? "In range" : "Out of range");
+                  if (d.cv != null && d.cv > 0.20) status += " · CV > 20%";
+                  var pickedDi = picks && picks[apk] != null ? picks[apk] : null;
+                  var isPicked = pickedDi === d.di;
+                  var concPlate = d.cW != null ? convertConc(d.cW, unit, displayUnitChart || unit) : null;
+                  var concSample = d.cS != null ? convertConc(d.cS, unit, displayUnitChart || unit) : null;
+                  lines.push([
+                    esc(s.name || ("Sample " + (si+1))),
+                    esc(d.di),
+                    esc(fmtResponse(d.avgA)),
+                    esc(d.cv != null ? (d.cv*100).toFixed(1) : "—"),
+                    esc(d.ir ? "Yes" : "No"),
+                    esc(concPlate != null ? sig3(concPlate) : "—"),
+                    esc(d.df != null ? d.df : "—"),
+                    esc(concSample != null ? sig3(concSample) : "—"),
+                    esc(status),
+                    esc(isPicked ? "✓" : "")
+                  ].join(","));
+                });
+              });
+              lines.push("");
+
+              // Excluded points note
+              var plateExclusions = (excludedStdPts && excludedStdPts[String(pi)]) || [];
+              if (plateExclusions.length > 0) {
+                lines.push(esc("Note: " + plateExclusions.length + " calibration point(s) excluded from this plate's fit at the analyst's discretion (rows: " + plateExclusions.map(function(x){return x+1;}).join(", ") + ")."));
+                lines.push("");
+              }
+
+              lines.push("");
+            });
+
+            // Footer
+            lines.push(esc("End of export"));
+            lines.push(esc("BQL = reading is in range but the curve is too flat to convert it to a concentration reliably."));
+            lines.push(esc("Out of range = reading is outside the standard curve; do not report."));
+            lines.push(esc("Status column reflects analyst-mode logic. Picked = the dilution chosen for the Results tab."));
+
+            var csv = lines.join("\n");
+            var blob = new Blob([csv], {type:"text/csv;charset=utf-8"});
+            var url = URL.createObjectURL(blob);
+            var a = document.createElement("a");
+            a.href = url;
+            var stamp = new Date().toISOString().slice(0,10);
+            a.download = "eSSF_Analysis_" + (cfg.target || "assay") + "_" + stamp + ".csv";
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+          }} style={{background:"#0b2a6f",color:"#fff",border:"none",padding:"8px 16px",borderRadius:8,fontSize:12,fontWeight:700,cursor:"pointer",display:"inline-flex",alignItems:"center",gap:6}}>
+            <span style={{fontSize:14,lineHeight:1}}>📊</span>
+            Download Analysis as CSV
+          </button>
+        </div>
+
       </div>);})()}
       {tab===1&&!res&&<div style={{padding:"3rem",textAlign:"center",color:"#aeaeb2"}}>Paste data and click Analyze.</div>}
 
@@ -17758,6 +18136,23 @@ function App() {
                 var isPk=picks[apk]===d.di;
                 var isDef=picks[apk]==null&&isAlgo&&canPick;
                 var muted=!canPick;
+                // Build a precise tooltip explaining why this dilution is (or isn't) pickable.
+                // The analyst was seeing rows in Analysis that didn't appear as options in
+                // Results — this surfaces the actual disqualification reason.
+                var pickReason;
+                if (canPick) {
+                  pickReason = "Pickable: in range, CV " + (d.cv!=null?(d.cv*100).toFixed(1)+"%":"—") + " (≤ 20%), back-calculated concentration is valid.";
+                } else {
+                  var reasons = [];
+                  if (d.cS == null) reasons.push("no back-calculated concentration (raw signal may be missing or unreadable)");
+                  if (!d.ir) reasons.push("out of standard curve range");
+                  if (d.cv != null && d.cv > 0.20) reasons.push("CV " + (d.cv*100).toFixed(1) + "% exceeds the 20% acceptance limit");
+                  if (reasons.length === 0) reasons.push("does not meet acceptance criteria");
+                  pickReason = "Not pickable: " + reasons.join("; ") + ".";
+                  if (instructor && !d.ir && d.cS != null) {
+                    pickReason += " (Back-calculated value shown for teaching only — extrapolated outside the curve range.)";
+                  }
+                }
                 // Recovery at this dilution: pair THIS spiked dilution with the analyst's/strategy's CHOSEN unspiked concentration.
                 // This means every row in the recovery column reflects "if I reported this dilution for spiked, paired with my current unspiked pick, recovery is X".
                 // When the user picks a different unspiked dilution on the unspiked sample's card, the whole column updates.
@@ -17774,12 +18169,12 @@ function App() {
                   }
                 }
                 var dilRecPass = dilRec!=null ? (dilRec>=80 && dilRec<=120) : null;
-                return (<tr key={d.di} style={{background:isPk||isDef?"#e6f5f0":muted?"#fafafa":"transparent",color:muted?"#9ca0a8":"inherit"}} title={!d.ir&&instructor?"OOR — back-calculated value shown for teaching only. Do not report (extrapolated outside the standard curve range).":""}>
+                return (<tr key={d.di} style={{background:isPk||isDef?"#e6f5f0":muted?"#fafafa":"transparent",color:muted?"#9ca0a8":"inherit"}} title={pickReason}>
                   <td style={{...tdS,fontWeight:isAlgo?700:400}}>{d.di}{isAlgo?<span style={{color:"#1b7f6a",fontWeight:800}}> ★</span>:null}</td>
                   <td style={{...tdS,textAlign:"center"}}><CVB val={d.cv} /></td>
                   <td style={{...tdS,textAlign:"center",fontWeight:700,color:!d.ir&&instructor?"#a05a00":"inherit",fontStyle:!d.ir&&instructor?"italic":"normal"}}>{canPick?sig3(convertConc(d.cS, unit, displayUnitResults)):(instructor&&d.cS!=null?sig3(convertConc(d.cS, unit, displayUnitResults)):"")}</td>
                   {mySpikeRows.length>0 && <td style={{...tdS,textAlign:"center",fontFamily:"monospace",fontWeight:isAlgo?800:600,color:dilRec==null?"#aeaeb2":(dilRecPass?"#1b7f6a":"#b4332e")}}>{dilRec!=null?dilRec.toFixed(0)+"%":"—"}</td>}
-                  <td style={{...tdS,textAlign:"center"}}><input type="radio" name={"pk-"+pi+"-"+si} checked={isPk||isDef} disabled={!canPick} onChange={function(){var n={};for(var k in picks)n[k]=picks[k];n[apk]=d.di;setPicks(n);}} /></td>
+                  <td style={{...tdS,textAlign:"center"}} title={pickReason}><input type="radio" name={"pk-"+pi+"-"+si} checked={isPk||isDef} disabled={!canPick} onChange={function(){var n={};for(var k in picks)n[k]=picks[k];n[apk]=d.di;setPicks(n);}} title={pickReason} /></td>
                 </tr>);
               })}</tbody></table></div>
               {picks[apk]!=null&&algoSel&&algoSel.dil!==picks[apk]&&(<div style={{marginTop:8,padding:"8px 12px",background:"#fef3e2",borderRadius:8,fontSize:12,color:"#a05a00",borderLeft:"3px solid #a05a00"}}>Your pick differs from the {SM.find(function(m){return m.id===sm;}).short} recommendation. Document your rationale.</div>)}
@@ -18260,29 +18655,130 @@ function App() {
           return "direct_other";
         };
 
-        // PROTOCOL MAP — placeholder until C provides the real table.
-        // Each protocol entry can include a `detection` sentence used by
-        // the Sample Prep cascade.
+        // PROTOCOL MAP — based on BTEC AN-### catalog + vendor protocols.
+        //
+        // Each protocol entry can include:
+        //   internalId:        BTEC SOP # (e.g. "BTEC AN-002")
+        //   internalLabel:     full SOP descriptor
+        //   vendorName:        commercial assay name (e.g. "Thermo Fisher Pierce BCA Protein Assay")
+        //   vendorPN:          vendor catalog number (e.g. "P/N 23225")
+        //   readWavelength:    detection wavelength in prose form
+        //   detectionNotes:    fluorescence ex/em or other notes for the prose
+        //   cvThreshold:       per-assay CV threshold (10% for protein, 15% for immunoassays)
+        //   dilutionSelection: "upper portion" (default) or "less-dilute portion" (DF)
+        //   signalNoun:        "absorbance" or "fluorescence intensities" — for prose
         var PROTOCOL_MAP = {
           total_protein: {
-            "BCA":       { id: "BTEC AN-???", label: "BTEC AN-??? (BCA Total Protein)",
-                           detection: "" },
-            "Bradford":  { id: "BTEC AN-???", label: "BTEC AN-??? (Bradford Protein Assay)",
-                           detection: "" },
-            "660-nm":    { id: "BTEC AN-011", label: "BTEC AN-011 (660-nm Protein Assay)",
-                           detection: "10 µL of each well was transferred to a clear 96-well plate, mixed with 150 µL of 660 Reagent, gently agitated for 5 min, and read at 660 nm" },
+            "BCA":       {
+              internalId: "BTEC AN-002",
+              internalLabel: "BTEC AN-002 (BCA Protein Assay)",
+              vendorName: "Thermo Fisher Pierce BCA Protein Assay",
+              vendorPN: "P/N 23225",
+              readWavelength: "562 nm",
+              signalNoun: "absorbance",
+              cvThreshold: "10%",
+              dilutionSelection: "upper portion",
+            },
+            "Bradford":  {
+              internalId: "BTEC AN-???",
+              internalLabel: "BTEC AN-??? (Bradford Protein Assay) [confirm internal protocol #]",
+              vendorName: "Bradford Protein Assay",
+              vendorPN: "",                          // varies by vendor — analyst should specify
+              readWavelength: "595 nm",
+              signalNoun: "absorbance",
+              cvThreshold: "10%",
+              dilutionSelection: "upper portion",
+            },
+            "660-nm":    {
+              internalId: "BTEC AN-011",
+              internalLabel: "BTEC AN-011 (660-nm Protein Assay)",
+              vendorName: "Thermo Fisher Pierce 660 nm Protein Assay",
+              vendorPN: "P/N 22660",
+              readWavelength: "660 nm",
+              signalNoun: "absorbance",
+              cvThreshold: "10%",
+              dilutionSelection: "upper portion",
+            },
           },
-          elisa: { id: "(see kit insert)", label: "(see kit insert)", detection: "" },
-          direct_gfp: { id: "BTEC AN-003", label: "BTEC AN-003 (Direct GFP Quantitation)",
-                         detection: "fluorescence was measured at the wavelengths specified in BTEC AN-003" },
-          direct_other: { id: "", label: "", detection: "" },
+          elisa: {
+            "Sandwich":  {
+              internalId: "BTEC AN-006",
+              internalLabel: "BTEC AN-006 (Sandwich ELISA — Antibody Fragment)",
+              vendorName: "",                        // no commercial assay
+              vendorPN: "",
+              readWavelength: "450 nm (reference 570 nm)",
+              signalNoun: "absorbance",
+              cvThreshold: "15%",                    // immunoassays per FDA bioanalytical guidance
+              dilutionSelection: "upper portion",
+            },
+            "Ovalbumin": {
+              internalId: "BTEC AN-023",
+              internalLabel: "BTEC AN-023 (Ovalbumin ELISA)",
+              vendorName: "",
+              vendorPN: "",
+              readWavelength: "450 nm (reference 570 nm)",
+              signalNoun: "absorbance",
+              cvThreshold: "15%",
+              dilutionSelection: "upper portion",
+            },
+          },
+          direct_gfp: {
+            internalId: "BTEC AN-003",
+            internalLabel: "BTEC AN-003 (Direct Quantification of GFPuv)",
+            vendorName: "",                          // in-house only
+            vendorPN: "",
+            readWavelength: "excitation 395 nm / emission 509 nm",
+            signalNoun: "fluorescence intensities",
+            cvThreshold: "10%",
+            dilutionSelection: "less-dilute portion",
+            // DF measures active/folded GFP only — note this for rigor
+            extraNote: "This method measures active GFP based on its intrinsic chromophore emission.",
+          },
+          direct_other: {
+            internalId: "",
+            internalLabel: "",
+            vendorName: "",
+            vendorPN: "",
+            readWavelength: "",
+            signalNoun: "signal values",
+            cvThreshold: "10%",
+            dilutionSelection: "upper portion",
+          },
+        };
+
+        // ============================================================
+        // Helper: build the protocol citation phrase
+        // ============================================================
+        // Returns: "following the [vendor] [vendor PN] following [internal SOP]"
+        //   or just "[internal SOP]" if no vendor; or vendor-only if no internal.
+        var getProtocolCitation = function(p){
+          if (!p) return "";
+          var hasVendor = p.vendorName && p.vendorName.length > 0;
+          var hasInternal = p.internalId && p.internalId.length > 0;
+          if (hasVendor && hasInternal) {
+            var pn = p.vendorPN ? " (" + p.vendorPN + ")" : "";
+            return p.vendorName + pn + ", following " + p.internalId;
+          }
+          if (hasVendor) {
+            return p.vendorName + (p.vendorPN ? " (" + p.vendorPN + ")" : "");
+          }
+          if (hasInternal) {
+            return p.internalLabel || p.internalId;
+          }
+          return "";
         };
 
         var assayType = detectAssayType();
-        // Resolve the active protocol object (depends on user's total-protein choice)
+        // Resolve the active protocol object (depends on user's sub-choice
+        // for total_protein OR elisa, both of which have sub-maps).
         var activeProtocol = null;
         if (assayType === "total_protein") {
-          activeProtocol = PROTOCOL_MAP.total_protein[limsReport.sampleAssayType] || PROTOCOL_MAP.total_protein["BCA"];
+          activeProtocol = PROTOCOL_MAP.total_protein[limsReport.sampleAssayType]
+                        || PROTOCOL_MAP.total_protein["BCA"];
+        } else if (assayType === "elisa") {
+          // Default ELISA sub-choice = "Sandwich" if user hasn't picked
+          activeProtocol = PROTOCOL_MAP.elisa[limsReport.sampleAssayType]
+                        || PROTOCOL_MAP.elisa["Sandwich"];
         } else if (PROTOCOL_MAP[assayType]) {
           activeProtocol = PROTOCOL_MAP[assayType];
         }
@@ -18359,28 +18855,117 @@ function App() {
           return true;
         };
 
-        // Default values pulled from setup state
+        // ============================================================
+        // Default values pulled from setup state + protocol cascade
+        // ============================================================
         var defaultStandardName = cfg.sn || "";
         var defaultStandardConc = cfg.std ? (cfg.std + " " + (cfg.cu || "mg/mL")) : "";
-        var defaultReplicates = (function(){
-          var n = cfg.xr;
-          if (!n) return "technical duplicate";
-          if (n === "1" || n === 1) return "in singlicate";
-          if (n === "2" || n === 2) return "in technical duplicate";
-          if (n === "3" || n === 3) return "in technical triplicate";
-          return "in " + n + " technical replicates";
+
+        // Replicate combo — pull BOTH standard reps (cfg.sr) AND sample reps (cfg.xr)
+        // Format examples:
+        //   sr=2, xr=2  → "in duplicate"
+        //   sr=3, xr=2  → "in triplicate (standards) and duplicate (samples)"
+        //   sr=3, xr=3  → "in triplicate"
+        var formatReplicates = function(standardReps, sampleReps){
+          var word = function(n){
+            n = parseInt(n) || 0;
+            if (n === 1) return "singlicate";
+            if (n === 2) return "duplicate";
+            if (n === 3) return "triplicate";
+            if (n === 4) return "quadruplicate";
+            return n + " replicates";
+          };
+          var sr = word(standardReps);
+          var xr = word(sampleReps);
+          if (sr === xr) return "in " + sr;
+          return "in " + sr + " (standards) and " + xr + " (samples)";
+        };
+        var defaultReplicatesCombo = formatReplicates(cfg.sr, cfg.xr);
+        // Standalone forms for inline use in different sentences
+        var standardRepsWord = (function(){
+          var n = parseInt(cfg.sr) || 2;
+          if (n === 1) return "singlicate";
+          if (n === 2) return "duplicate";
+          if (n === 3) return "triplicate";
+          if (n === 4) return "quadruplicate";
+          return n + " replicates";
         })();
+        var sampleRepsWord = (function(){
+          var n = parseInt(cfg.xr) || 2;
+          if (n === 1) return "singlicate";
+          if (n === 2) return "duplicate";
+          if (n === 3) return "triplicate";
+          if (n === 4) return "quadruplicate";
+          return n + " replicates";
+        })();
+
         var defaultFitType = (cfg.fm === "linear") ? "linear" :
                              (cfg.fm === "4pl") ? "four-parameter logistic (4PL)" :
                              (cfg.fm === "5pl") ? "five-parameter logistic (5PL)" : "linear";
         var defaultLevels = (cfg.sl || cfg.nl || "8");
-        var defaultDetection = activeProtocol ? activeProtocol.detection : "";
+        // Convert numeric level count to written form ("five-point", "eight-point")
+        var levelsToWord = function(n){
+          var num = parseInt(n) || 0;
+          var words = { 3:"three", 4:"four", 5:"five", 6:"six", 7:"seven", 8:"eight", 9:"nine", 10:"ten", 11:"eleven", 12:"twelve" };
+          return (words[num] || num) + "-point";
+        };
+        var defaultLevelsWord = levelsToWord(defaultLevels);
 
         // ============================================================
-        // Generate the prose for copy
+        // Working range — COMPUTED, not editable.
+        // Top conc × (1/df)^(levels-1) … top conc
+        // Returns "[low]–[high] [unit]"
+        // ============================================================
+        var computeWorkingRange = function(){
+          var top = parseFloat(cfg.std);
+          var df  = parseFloat(cfg.df) || 2;
+          var n   = parseInt(cfg.sl || cfg.nl) || 0;
+          var unit = cfg.cu || "mg/mL";
+          if (!top || !n) return "";
+          var lo = top * Math.pow(1 / df, n - 1);
+          // Format both values intelligently
+          var fmt = function(v){
+            if (v >= 1) return v.toPrecision(3).replace(/\.?0+$/, "");
+            if (v >= 0.01) return v.toPrecision(3).replace(/0+$/, "").replace(/\.$/, "");
+            return v.toExponential(2);
+          };
+          return fmt(lo) + "–" + fmt(top) + " " + unit;
+        };
+        var workingRange = computeWorkingRange();
+
+        // ============================================================
+        // Sample IDs for prose. If exactly one sample → use its name.
+        // Otherwise → "the submitted samples" with override slot.
+        // ============================================================
+        var allSampleNames = [];
+        res.forEach(function(pp){
+          (pp.samps || []).forEach(function(s){
+            if (s.name && !sssPattern.test(s.name)) allSampleNames.push(s.name);
+          });
+        });
+        var uniqueSampleNames = allSampleNames.filter(function(n, i){
+          return allSampleNames.indexOf(n) === i;
+        });
+        var defaultSampleId = uniqueSampleNames.length === 1
+          ? uniqueSampleNames[0]
+          : "the submitted samples";
+
+        // Protocol-cascaded defaults
+        var protoReadWavelength = activeProtocol ? activeProtocol.readWavelength : "";
+        var protoSignalNoun = activeProtocol ? activeProtocol.signalNoun : "absorbance";
+        var protoCVThreshold = activeProtocol ? activeProtocol.cvThreshold : "10%";
+        var protoDilutionSelection = activeProtocol ? activeProtocol.dilutionSelection : "upper portion";
+        var protoExtraNote = activeProtocol ? activeProtocol.extraNote : "";
+
+        // ============================================================
+        // Compose the prose for copy — 5-sentence canonical structure:
+        //   (1) what/how (assay + protocol citation)
+        //   (2) standard prep (with vendor/verification)
+        //   (3) calibration analysis (replicates + R²)
+        //   (4) sample analysis (sample ID + signal + wavelength)
+        //   (5) reporting logic (CV threshold + dilution selection)
         // ============================================================
         var composeSampleReceival = function(){
-          var s = limsReport.slots.sampleReceival || {};
           var rd = slotValue("sampleReceival", "receivedDate", "[date]");
           var st = slotValue("sampleReceival", "storageTemp", "4 ± 2 °C");
           var pd = slotValue("sampleReceival", "processedDate", "[date]");
@@ -18397,48 +18982,98 @@ function App() {
         };
 
         var composeProtocolUsed = function(){
-          var p = slotValue("protocolUsed", "protocol", activeProtocol ? activeProtocol.label : "");
+          var citation = getProtocolCitation(activeProtocol);
+          var override = slotValue("protocolUsed", "protocol", "");
+          var p = override || citation;
           var r = slotValue("protocolUsed", "requester", "submitter");
           return "Analysis was performed per " + p + ", requested by the " + r + ".";
         };
 
+        // The canonical 5-sentence prose lives in composeSamplePrep —
+        // it's the heart of the Methods entry.
         var composeSamplePrep = function(){
-          var tempL = slotValue("samplePrep", "tempLabel", "room temperature (22 ± 2 °C)");
-          var stdN = slotValue("samplePrep", "standardName", defaultStandardName || "[standard]");
-          var stdC = slotValue("samplePrep", "standardConc", defaultStandardConc || "[concentration]");
-          var prepBy = slotValue("samplePrep", "preparedBy", "");
-          var diluent = slotValue("samplePrep", "diluent", "[diluent]");
-          var dilScheme = slotValue("samplePrep", "dilutionScheme", "serially diluted 1:2 through row H");
-          var pip = slotValue("samplePrep", "pipette", "8-channel multichannel pipette");
-          var reps = slotValue("samplePrep", "replicates", defaultReplicates);
-          var det = slotValue("samplePrep", "detection", defaultDetection);
+          // Sentence 1: what + how
+          var assayName = activeProtocol && activeProtocol.vendorName
+                          ? activeProtocol.vendorName
+                          : (activeProtocol ? activeProtocol.internalLabel : "[assay name]");
+          var citation = getProtocolCitation(activeProtocol);
+          var measureVerb = (assayType === "direct_gfp") ? "Fluorescence-based quantitation was performed using the"
+                                                          : "Protein concentration was determined using the";
+          var s1 = measureVerb + " " + assayName + (citation && citation !== assayName ? " following " + citation : "") + ".";
 
-          var s1 = "Sample preparation was performed at " + tempL + ".";
-          var s2 = " The protein standard was " + stdN + " (" + stdC + (prepBy ? ", prepared by " + prepBy : "") + ") in " + diluent + ", which also served as the sample diluent.";
-          var s3 = " Standards and samples were dispensed neat into row A of a 96-well plate and " + dilScheme + " using an " + pip + ", each " + reps + ".";
-          var s4 = det ? " Per " + (activeProtocol ? activeProtocol.id : "the protocol") + ", " + det + "." : "";
-          return s1 + s2 + s3 + s4;
+          // Optional rigor note (DF "active GFP" clause)
+          var s1b = "";
+          if (protoExtraNote) {
+            var wl = slotValue("samplePrep", "detection", protoReadWavelength);
+            s1b = " " + protoExtraNote.replace(/intrinsic chromophore emission\.$/, "intrinsic chromophore emission (" + wl + ").");
+            if (!/\(/.test(s1b)) s1b = " " + protoExtraNote;
+          }
+
+          // Sentence 2: standard prep
+          var stdName = slotValue("samplePrep", "standardName", defaultStandardName || "[standard]");
+          var stdConc = slotValue("samplePrep", "standardConc", defaultStandardConc || "[concentration]");
+          var stdVendor = slotValue("samplePrep", "standardVendor", "");
+          var stdVerif = slotValue("samplePrep", "standardVerification", "");
+          var preparedBy = slotValue("samplePrep", "preparedBy", "");
+          var stdDescriptor = stdName;
+          if (stdVendor) stdDescriptor = stdVendor + " " + stdDescriptor;
+          var stdParen = stdConc;
+          if (stdVerif) stdParen += ", " + stdVerif;
+          if (preparedBy) stdParen += ", prepared by " + preparedBy;
+          var s2 = " Calibration standards were prepared as " + defaultLevelsWord + " serial dilutions of " + stdDescriptor + (stdParen ? " (" + stdParen + ")" : "") + (workingRange ? " covering a working range of " + workingRange : "") + ".";
+
+          // Sentence 3: calibration analysis
+          var s3 = " Each calibration point was analyzed in " + standardRepsWord + ", and linear regression produced an R² of " + fmtNum(avgR2, 4) + ".";
+
+          // Sentence 4: sample analysis
+          var sampleId = slotValue("samplePrep", "sampleId", defaultSampleId);
+          var wl = slotValue("samplePrep", "detection", protoReadWavelength);
+          var sigPhrase = protoSignalNoun + " values at " + wl;
+          if (assayType === "direct_gfp") sigPhrase = protoSignalNoun;  // "fluorescence intensities"
+          var s4 = " " + sampleId + " was serially diluted, analyzed in " + sampleRepsWord + ", and " + sigPhrase + " were compared to the generated standard curve to determine concentration.";
+
+          // Sentence 5: reporting logic
+          var cv = slotValue("standardCurve", "cvThreshold", protoCVThreshold);
+          var dilSel = slotValue("standardCurve", "dilutionSelection", protoDilutionSelection);
+          var s5 = " Reported results corresponded to the dilution that satisfied acceptance criteria for precision (CV ≤ " + cv + "), fell within the validated linear range, and was selected from the " + dilSel + " of the dilution series to limit propagated dilution error.";
+
+          // Optional: points-excluded disclosure
+          var excluded = slotValue("standardCurve", "pointsExcluded", "");
+          var s6 = excluded ? " " + excluded : "";
+
+          return s1 + s1b + s2 + s3 + s4 + s5 + s6;
         };
 
-        var composeSSS = function(){
-          var desc = slotValue("sssDescription", "description", sssText || "");
-          if (!desc) return "";
-          return "A system suitability standard (" + desc + ") was processed alongside the submitted samples using the same dilution scheme.";
+        var composeSST = function(){
+          var desc = slotValue("sstDescription", "description", sssText || "");
+          if (!desc && !limsReport.sstUsed) return "";
+          var lvls = slotValue("sstDescription", "calibrationLevels", "");
+          var range = slotValue("sstDescription", "calibrationRange", "");
+          var s1 = "A system suitability standard (SST" + (desc ? ", " + desc : "") + ") was processed alongside the submitted samples using the same dilution scheme.";
+          var s2 = (lvls || range)
+            ? " The SST was prepared at " + (lvls ? lvls + " levels" : "") + (lvls && range ? " " : "") + (range ? "spanning " + range : "") + "."
+            : "";
+          return s1 + s2;
         };
 
         var composeStandardCurve = function(){
           var fit = slotValue("standardCurve", "fitType", defaultFitType);
           var lvls = slotValue("standardCurve", "levels", defaultLevels);
-          var rng = slotValue("standardCurve", "range", "");
           var stdN = slotValue("samplePrep", "standardName", defaultStandardName || "[standard]");
           var stdC = slotValue("samplePrep", "standardConc", defaultStandardConc || "");
           var acc = slotValue("standardCurve", "acceptance", "R² ≥ 0.99");
+          var excluded = slotValue("standardCurve", "pointsExcluded", "");
 
-          var rngClause = rng ? (" spanning " + rng) : "";
-          var s1 = "A " + fit + " standard curve was generated from " + stdN + (stdC ? " (" + stdC + ")" : "") + " using " + lvls + " calibration levels" + rngClause + ".";
+          var s1 = "A " + fit + " standard curve was generated from " + stdN + (stdC ? " (" + stdC + ")" : "") + " using " + lvls + " calibration levels" + (workingRange ? " spanning " + workingRange : "") + ".";
           var s2 = " The mean curve parameters across " + nP + " independent plate" + (nP > 1 ? "s" : "") + " were: slope = " + fmtNum(avgM, 5) + ", y-intercept = " + fmtNum(avgB, 5) + ", R² = " + fmtNum(avgR2, 4) + ".";
           var s3 = acc ? (" The curve met the acceptance criterion of " + acc + ".") : "";
-          return s1 + s2 + s3;
+          var s4 = excluded ? " " + excluded : "";
+          return s1 + s2 + s3 + s4;
+        };
+
+        var composeSoftware = function(){
+          var sw = slotValue("software", "name", "eSSF Bench");
+          return "Data were analyzed using " + sw + ".";
         };
 
         var composeNotes = function(){
@@ -18567,7 +19202,7 @@ function App() {
 
           var onClick = function(){
             if (active) setActiveSlot(null);
-            else setActiveSlot({ fieldKey: fieldKey, slotKey: slotKey, type: props.type, options: props.options, units: props.units, hint: props.hint });
+            else setActiveSlot({ fieldKey: fieldKey, slotKey: slotKey, type: props.type, options: props.options, units: props.units, hint: props.hint, question: props.question });
           };
 
           return <span style={style} onClick={onClick}>
@@ -18601,11 +19236,14 @@ function App() {
             borderRadius: 7,
             boxShadow: "0 2px 10px rgba(99,55,185,0.10)",
           };
-          var qStyle = { fontSize: 12, fontWeight: 700, color: "#4a2d8f", margin: 0 };
-          var qSubStyle = { fontSize: 10, color: "#8e9bb5", margin: "4px 0 8px", lineHeight: 1.4 };
+          var qStyle = { fontSize: 13, fontWeight: 700, color: "#4a2d8f", margin: 0 };
+          var qSubStyle = { fontSize: 11, color: "#8e9bb5", margin: "4px 0 8px", lineHeight: 1.4 };
+
+          // Plain-English question label. Falls back to a derived label if no question given.
+          var question = activeSlot.question || sk.replace(/([A-Z])/g, " $1").replace(/^./, function(c){return c.toUpperCase();}).trim();
 
           return <div style={editorWrap}>
-            <div style={qStyle}>Editing: {sk.replace(/([A-Z])/g, " $1").toLowerCase()}</div>
+            <div style={qStyle}>{question}</div>
             {hint && <div style={qSubStyle}>{hint}</div>}
             <EditorBody type={type} current={current} options={options} units={units} onCommit={commit} protocolKey={protocolKey} fk={fk} sk={sk} />
           </div>;
@@ -18726,6 +19364,7 @@ function App() {
                       slots: defaultSlots(),
                       assayVolume: "",
                       sampleAssayType: "BCA",
+                      sstUsed: false,
                     });
                   }
                 }} style={{background:"#fff",border:"1px solid #e5edf7",color:"#5a6984",padding:"6px 12px",borderRadius:7,fontSize:11,fontWeight:600,cursor:"pointer"}}>
@@ -18758,13 +19397,13 @@ function App() {
                 <div style={fieldLabelStyle}>Sample Receival Storage Cond</div>
                 <div>
                   <div style={proseStyle}>
-                    Samples were received on <Slot fieldKey="sampleReceival" slotKey="receivedDate" type="date" emptyLabel="date received" hint="When did samples arrive at the lab?" />
-                    {" "}and held at <Slot fieldKey="sampleReceival" slotKey="storageTemp" type="text" options={["4 ± 2 °C","−20 °C","−80 °C","Room temperature (22 ± 2 °C)"]} defaultValue="4 ± 2 °C" hint="Storage temperature before processing." />
-                    {" "}until processing on <Slot fieldKey="sampleReceival" slotKey="processedDate" type="date" emptyLabel="date processed" defaultValue={todayAcademic} hint="When were samples actually analyzed?" />
-                    .{" "}Sample identifiers on the primary containers <Slot fieldKey="sampleReceival" slotKey="labelMatch" type="text" options={["matched","did not match"]} defaultValue="matched" hint="Did container labels match the eSSF submission?" />
+                    Samples were received on <Slot fieldKey="sampleReceival" slotKey="receivedDate" type="date" emptyLabel="date received" question="When were samples received?" hint="The date the samples arrived at the lab." />
+                    {" "}and held at <Slot fieldKey="sampleReceival" slotKey="storageTemp" type="text" options={["4 ± 2 °C","−20 °C","−80 °C","Room temperature (22 ± 2 °C)"]} defaultValue="4 ± 2 °C" question="How were samples stored?" hint="Storage temperature before processing." />
+                    {" "}until processing on <Slot fieldKey="sampleReceival" slotKey="processedDate" type="date" emptyLabel="date processed" defaultValue={todayAcademic} question="When were samples processed?" hint="The date you actually ran the assay." />
+                    .{" "}Sample identifiers on the primary containers <Slot fieldKey="sampleReceival" slotKey="labelMatch" type="text" options={["matched","did not match"]} defaultValue="matched" question="Did labels match the eSSF submission?" hint="If container labels don't match the eSSF system IDs, this needs to be disclosed." />
                     {" "}those recorded in the eSSF submission system
                     {limsReport.slots.sampleReceival && limsReport.slots.sampleReceival.labelMatch === "did not match" && <span>
-                      ; <Slot fieldKey="sampleReceival" slotKey="labelResolution" type="text" emptyLabel="how was it resolved" defaultValue="the container labels were used as the reference identifiers" hint="How did you resolve the mismatch?" /> for analysis and reporting
+                      ; <Slot fieldKey="sampleReceival" slotKey="labelResolution" type="text" emptyLabel="how was it resolved" defaultValue="the container labels were used as the reference identifiers" question="How was the label mismatch resolved?" hint="What did you use as the reference identifier?" /> for analysis and reporting
                     </span>}
                     .
                   </div>
@@ -18780,19 +19419,32 @@ function App() {
               <div style={fieldStyle}>
                 <div style={fieldLabelStyle}>Protocol Used</div>
                 <div>
-                  {/* Smart banner */}
+                  {/* Smart banner — shows vendor + internal citation */}
                   <div style={{background:"#f4f9fd",borderLeft:"3px solid #139cb6",padding:"9px 12px",borderRadius:4,fontSize:12,color:"#0b2a6f",marginBottom:8,lineHeight:1.5}}>
-                    <strong style={{color:"#001B5E"}}>{activeProtocol ? activeProtocol.label : "Unknown — please pick below"}</strong>
-                    <div style={{marginTop:4,fontSize:10,color:"#5a6984",fontStyle:"italic"}}>↳ Detection, incubation, and wavelength are inferred from this protocol — change if wrong.</div>
+                    <strong style={{color:"#001B5E"}}>{getProtocolCitation(activeProtocol) || "Unknown — please pick below"}</strong>
+                    <div style={{marginTop:4,fontSize:10,color:"#5a6984",fontStyle:"italic"}}>↳ Detection, wavelength, signal type, and CV threshold are inferred from this protocol.</div>
                   </div>
 
-                  {/* Total-protein picker if ambiguous */}
-                  {assayType === "total_protein" && (
-                    <div style={{marginBottom:10}}>
-                      <div style={{fontSize:11,color:"#6f7fa0",marginBottom:6}}>Total protein assay detected — which one?</div>
+                  {/* Sub-protocol picker — shows for total_protein OR elisa, both ambiguous */}
+                  {(assayType === "total_protein" || assayType === "elisa") && (function(){
+                    var promptText, options, defaultPick;
+                    if (assayType === "total_protein") {
+                      promptText = "Total protein assay detected — which one?";
+                      options = ["BCA","Bradford","660-nm"];
+                      defaultPick = "BCA";
+                    } else {
+                      promptText = "ELISA detected — which protocol?";
+                      options = ["Sandwich","Ovalbumin"];
+                      defaultPick = "Sandwich";
+                    }
+                    var effectiveSelection = options.indexOf(limsReport.sampleAssayType) !== -1
+                                              ? limsReport.sampleAssayType
+                                              : defaultPick;
+                    return <div style={{marginBottom:10}}>
+                      <div style={{fontSize:11,color:"#6f7fa0",marginBottom:6}}>{promptText}</div>
                       <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
-                        {["BCA","Bradford","660-nm"].map(function(opt){
-                          var selected = limsReport.sampleAssayType === opt;
+                        {options.map(function(opt){
+                          var selected = effectiveSelection === opt;
                           return <button key={opt} onClick={function(){ updateLimsTop("sampleAssayType", opt); }} style={{
                             padding:"4px 10px",
                             borderRadius:6,
@@ -18805,12 +19457,12 @@ function App() {
                           }}>{opt}</button>;
                         })}
                       </div>
-                    </div>
-                  )}
+                    </div>;
+                  })()}
 
                   <div style={proseStyle}>
-                    Analysis was performed per <Slot fieldKey="protocolUsed" slotKey="protocol" type="text" defaultValue={activeProtocol ? activeProtocol.label : ""} emptyLabel="protocol ID" hint="Override the auto-detected protocol." />
-                    , requested by the <Slot fieldKey="protocolUsed" slotKey="requester" type="text" options={["submitter","PI","internal QC"]} defaultValue="submitter" />.
+                    Analysis was performed per <Slot fieldKey="protocolUsed" slotKey="protocol" type="text" defaultValue={getProtocolCitation(activeProtocol)} emptyLabel="protocol citation" question="Confirm the protocol citation" hint="Override the auto-detected protocol citation if needed." />
+                    , requested by the <Slot fieldKey="protocolUsed" slotKey="requester" type="text" options={["submitter","PI","internal QC"]} defaultValue="submitter" question="Who requested this analysis?" />.
                   </div>
                   {renderActiveEditor("protocolUsed")}
                   <div style={metaStyle}>
@@ -18825,21 +19477,46 @@ function App() {
                 <div style={fieldLabelStyle}>Sample Prep</div>
                 <div>
                   <div style={proseStyle}>
-                    Sample preparation was performed at <Slot fieldKey="samplePrep" slotKey="tempLabel" type="text" options={["room temperature (22 ± 2 °C)","4 ± 2 °C","On ice","37 °C"]} defaultValue="room temperature (22 ± 2 °C)" hint="What temperature was prep done at?" />
-                    . The protein standard was <Slot fieldKey="samplePrep" slotKey="standardName" type="text" defaultValue={defaultStandardName} emptyLabel="standard name" hint="BSA, IgG, GFP, etc." />
-                    {" "}(<Slot fieldKey="samplePrep" slotKey="standardConc" type="text" defaultValue={defaultStandardConc} emptyLabel="concentration" hint="e.g. 1.0 mg/mL" />
-                    {limsReport.slots.samplePrep && limsReport.slots.samplePrep.preparedBy ?
-                      <span>, prepared by <Slot fieldKey="samplePrep" slotKey="preparedBy" type="text" defaultValue="" emptyLabel="initials + date" hint="e.g. CGS on 04-Apr-2026" /></span> :
-                      <span>, <Slot fieldKey="samplePrep" slotKey="preparedBy" type="text" defaultValue="" emptyLabel="add prep info if in-house" hint="If made in-house: initials + date, e.g. CGS on 04-Apr-2026. Leave blank if commercial." /></span>
-                    }) in <Slot fieldKey="samplePrep" slotKey="diluent" type="text" options={["PBS (1×)","50 mM sodium phosphate buffer, pH 7.2","DPBS (1×)","Tris-buffered saline"]} defaultValue="" emptyLabel="diluent" hint="What buffer was used to dilute samples and standards?" />
-                    , which also served as the sample diluent. Standards and samples were dispensed neat into row A of a 96-well plate and <Slot fieldKey="samplePrep" slotKey="dilutionScheme" type="text" options={["serially diluted 1:2 through row H","serially diluted 1:3 through row H","diluted at discrete points"]} defaultValue="serially diluted 1:2 through row H" />
-                    {" "}using an <Slot fieldKey="samplePrep" slotKey="pipette" type="text" options={["8-channel multichannel pipette","12-channel multichannel pipette","single-channel pipette"]} defaultValue="8-channel multichannel pipette" />
-                    , each <Slot fieldKey="samplePrep" slotKey="replicates" type="text" options={["in singlicate","in technical duplicate","in technical triplicate"]} defaultValue={defaultReplicates} />.
-                    {defaultDetection && <span> Per {activeProtocol ? activeProtocol.id : "the protocol"}, <Slot fieldKey="samplePrep" slotKey="detection" type="text" defaultValue={defaultDetection} hint="Detection method — auto-filled from protocol. Edit if your run differed." />.</span>}
+                    {/* Sentence 1: assay name + protocol citation */}
+                    {assayType === "direct_gfp" ? "Fluorescence-based quantitation was performed using the " : "Protein concentration was determined using the "}
+                    <Slot fieldKey="samplePrep" slotKey="assayName" type="text" defaultValue={activeProtocol && activeProtocol.vendorName ? activeProtocol.vendorName : (activeProtocol ? activeProtocol.internalLabel : "")} emptyLabel="assay name" question="What assay was used?" hint="Vendor name preferred when applicable (e.g. 'Thermo Fisher Pierce BCA Protein Assay')." />
+                    {getProtocolCitation(activeProtocol) && getProtocolCitation(activeProtocol) !== (activeProtocol && activeProtocol.vendorName) && <span> following <Slot fieldKey="samplePrep" slotKey="protocolCitation" type="text" defaultValue={getProtocolCitation(activeProtocol)} question="Protocol citation" hint="Vendor protocol and/or BTEC internal SOP." /></span>}
+                    .
+                    {/* DF rigor note: active GFP */}
+                    {protoExtraNote && <span> {protoExtraNote} ({protoReadWavelength}).</span>}
+
+                    {/* Sentence 2: standard prep with vendor/verification */}
+                    {" "}Calibration standards were prepared as <Slot fieldKey="standardCurve" slotKey="levelsWord" type="text" options={["three-point","four-point","five-point","six-point","seven-point","eight-point"]} defaultValue={defaultLevelsWord} question="How many calibration levels?" /> serial dilutions of
+                    {" "}<Slot fieldKey="samplePrep" slotKey="standardVendor" type="text" options={["Thermo Fisher","Sigma-Aldrich","Bio-Rad","Abcam","in-house"]} defaultValue="" emptyLabel="vendor (or in-house)" question="What is the source of your standard?" hint="Vendor name (e.g. Thermo Fisher) or 'in-house' if you prepared it." />
+                    {" "}<Slot fieldKey="samplePrep" slotKey="standardName" type="text" options={["BSA","IgG","GFPuv","GFP","Ovalbumin","Other"]} defaultValue={defaultStandardName} emptyLabel="standard" question="What standard did you use?" hint="Pick from common options for consistency." />
+                    {" "}(<Slot fieldKey="samplePrep" slotKey="standardConc" type="text" defaultValue={defaultStandardConc} emptyLabel="stock concentration" question="What is the stock concentration?" hint="e.g. '2 mg/mL' — the concentration on the standard's container." />
+                    {(slotValue("samplePrep","standardVerification","") || "") && <span>, <Slot fieldKey="samplePrep" slotKey="standardVerification" type="text" options={["NIST-verified","vendor-verified","vendor-verified with Bradford","vendor-verified with BCA"]} defaultValue="" question="How was the standard verified?" hint="Verification source — NIST, vendor's COA, or internal cross-check." /></span>}
+                    {(slotValue("samplePrep","preparedBy","") || "") && <span>, prepared by <Slot fieldKey="samplePrep" slotKey="preparedBy" type="text" defaultValue="" question="Who prepared this standard and when?" hint="Initials + date, e.g. 'CGS on 04-Apr-2026'. For in-house preparations only." /></span>}
+                    )
+                    {!slotValue("samplePrep","standardVerification","") && <span>{" "}<Slot fieldKey="samplePrep" slotKey="standardVerification" type="text" options={["NIST-verified","vendor-verified","vendor-verified with Bradford"]} defaultValue="" emptyLabel="add verification source" question="How was the standard verified?" hint="Optional. NIST-verified, vendor-verified, or vendor-verified with Bradford." /></span>}
+                    {!slotValue("samplePrep","preparedBy","") && <span>{" "}<Slot fieldKey="samplePrep" slotKey="preparedBy" type="text" defaultValue="" emptyLabel="add in-house prep info" question="Was this prepared in-house?" hint="If yes, who and when (e.g. 'CGS on 04-Apr-2026'). Leave blank if commercial." /></span>}
+                    {workingRange && <span> covering a working range of <strong style={{color:"#0b2a6f"}}>{workingRange}</strong></span>}.
+
+                    {/* Sentence 3: calibration analysis */}
+                    {" "}Each calibration point was analyzed in <strong style={{color:"#0b2a6f"}}>{standardRepsWord}</strong>, and linear regression produced an R² of <strong style={{color:"#0b2a6f"}}>{fmtNum(avgR2, 4)}</strong>.
+
+                    {/* Sentence 4: sample analysis */}
+                    {" "}<Slot fieldKey="samplePrep" slotKey="sampleId" type="text" defaultValue={defaultSampleId} emptyLabel="sample IDs" question="Sample identifier(s)?" hint={uniqueSampleNames.length === 1 ? "Pulled from your data: " + uniqueSampleNames[0] : "Multiple samples — defaulted to 'the submitted samples'. Override if you want a specific ID."} />
+                    {" "}{uniqueSampleNames.length > 1 ? "were" : "was"} serially diluted, analyzed in <strong style={{color:"#0b2a6f"}}>{sampleRepsWord}</strong>, and
+                    {" "}{protoSignalNoun}
+                    {assayType !== "direct_gfp" && <span> values at <Slot fieldKey="samplePrep" slotKey="detection" type="text" defaultValue={protoReadWavelength} question="What wavelength was read?" hint="Pulled from your protocol. Edit if different." /></span>}
+                    {" "}{uniqueSampleNames.length > 1 ? "were" : "were"} compared to the generated standard curve to determine concentration.
+
+                    {/* Sentence 5: reporting logic */}
+                    {" "}Reported results corresponded to the dilution that satisfied acceptance criteria for precision (CV ≤ <Slot fieldKey="standardCurve" slotKey="cvThreshold" type="text" options={["10%","15%","20%","25%"]} defaultValue={protoCVThreshold} question="CV acceptance threshold?" hint="Industry norm: 10% for protein assays, 15% for immunoassays." />), fell within the validated linear range, and was selected from the <Slot fieldKey="standardCurve" slotKey="dilutionSelection" type="text" options={["upper portion","less-dilute portion","middle portion"]} defaultValue={protoDilutionSelection} question="Which portion of the dilution series?" hint="'Upper portion' for protein assays (BCA, 660); 'less-dilute portion' for DF." /> of the dilution series to limit propagated dilution error.
+
+                    {/* Optional: points-excluded disclosure */}
+                    {slotValue("standardCurve","pointsExcluded","") && <span> {slotValue("standardCurve","pointsExcluded","")}</span>}
                   </div>
                   {renderActiveEditor("samplePrep")}
+                  {renderActiveEditor("standardCurve")}
                   <div style={metaStyle}>
-                    <span style={metaLeftStyle}>Tap underlined parts to refine</span>
+                    <span style={metaLeftStyle}>Tap any underlined word to edit · auto-calculated values shown in bold</span>
                     <button onClick={function(){ doCopy("samplePrep", composeSamplePrep()); }} style={copyLinkStyle("samplePrep")}>{copyLinkText("samplePrep")}</button>
                   </div>
                 </div>
@@ -18885,19 +19562,44 @@ function App() {
                 </div>
               </div>
 
-              {/* SSS */}
+              {/* SST — System Suitability Standard (formerly SSS) */}
               <div style={fieldStyle}>
                 <div style={fieldLabelStyle}>System Suitability Std. Used</div>
                 <div>
                   {sssText && <div style={{fontSize:11,color:"#0a4d3c",marginBottom:6,fontStyle:"italic"}}>Auto-detected from sample names: {sssText}</div>}
-                  <div style={proseStyle}>
-                    {sssText ? <span>A system suitability standard (<Slot fieldKey="sssDescription" slotKey="description" type="text" defaultValue={sssText} hint="Brief description of the SSS." />) was processed alongside the submitted samples using the same dilution scheme.</span>
-                            : <span>No SSS sample detected. <Slot fieldKey="sssDescription" slotKey="description" type="text" emptyLabel="describe SSS if used" hint="Brief description of the SSS, if one was run." /></span>}
-                  </div>
-                  {renderActiveEditor("sssDescription")}
+
+                  {/* SST opt-in checkbox when no auto-detected SST */}
+                  {!sssText && (
+                    <div style={{marginBottom:8,padding:"7px 10px",background:"#fbfdff",border:"1px solid #e5edf7",borderRadius:6,fontSize:11,color:"#5a6984",display:"flex",alignItems:"center",gap:6}}>
+                      <input type="checkbox" id="sstUsed-toggle" checked={!!limsReport.sstUsed} onChange={function(e){ updateLimsTop("sstUsed", e.target.checked); }} />
+                      <label htmlFor="sstUsed-toggle">SST was used (not auto-detected from sample names)</label>
+                    </div>
+                  )}
+
+                  {(sssText || limsReport.sstUsed) ? (
+                    <div style={proseStyle}>
+                      A system suitability standard (SST{sssText ? ", " : ""}
+                      {sssText ? <Slot fieldKey="sstDescription" slotKey="description" type="text" defaultValue={sssText} question="Briefly describe the SST" hint="What was the SST? e.g. 'Thermo BSA, 1 mg/mL'." /> : null}
+                      {!sssText && <Slot fieldKey="sstDescription" slotKey="description" type="text" defaultValue="" emptyLabel="describe SST" question="Briefly describe the SST" hint="What standard was used as SST? e.g. 'Thermo BSA, 1 mg/mL'." />}
+                      ) was processed alongside the submitted samples using the same dilution scheme.
+                      {(slotValue("sstDescription","calibrationLevels","") || slotValue("sstDescription","calibrationRange","")) && <span>
+                        {" "}The SST was prepared at <Slot fieldKey="sstDescription" slotKey="calibrationLevels" type="text" options={["three","four","five","six","seven","eight"]} defaultValue={defaultLevels} question="How many calibration levels for the SST?" />
+                        {" "}levels{slotValue("sstDescription","calibrationRange","") && <span> spanning <Slot fieldKey="sstDescription" slotKey="calibrationRange" type="text" defaultValue={workingRange} question="What was the SST calibration range?" hint="If used the same as the standard curve, pulls in your computed range." /></span>}.
+                      </span>}
+                      {!slotValue("sstDescription","calibrationLevels","") && !slotValue("sstDescription","calibrationRange","") && <span>
+                        {" "}<Slot fieldKey="sstDescription" slotKey="calibrationLevels" type="text" options={["three","four","five","six","seven","eight"]} defaultValue="" emptyLabel="add SST calibration levels" question="How many calibration levels for the SST?" />
+                        {" "}<Slot fieldKey="sstDescription" slotKey="calibrationRange" type="text" defaultValue="" emptyLabel="add SST range" question="What was the SST calibration range?" hint={"From your standard curve: " + workingRange} />
+                      </span>}
+                    </div>
+                  ) : (
+                    <div style={{fontSize:11,color:"#8e9bb5",fontStyle:"italic",padding:"6px 0"}}>
+                      No SST detected. Name a sample with "SST" or "sys suit" to auto-fill, or tick the box above to add manually.
+                    </div>
+                  )}
+                  {renderActiveEditor("sstDescription")}
                   <div style={metaStyle}>
-                    <span style={metaLeftStyle}>{sssText ? "Auto-detected — edit description if needed" : "Name a sample with \"SSS\" or \"sys suit\" to auto-fill"}</span>
-                    <button onClick={function(){ doCopy("sss", composeSSS()); }} style={copyLinkStyle("sss")}>{copyLinkText("sss")}</button>
+                    <span style={metaLeftStyle}>{sssText ? "Auto-detected from sample names" : (limsReport.sstUsed ? "Manually flagged — fill the slots" : "Tick the box to add SST info")}</span>
+                    <button onClick={function(){ doCopy("sst", composeSST()); }} style={copyLinkStyle("sst")}>{copyLinkText("sst")}</button>
                   </div>
                 </div>
               </div>
@@ -18907,21 +19609,37 @@ function App() {
                 <div style={fieldLabelStyle}>Standard Curve Information</div>
                 <div>
                   <div style={proseStyle}>
-                    A <Slot fieldKey="standardCurve" slotKey="fitType" type="text" options={["linear","four-parameter logistic (4PL)","five-parameter logistic (5PL)"]} defaultValue={defaultFitType} />
-                    {" "}standard curve was generated from {(slotValue("samplePrep","standardName", defaultStandardName) || "[standard]")}
-                    {" "}using <Slot fieldKey="standardCurve" slotKey="levels" type="text" defaultValue={defaultLevels} emptyLabel="# levels" /> calibration levels
-                    {(function(){
-                      var rng = slotValue("standardCurve","range","");
-                      return rng ? <span> spanning <Slot fieldKey="standardCurve" slotKey="range" type="text" defaultValue="" emptyLabel="range" hint="e.g. 0.0156 to 1.0 mg/mL" /></span>
-                                 : <span> spanning <Slot fieldKey="standardCurve" slotKey="range" type="text" defaultValue="" emptyLabel="add range" hint="e.g. 0.0156 to 1.0 mg/mL" /></span>;
-                    })()}
-                    . The mean curve parameters across {nP} independent plate{nP > 1 ? "s" : ""} were: slope = <strong>{fmtNum(avgM, 5)}</strong>, y-intercept = <strong>{fmtNum(avgB, 5)}</strong>, R² = <strong>{fmtNum(avgR2, 4)}</strong>.{" "}
-                    The curve met the acceptance criterion of <Slot fieldKey="standardCurve" slotKey="acceptance" type="text" options={["R² ≥ 0.99","R² ≥ 0.995","R² ≥ 0.98"]} defaultValue="R² ≥ 0.99" />.
+                    A <Slot fieldKey="standardCurve" slotKey="fitType" type="text" options={["linear","four-parameter logistic (4PL)","five-parameter logistic (5PL)"]} defaultValue={defaultFitType} question="What curve fit was used?" />
+                    {" "}standard curve was generated from {slotValue("samplePrep","standardName", defaultStandardName) || "[standard]"}
+                    {slotValue("samplePrep","standardConc","") && <span> ({slotValue("samplePrep","standardConc", defaultStandardConc)})</span>}
+                    {" "}using <Slot fieldKey="standardCurve" slotKey="levels" type="text" defaultValue={defaultLevels} emptyLabel="# levels" question="How many calibration levels?" /> calibration levels
+                    {workingRange && <span> spanning <strong style={{color:"#0b2a6f"}}>{workingRange}</strong></span>}.
+                    {" "}The mean curve parameters across {nP} independent plate{nP > 1 ? "s" : ""} were: slope = <strong style={{color:"#0b2a6f"}}>{fmtNum(avgM, 5)}</strong>, y-intercept = <strong style={{color:"#0b2a6f"}}>{fmtNum(avgB, 5)}</strong>, R² = <strong style={{color:"#0b2a6f"}}>{fmtNum(avgR2, 4)}</strong>.{" "}
+                    The curve met the acceptance criterion of <Slot fieldKey="standardCurve" slotKey="acceptance" type="text" options={["R² ≥ 0.99","R² ≥ 0.995","R² ≥ 0.98"]} defaultValue="R² ≥ 0.99" question="What acceptance criterion does your lab use?" />.
+                    {/* Points excluded disclosure */}
+                    {slotValue("standardCurve","pointsExcluded","")
+                      ? <span> <Slot fieldKey="standardCurve" slotKey="pointsExcluded" type="text" defaultValue="" question="Were any calibration points excluded?" hint="If yes, note which and why (e.g. 'The highest standard point was excluded due to saturation')." /></span>
+                      : <span> <Slot fieldKey="standardCurve" slotKey="pointsExcluded" type="text" defaultValue="" emptyLabel="any points excluded?" question="Were any calibration points excluded?" hint="If yes, note which and why. Leave blank if all points retained." /></span>}
                   </div>
                   {renderActiveEditor("standardCurve")}
                   <div style={metaStyle}>
-                    <span style={metaLeftStyle}>Slope, intercept, R² pulled from your analysis</span>
+                    <span style={metaLeftStyle}>Slope, intercept, R², working range pulled from your analysis</span>
                     <button onClick={function(){ doCopy("standardCurve", composeStandardCurve()); }} style={copyLinkStyle("standardCurve")}>{copyLinkText("standardCurve")}</button>
+                  </div>
+                </div>
+              </div>
+
+              {/* SOFTWARE — new field */}
+              <div style={fieldStyle}>
+                <div style={fieldLabelStyle}>Analysis Software</div>
+                <div>
+                  <div style={proseStyle}>
+                    Data were analyzed using <Slot fieldKey="software" slotKey="name" type="text" options={["eSSF Bench","GraphPad Prism","SoftMax Pro","Gen5 (BioTek)","Microsoft Excel","Other"]} defaultValue="eSSF Bench" question="What software was used for data analysis?" hint="Plate reader software or external analysis tool." />.
+                  </div>
+                  {renderActiveEditor("software")}
+                  <div style={metaStyle}>
+                    <span style={metaLeftStyle}>Defaults to eSSF Bench — override if you used a different tool</span>
+                    <button onClick={function(){ doCopy("software", composeSoftware()); }} style={copyLinkStyle("software")}>{copyLinkText("software")}</button>
                   </div>
                 </div>
               </div>
@@ -18931,7 +19649,7 @@ function App() {
                 <div style={fieldLabelStyle}>Additional Notes</div>
                 <div>
                   <div style={proseStyle}>
-                    <Slot fieldKey="notes" slotKey="content" type="text" defaultValue="" emptyLabel="add deviations, substitutions, or instrument observations" hint="Anything notable. Numbered list format is conventional: (1) ... (2) ..." />
+                    <Slot fieldKey="notes" slotKey="content" type="text" defaultValue="" emptyLabel="add deviations, substitutions, or instrument observations" question="Any deviations, substitutions, or notes?" hint="Anything notable. Numbered list format is conventional: (1) ... (2) ..." />
                   </div>
                   {renderActiveEditor("notes")}
                   <div style={metaStyle}>
