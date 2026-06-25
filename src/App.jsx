@@ -37,7 +37,7 @@ var sdc = function(a) { if (a.length<2) return 0; var m=avg(a); return Math.sqrt
 var cvc = function(a) { var m=avg(a); return m ? sdc(a)/Math.abs(m) : Infinity; };
 var med = function(a) { var s=a.slice().sort(function(x,y){return x-y;}); var m=Math.floor(s.length/2); return s.length%2 ? s[m] : (s[m-1]+s[m])/2; };
 var APP_NAME = "eSSF Bench";
-var APP_VERSION = "v5d7";
+var APP_VERSION = "v5d8";
 
 // ── Chart export utility ─────────────────────────────────────────────────
 // Exports an SVG chart as a PNG, either as a downloaded file or to the
@@ -13946,19 +13946,24 @@ function ChooserScreen(props){
           iconBg:      FEATURES.compatibility ? "#F1EAFB" : "#F1EFE8",
           iconColor:   FEATURES.compatibility ? "#4a2d8f" : "#888780",
           iconNode: (
-            // Hand-drawn: a checkmark over a flask, signaling "verify your buffer"
+            // Hand-drawn: two interlocking puzzle pieces. Generic compatibility symbol,
+            // not tied to any specific assay family (protein, MS, etc.) — supports
+            // future expansion of the tool beyond protein assays.
             <svg width="28" height="28" viewBox="0 0 28 28" aria-hidden="true">
-              {/* Flask */}
-              <path d="M 11 4 L 11 11 L 6 22 L 22 22 L 17 11 L 17 4" fill="none" stroke={FEATURES.compatibility ? "#4a2d8f" : "#888780"} strokeWidth="1.1" strokeLinejoin="round"/>
-              <line x1="9" y1="4" x2="19" y2="4" stroke={FEATURES.compatibility ? "#4a2d8f" : "#888780"} strokeWidth="1.1" strokeLinecap="round"/>
-              {/* Liquid */}
-              <path d="M 8 17 L 20 17 L 22 22 L 6 22 Z" fill={FEATURES.compatibility ? "#D4BCE8" : "#D3D1C7"} opacity="0.55"/>
-              {/* Checkmark inside */}
-              <path d="M 10 18.5 L 12.5 21 L 17 16" fill="none" stroke={FEATURES.compatibility ? "#0a4d3c" : "#888780"} strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/>
+              {/* Left puzzle piece */}
+              <path d="M 4 7 L 12 7 L 12 11 Q 12 12.5 13.5 12.5 Q 15 12.5 15 11 L 15 7 L 12 7 Z M 4 7 L 4 22 L 12 22 L 12 18 Q 12 16.5 13.5 16.5 Q 15 16.5 15 18 L 15 22 L 4 22 Z"
+                    fill={FEATURES.compatibility ? "#D4BCE8" : "#D3D1C7"}
+                    stroke={FEATURES.compatibility ? "#4a2d8f" : "#888780"}
+                    strokeWidth="0.9" strokeLinejoin="round"/>
+              {/* Right puzzle piece, slightly offset */}
+              <path d="M 16 5 L 24 5 L 24 20 L 16 20 L 16 16 Q 16 14.5 14.5 14.5 Q 13 14.5 13 16 L 13 20 L 24 20 Z M 16 5 L 16 9 Q 16 10.5 14.5 10.5 Q 13 10.5 13 9 L 13 5 L 16 5 Z"
+                    fill="none"
+                    stroke={FEATURES.compatibility ? "#4a2d8f" : "#888780"}
+                    strokeWidth="0.9" strokeLinejoin="round" opacity="0.7"/>
             </svg>
           ),
           name: "Compatibility",
-          desc: "Check your buffer before you commit to a protein assay",
+          desc: "Check your buffer before you commit to an assay",
           enabled: FEATURES.compatibility,
           onClick: function(){ onChoose("compatibility"); },
         })}
@@ -14188,6 +14193,7 @@ function CompatibilityTool(props) {
   var _enab = useState({bca:true,bcaRac:true,microBca:true,p660:true,bradford:true,coomassie:false,lowry:false}),
       enabledAssays = _enab[0], setEnabledAssays = _enab[1];
   var _opened = useState(null),      openedDrill = _opened[0], setOpenedDrill = _opened[1];
+  var _infoTab = useState(null),     infoTab = _infoTab[0], setInfoTab = _infoTab[1];  // null | "how" | "refs" | "limits"
 
   var parseAndCheck = function() {
     var text = bufferText || "";
@@ -14198,20 +14204,14 @@ function CompatibilityTool(props) {
       var parsed = compatParseLine(lines[i]);
       if (!parsed) continue;
       if (parsed.error === "unparseable") {
-        newLog.push({type:"err", text:"\u2717 \"" + parsed.raw + "\" \u2014 couldn't parse (expected pattern like \"10 mM DTT\")"});
+        newLog.push({type:"err", text:"Couldn't read \"" + parsed.raw + "\" \u2014 try a format like \"10 mM DTT\" or \"5% Triton X-100\""});
         continue;
       }
       if (parsed.error === "unknown_substance") {
-        newLog.push({type:"warn", text:"\u26a0 \"" + parsed.raw + "\" \u2014 recognized \"" + parsed.name + "\" but no compatibility data on file for this substance"});
+        newLog.push({type:"warn", text:"Recognized \"" + parsed.name + "\" from \"" + parsed.raw + "\" but I don't have compatibility data for it"});
         continue;
       }
       newComponents.push({key:parsed.key, name:parsed.name, val:parsed.val, unit:parsed.unit});
-    }
-    // Summary line if all parsed successfully
-    if (newComponents.length === lines.length && lines.length > 0) {
-      newLog.push({type:"ok", text:"\u2713 All " + lines.length + " line(s) parsed successfully."});
-    } else if (newComponents.length > 0) {
-      newLog.push({type:"info", text:newComponents.length + " of " + lines.length + " line(s) parsed; see warnings above."});
     }
     setComponents(newComponents);
     setParseLog(newLog);
@@ -14221,9 +14221,8 @@ function CompatibilityTool(props) {
   useEffect(function(){ parseAndCheck(); }, []);
 
   var visibleAssays = COMPAT_ASSAYS.filter(function(a){return enabledAssays[a.id];});
-  var nCols = visibleAssays.length + 1;
 
-  // Compute verdicts per visible assay
+  // Compute verdicts per visible assay at the CURRENT dilution
   var assayResults = visibleAssays.map(function(a){
     var componentResults = components.map(function(c){
       var v = compatComputeVerdict(c, a.id, dilution);
@@ -14233,43 +14232,91 @@ function CompatibilityTool(props) {
     return { assay: a, componentResults: componentResults, verdict: compatRollup(componentResults) };
   });
 
-  // Compute protein-conc effective level after dilution; flag below LOD
+  // Also compute verdicts at 1:1 (no dilution) to detect "shift on dilution" — useful for the linearity caveat
+  var assayResults_undiluted = visibleAssays.map(function(a){
+    var componentResults = components.map(function(c){
+      var v = compatComputeVerdict(c, a.id, 1);
+      v.component = c;
+      return v;
+    });
+    return { assay: a, verdict: compatRollup(componentResults) };
+  });
+
+  // Compute protein-conc effective level after dilution
   var effProtein = null;
   var proteinNum = parseFloat(proteinConc);
   if (!isNaN(proteinNum) && proteinNum > 0) {
     effProtein = (proteinNum * 1000) / (dilution || 1);  // mg/mL -> ug/mL
   }
   var assaysBelowLOD = effProtein != null ? visibleAssays.filter(function(a){return effProtein < a.lodUgMl;}) : [];
+  var assaysMarginal = effProtein != null ? visibleAssays.filter(function(a){return effProtein >= a.lodUgMl && effProtein < a.lodUgMl * 2.5;}) : [];
+
+  // For "trust band" — assays where buffer passes at current dilution AND protein is >= 2.5x LOD
+  var trustingAssays = effProtein != null ? assayResults.filter(function(r){
+    return r.verdict.status === "ok" && effProtein >= r.assay.lodUgMl * 2.5;
+  }).map(function(r){return r.assay.display;}) : [];
+
+  // Identify assays that "shifted" status as a result of dilution (failed at 1:1, pass at current dilution)
+  // — these are the dilutional-linearity-suspect cases
+  var shiftedAssays = (dilution > 1) ? assayResults.map(function(r, i){
+    var u = assayResults_undiluted[i];
+    if (u.verdict.status === "fail" && r.verdict.status === "ok") return r.assay.display;
+    if (u.verdict.status === "fail" && r.verdict.status === "warn") return r.assay.display;
+    return null;
+  }).filter(function(x){return x;}) : [];
 
   var verdictBg = function(s){ return s === "ok" ? "#e1f5ee" : s === "warn" ? "#fff6e6" : s === "fail" ? "#fef7f7" : "#fafdff"; };
   var verdictFg = function(s){ return s === "ok" ? "#0a4d3c" : s === "warn" ? "#7a5a00" : s === "fail" ? "#b4332e" : "#8e9bb5"; };
   var verdictLabel = function(s){ return s === "ok" ? "Pass" : s === "warn" ? "Caution" : s === "fail" ? "Fail" : "\u2014"; };
+
+  // Subtle helper for the collapsible bottom tab strip
+  var infoTabBtn = function(id, label) {
+    var active = infoTab === id;
+    return <button onClick={function(){setInfoTab(active ? null : id);}} style={{padding:"5px 10px",fontSize:11,fontWeight:600,color:active?"#0b2a6f":"#8e9bb5",background:active?"#f7fbff":"transparent",border:"none",borderRadius:6,cursor:"pointer",fontFamily:"inherit"}}>
+      {label} {active ? "\u25b4" : "\u25be"}
+    </button>;
+  };
 
   return (
     <div style={{padding:"0 0 2.5rem",maxWidth:1100,margin:"0 auto",boxSizing:"border-box"}}>
       <PageHeader instructor={props.instructor} setInstructor={props.setInstructor} onBack={props.onBack} workspaceLabel="Compatibility" />
       <div style={{padding:"1.25rem 16px 0"}}>
 
-        {/* Intro */}
-        <div style={{background:"#fff",border:"1px solid #e5edf7",borderRadius:14,padding:"18px 22px",marginBottom:14}}>
-          <div style={{fontSize:18,fontWeight:800,color:"#0b2a6f",marginBottom:4,letterSpacing:-0.3}}>Check your buffer before you commit to an assay</div>
-          <p style={{fontSize:12,color:"#6f7fa0",lineHeight:1.55,margin:0}}>Sample buffer components silently kill protein assays. Enter your buffer; the tool checks each component against the published interference thresholds for the Thermo Pierce protein assays.</p>
+        {/* Intro — single line, lean */}
+        <div style={{background:"#fff",border:"1px solid #e5edf7",borderRadius:14,padding:"16px 22px",marginBottom:14}}>
+          <div style={{fontSize:18,fontWeight:800,color:"#0b2a6f",marginBottom:2,letterSpacing:-0.3}}>Check your buffer before you commit to an assay</div>
+          <p style={{fontSize:12,color:"#6f7fa0",lineHeight:1.55,margin:0}}>Some buffer components silently kill protein assays. Enter your sample buffer; the tool checks each component against published interference thresholds.</p>
         </div>
 
-        {/* Freeform entry */}
+        {/* Buffer entry */}
         <div style={{background:"#fff",border:"1px solid #e5edf7",borderRadius:14,padding:"16px 20px",marginBottom:14}}>
-          <div style={{fontSize:13,fontWeight:700,color:"#0b2a6f",marginBottom:4}}>Type your sample buffer</div>
+          <div style={{fontSize:13,fontWeight:700,color:"#0b2a6f",marginBottom:4}}>What's in your sample buffer?</div>
           <div style={{fontSize:11,color:"#6f7fa0",marginBottom:10}}>One per line or comma-separated. Examples: <em>"5% Triton X-100"</em>, <em>"10 mM DTT"</em>, <em>"50 mM Tris pH 7.4"</em>.</div>
           <textarea value={bufferText} onChange={function(e){setBufferText(e.target.value);}} style={{width:"100%",padding:"12px 14px",fontSize:14,fontFamily:"-apple-system,BlinkMacSystemFont,sans-serif",background:"#fbfdff",border:"1px solid #e5edf7",borderRadius:10,lineHeight:1.6,minHeight:96,color:"#2d3748",resize:"vertical"}} />
           <div style={{marginTop:10,display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
-            <button onClick={parseAndCheck} style={{padding:"8px 18px",fontSize:12,fontWeight:700,background:"#0b2a6f",color:"#fff",border:"none",borderRadius:8,cursor:"pointer",fontFamily:"inherit"}}>Parse and check &rarr;</button>
-            <span style={{fontSize:11,color:"#8e9bb5"}}>Grid updates automatically.</span>
+            <button onClick={parseAndCheck} style={{padding:"8px 18px",fontSize:12,fontWeight:700,background:"#0b2a6f",color:"#fff",border:"none",borderRadius:8,cursor:"pointer",fontFamily:"inherit"}}>Check my buffer &rarr;</button>
+            <span style={{fontSize:11,color:"#8e9bb5"}}>Grid updates automatically as you change components.</span>
           </div>
-          {parseLog.length > 0 && parseLog.some(function(l){return l.type!=="ok";}) && (
-            <div style={{marginTop:12,padding:"10px 12px",background:"#f7fbff",border:"1px solid #dfe7f2",borderRadius:8,fontSize:11,lineHeight:1.6,fontFamily:"monospace",maxHeight:200,overflowY:"auto"}}>
-              {parseLog.map(function(l,i){
-                var col = l.type === "err" ? "#b4332e" : l.type === "warn" ? "#7a5a00" : l.type === "ok" ? "#0a4d3c" : "#5a6984";
-                return <div key={i} style={{color:col}}>{l.text}</div>;
+
+          {/* Recognition line — only shown when something was recognized */}
+          {components.length > 0 && (
+            <div style={{marginTop:12,padding:"10px 14px",background:"#f0f9f4",border:"1px solid #b8e0cd",borderRadius:8,fontSize:12,color:"#0a4d3c",lineHeight:1.55}}>
+              <strong>Got it.</strong> Your sample contains: {components.map(function(c, i){
+                return [
+                  i > 0 ? <span key={"s"+i} style={{color:"#5a6984",margin:"0 4px"}}>·</span> : null,
+                  <strong key={"n"+i} style={{fontWeight:700}}>{c.name} ({compatFmtConc(c.val, c.unit)})</strong>
+                ];
+              })}.
+            </div>
+          )}
+
+          {/* Warnings/errors block — only shown when there ARE warnings/errors */}
+          {parseLog.length > 0 && (
+            <div style={{marginTop:8,padding:"10px 14px",background:"#fffaf0",border:"1px solid #f0d8a0",borderRadius:8,fontSize:11,lineHeight:1.6,color:"#7a5a00"}}>
+              {parseLog.map(function(l, i){
+                var col = l.type === "err" ? "#b4332e" : "#7a5a00";
+                var sym = l.type === "err" ? "\u2717" : "\u26a0";
+                return <div key={i} style={{color:col}}>{sym} {l.text}</div>;
               })}
             </div>
           )}
@@ -14295,7 +14342,7 @@ function CompatibilityTool(props) {
         <div style={{background:"#fff",border:"1px solid #e5edf7",borderRadius:14,marginBottom:14,overflow:"hidden"}}>
           <div style={{padding:"14px 20px 10px",borderBottom:"1px solid #eef3f8"}}>
             <div style={{fontSize:14,fontWeight:700,color:"#0b2a6f",marginBottom:3}}>Compatibility verdict</div>
-            <div style={{fontSize:11,color:"#6f7fa0",lineHeight:1.5}}>Click a verdict to see component-by-component breakdown. <strong>Pass</strong> = comfortably below limit. <strong>Caution</strong> = within 2&times; of limit. <strong>Fail</strong> = exceeds limit.</div>
+            <div style={{fontSize:11,color:"#6f7fa0",lineHeight:1.5}}>Click a verdict to see which component is helping or hurting. <strong>Pass</strong> = comfortably below limit. <strong>Caution</strong> = within 2&times; of limit. <strong>Fail</strong> = exceeds limit.</div>
           </div>
           {visibleAssays.length === 0 ? (
             <div style={{padding:"40px 20px",textAlign:"center",color:"#8e9bb5",fontSize:13}}>No assays selected. Tick at least one assay above to see verdicts.</div>
@@ -14315,7 +14362,7 @@ function CompatibilityTool(props) {
                 {assayResults.map(function(r,i){
                   return <div key={r.assay.id} onClick={function(){setOpenedDrill(openedDrill===r.assay.id?null:r.assay.id);}} style={{padding:"14px",textAlign:"center",fontWeight:700,fontSize:13,cursor:components.length>0?"pointer":"default",background:verdictBg(components.length>0?r.verdict.status:"na"),color:verdictFg(components.length>0?r.verdict.status:"na"),borderRight:i<visibleAssays.length-1?"1px solid #f4f6fa":"none"}}>
                     <div style={{fontSize:10,fontWeight:600,textTransform:"uppercase",letterSpacing:0.5,marginBottom:3}}>{components.length>0?verdictLabel(r.verdict.status):"\u2014"}</div>
-                    <div style={{fontSize:10,fontWeight:500,opacity:0.85,lineHeight:1.4}}>{components.length>0?r.verdict.reason:"parse a buffer to begin"}</div>
+                    <div style={{fontSize:10,fontWeight:500,opacity:0.85,lineHeight:1.4}}>{components.length>0?r.verdict.reason:"check a buffer to begin"}</div>
                   </div>;
                 })}
               </div>
@@ -14324,7 +14371,7 @@ function CompatibilityTool(props) {
                 var r = assayResults.find(function(x){return x.assay.id === openedDrill;});
                 if (!r) return null;
                 return <div style={{padding:"14px 20px",background:"#fafdff",fontSize:12,color:"#5a6984",borderTop:"1px solid #eef3f8"}}>
-                  <div style={{fontWeight:700,color:"#0b2a6f",fontSize:12,marginBottom:8}}>{r.assay.display} \u2014 component breakdown</div>
+                  <div style={{fontWeight:700,color:"#0b2a6f",fontSize:12,marginBottom:8}}>{r.assay.display} {"\u2014"} component breakdown</div>
                   {r.componentResults.map(function(cr,i){
                     var c = cr.component;
                     var limitObj = COMPAT_DATA[c.key][r.assay.id];
@@ -14345,23 +14392,26 @@ function CompatibilityTool(props) {
           )}
         </div>
 
-        {/* Dilution explorer */}
+        {/* Dilution explorer — re-worked for clarity */}
         <div style={{background:"#f7f1ff",border:"1px solid #e2d7fb",borderRadius:12,padding:"14px 18px",marginBottom:14}}>
-          <div style={{fontSize:12,fontWeight:700,color:"#4a2d8f",marginBottom:4}}>What if you dilute the sample first?</div>
-          <div style={{fontSize:11,color:"#6f5a96",marginBottom:12,lineHeight:1.5}}>Move the slider to see how each assay's verdict changes. Enter expected protein concentration to also check whether diluted protein stays above each assay's lower detection limit.</div>
+          <div style={{fontSize:13,fontWeight:700,color:"#4a2d8f",marginBottom:4}}>What if you dilute the sample <em>before</em> running the assay?</div>
+          <div style={{fontSize:11,color:"#6f5a96",marginBottom:12,lineHeight:1.55}}>Slide the dilution factor to see how each assay's verdict changes. Diluting reduces interfering buffer components — but also reduces your protein, so we also check whether enough signal is left to actually measure.</div>
+
           <div style={{display:"flex",gap:14,alignItems:"center",flexWrap:"wrap",marginBottom:10}}>
-            <label style={{fontSize:11,color:"#4a2d8f",fontWeight:600}}>Dilution factor:</label>
+            <label style={{fontSize:11,color:"#4a2d8f",fontWeight:600,minWidth:120}}>Dilution factor:</label>
             <input type="range" min="1" max="200" value={dilution} onChange={function(e){setDilution(parseInt(e.target.value));}} style={{flex:1,minWidth:200,accentColor:"#6337b9"}} />
             <div style={{fontFamily:"monospace",fontSize:14,fontWeight:700,color:"#4a2d8f",padding:"4px 10px",background:"#fff",borderRadius:6,border:"1px solid #d4bce8",minWidth:60,textAlign:"center"}}>1:{dilution}</div>
           </div>
           <div style={{display:"flex",gap:14,alignItems:"center",flexWrap:"wrap",marginBottom:10}}>
-            <label style={{fontSize:11,color:"#4a2d8f",fontWeight:600}}>Expected protein conc:</label>
-            <input type="number" step="0.1" min="0" placeholder="e.g. 1.5" value={proteinConc} onChange={function(e){setProteinConc(e.target.value);}} style={{width:80,padding:"5px 8px",border:"1px solid #d4bce8",borderRadius:6,fontFamily:"monospace",fontSize:12,background:"#fff"}} />
-            <span style={{fontSize:11,color:"#6f5a96"}}>mg/mL in the original (undiluted) sample</span>
+            <label style={{fontSize:11,color:"#4a2d8f",fontWeight:600,minWidth:120}}>Expected protein:</label>
+            <input type="number" step="0.1" min="0" placeholder="e.g. 1.5" value={proteinConc} onChange={function(e){setProteinConc(e.target.value);}} style={{width:90,padding:"5px 8px",border:"1px solid #d4bce8",borderRadius:6,fontFamily:"monospace",fontSize:12,background:"#fff"}} />
+            <span style={{fontSize:11,color:"#6f5a96"}}>mg/mL in the undiluted sample</span>
           </div>
+
+          {/* At this dilution: per-assay status — also clarifying what "pass" means here */}
           {components.length > 0 && (
             <div style={{padding:"10px 12px",background:"#fff",border:"1px solid #d4bce8",borderRadius:8,fontSize:11,lineHeight:1.6,marginTop:6}}>
-              {(function(){
+              <strong style={{color:"#4a2d8f"}}>At 1:{dilution} dilution, buffer interferences:</strong> {(function(){
                 var passing = assayResults.filter(function(r){return r.verdict.status==="ok";});
                 var cautious = assayResults.filter(function(r){return r.verdict.status==="warn";});
                 var failing = assayResults.filter(function(r){return r.verdict.status==="fail";});
@@ -14369,45 +14419,77 @@ function CompatibilityTool(props) {
                 if (passing.length) parts.push(<span key="p" style={{color:"#0a4d3c",fontWeight:700}}>{passing.map(function(r){return r.assay.display;}).join(", ")} pass</span>);
                 if (cautious.length) parts.push(<span key="c" style={{color:"#7a5a00",fontWeight:700}}>{cautious.map(function(r){return r.assay.display;}).join(", ")} caution</span>);
                 if (failing.length) parts.push(<span key="f" style={{color:"#b4332e",fontWeight:700}}>{failing.map(function(r){return r.assay.display;}).join(", ")} fail</span>);
-                return <span>At 1:{dilution} dilution: {parts.map(function(p,i){return [i>0?<span key={"sep"+i} style={{color:"#8e9bb5",margin:"0 6px"}}>&middot;</span>:null, p];})}</span>;
+                return parts.map(function(p,i){return [i>0?<span key={"sep"+i} style={{color:"#8e9bb5",margin:"0 6px"}}>·</span>:null, p];});
               })()}
             </div>
           )}
+
+          {/* Protein-side status */}
           {effProtein != null && (
             <div style={{padding:"10px 12px",background:effProtein<10?"#fef7f7":"#e1f5ee",border:"1px solid "+(effProtein<10?"#f0c8c8":"#b8e0cd"),borderRadius:8,fontSize:11,lineHeight:1.6,marginTop:6,color:effProtein<10?"#7a3328":"#0a4d3c"}}>
-              <strong>Protein at 1:{dilution}:</strong> {effProtein.toFixed(1)} \u00b5g/mL.
-              {assaysBelowLOD.length > 0 && <span> Below the lower detection limit for: <strong>{assaysBelowLOD.map(function(a){return a.display+" ("+a.lodUgMl+" \u00b5g/mL)";}).join(", ")}</strong>. Even if buffer is compatible, signal may be unreliable.</span>}
-              {assaysBelowLOD.length === 0 && <span> Above the detection limit for all selected assays.</span>}
+              <strong>Protein at 1:{dilution}:</strong> {effProtein.toFixed(1)} {"\u00b5"}g/mL.
+              {assaysBelowLOD.length > 0 && <span> Below lower detection limit for: <strong>{assaysBelowLOD.map(function(a){return a.display+" (LOD "+a.lodUgMl+" "+"\u00b5"+"g/mL)";}).join(", ")}</strong>. Even if buffer is compatible, signal will be unreliable.</span>}
+              {assaysBelowLOD.length === 0 && assaysMarginal.length > 0 && <span> Within 2.5{"\u00d7"} of LOD for: <strong>{assaysMarginal.map(function(a){return a.display;}).join(", ")}</strong>. Detectable but CVs typically degrade near the lower end.</span>}
+              {assaysBelowLOD.length === 0 && assaysMarginal.length === 0 && <span> Comfortably above the LOD for all selected assays.</span>}
+            </div>
+          )}
+
+          {/* Trust band — the headline answer */}
+          {effProtein != null && trustingAssays.length > 0 && (
+            <div style={{padding:"10px 12px",background:"#f0f9f4",border:"1px solid #b8e0cd",borderRadius:8,fontSize:11,lineHeight:1.6,marginTop:6,color:"#0a4d3c"}}>
+              <strong>{"\u2713"} Likely to trust at 1:{dilution}:</strong> {trustingAssays.join(", ")} (buffer passes, protein well above LOD).
+            </div>
+          )}
+
+          {/* Dilutional-linearity caveat — only when there's an actual shift from fail to pass */}
+          {shiftedAssays.length > 0 && (
+            <div style={{padding:"10px 12px",background:"#fffaf0",border:"1px solid #f0d8a0",borderRadius:8,fontSize:11,lineHeight:1.6,marginTop:6,color:"#7a3328"}}>
+              <strong>{"\u26a0"} Verify dilutional linearity for: {shiftedAssays.join(", ")}.</strong> At 1:1 these assays fail on buffer interference; at 1:{dilution} the math says they pass. <strong>But</strong> dilution doesn't always remove interference cleanly {"\u2014"} some matrix effects persist even when nominal concentrations drop below threshold. Run a dilution series and confirm the back-calculated values are dilutionally linear (e.g., 1:{dilution} {"\u00d7"} result {"\u2248"} 1:{Math.round(dilution/2)} {"\u00d7"} result {"\u00d7"} 2) before reporting.
             </div>
           )}
         </div>
 
-        {/* Honest caveats */}
-        <div style={{background:"#fff",border:"1px solid #e5edf7",borderRadius:12,padding:"14px 18px",marginBottom:14,fontSize:11,color:"#6f7fa0",lineHeight:1.6}}>
-          <div style={{fontSize:12,fontWeight:700,color:"#0b2a6f",marginBottom:6}}>Honest limitations</div>
-          <ul style={{margin:0,paddingLeft:18}}>
-            <li>Data is sourced from Thermo Pierce vendor publications. Non-Pierce equivalents (e.g., Bio-Rad Bradford) may behave differently.</li>
-            <li>Synergistic interactions between two interferents are <strong>not</strong> modeled. A buffer that passes individually for each component may still fail in combination.</li>
-            <li>Protein-specific effects (e.g., a particular antibody binding to a detergent) are not modeled.</li>
-            <li>Unit conversion between % w/v and mM requires molecular weight and is not done. Match units to what the vendor publishes (mostly mM or %).</li>
-            <li>This is a <strong>screening guide</strong> to narrow your choices; verify with small-scale spike-recovery for novel matrices.</li>
-          </ul>
-        </div>
-
-        {/* References */}
-        <div style={{background:"#fff",border:"1px solid #e5edf7",borderRadius:12,padding:"14px 18px",fontSize:11,color:"#6f7fa0",lineHeight:1.6}}>
-          <div style={{fontSize:12,fontWeight:700,color:"#0b2a6f",marginBottom:8}}>References</div>
-          <ul style={{margin:0,paddingLeft:18}}>
-            <li>Thermo Scientific Pierce Protein Assay Selection Guide (compatibility chart). <a href="https://tools.thermofisher.com/content/sfs/brochures/TR0068-Protein-assay-compatibility.pdf" target="_blank" rel="noopener noreferrer" style={{color:"#139cb6"}}>TR0068 (PDF)</a></li>
-            <li>Pierce BCA Protein Assay Kit instructions, P/N 23225 (Thermo Fisher).</li>
-            <li>Pierce BCA, Reducing Agent Compatible (BCA-RAC), P/N 23250.</li>
-            <li>Pierce Micro BCA Protein Assay Kit, P/N 23235.</li>
-            <li>Pierce 660 nm Protein Assay Kit, P/N 22660.</li>
-            <li>Pierce Coomassie Plus (Bradford) Protein Assay Kit, P/N 23236.</li>
-            <li>Pierce Coomassie Protein Assay Kit (regular), P/N 23200.</li>
-            <li>Pierce Modified Lowry Protein Assay Kit, P/N 23240.</li>
-            <li>Data accessed June 2026. Values are subject to vendor revision; verify against the current vendor PDF before relying on a borderline result.</li>
-          </ul>
+        {/* Collapsible "How this works · References · Limitations" strip */}
+        <div style={{background:"#fff",border:"1px solid #e5edf7",borderRadius:12,marginBottom:0}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"flex-start",gap:4,padding:"8px 12px",borderBottom:infoTab?"1px solid #eef3f8":"none"}}>
+            {infoTabBtn("how",    "\u24d8 How this works")}
+            {infoTabBtn("refs",   "References")}
+            {infoTabBtn("limits", "Limitations")}
+          </div>
+          {infoTab === "how" && (
+            <div style={{padding:"12px 18px",fontSize:11,color:"#5a6984",lineHeight:1.6}}>
+              For each component you enter, the tool looks up the maximum compatible concentration for each assay from published vendor data. <strong>Pass</strong> means your concentration is at most half the limit (comfortable margin). <strong>Caution</strong> means you're within 2{"\u00d7"} of the limit (functional but borderline). <strong>Fail</strong> means you exceed the limit. The "what-if dilution" section divides every component's concentration by the dilution factor and re-runs the check, plus checks whether your protein stays above each assay's lower detection limit.
+            </div>
+          )}
+          {infoTab === "refs" && (
+            <div style={{padding:"12px 18px",fontSize:11,color:"#5a6984",lineHeight:1.7}}>
+              <ul style={{margin:0,paddingLeft:18}}>
+                <li>Thermo Scientific Pierce Protein Assay Selection Guide (compatibility chart). <a href="https://tools.thermofisher.com/content/sfs/brochures/TR0068-Protein-assay-compatibility.pdf" target="_blank" rel="noopener noreferrer" style={{color:"#139cb6"}}>TR0068 (PDF)</a></li>
+                <li>Pierce BCA Protein Assay Kit instructions, P/N 23225 (Thermo Fisher).</li>
+                <li>Pierce BCA, Reducing Agent Compatible (BCA-RAC), P/N 23250.</li>
+                <li>Pierce Micro BCA Protein Assay Kit, P/N 23235.</li>
+                <li>Pierce 660 nm Protein Assay Kit, P/N 22660.</li>
+                <li>Pierce Coomassie Plus (Bradford) Protein Assay Kit, P/N 23236.</li>
+                <li>Pierce Coomassie Protein Assay Kit (regular), P/N 23200.</li>
+                <li>Pierce Modified Lowry Protein Assay Kit, P/N 23240.</li>
+                <li>Bio-Rad Quick Start Bradford Protein Assay Instruction Manual (cat. #500-0201). <a href="https://www.bio-rad.com/webroot/web/pdf/lsr/literature/4110065A.pdf" target="_blank" rel="noopener noreferrer" style={{color:"#139cb6"}}>PDF</a></li>
+                <li>Compton SJ and Jones CG (1985). Mechanism of dye response and interference in the Bradford protein assay. <em>Anal Biochem</em> 151:369-374.</li>
+                <li>Bradford MM (1976). A rapid and sensitive method for the quantitation of microgram quantities of protein utilizing the principle of protein-dye binding. <em>Anal Biochem</em> 72:248-254.</li>
+                <li>Data accessed June 2026. Verify against the current vendor PDF before relying on a borderline result.</li>
+              </ul>
+            </div>
+          )}
+          {infoTab === "limits" && (
+            <div style={{padding:"12px 18px",fontSize:11,color:"#5a6984",lineHeight:1.6}}>
+              <ul style={{margin:0,paddingLeft:18}}>
+                <li>Data is from vendor publications (currently Thermo Pierce and Bio-Rad). Equivalents from other vendors may behave differently.</li>
+                <li>Synergistic interactions between two interferents are <strong>not</strong> modeled. A buffer that passes individually for each component may still fail in combination.</li>
+                <li>Protein-specific effects (e.g., a particular antibody binding to a detergent) are not modeled.</li>
+                <li>Unit conversion between % w/v and mM requires molecular weight and is not done. Match units to what the vendor publishes (mostly mM or %).</li>
+                <li>This is a <strong>screening guide</strong> to narrow your choices; verify with small-scale spike-recovery for novel matrices.</li>
+              </ul>
+            </div>
+          )}
         </div>
 
       </div>
