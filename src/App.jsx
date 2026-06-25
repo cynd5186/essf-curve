@@ -29,6 +29,7 @@ var FEATURES = {
   msQuant: false,
   hplcQuant: false,
   benchCalcs: false,
+  compatibility: true,  // Buffer/reagent interference tool (Pierce protein assays). Enabled.
 };
 
 var avg = function(a) { return a.length ? a.reduce(function(s,v){return s+v;},0)/a.length : 0; };
@@ -36,7 +37,7 @@ var sdc = function(a) { if (a.length<2) return 0; var m=avg(a); return Math.sqrt
 var cvc = function(a) { var m=avg(a); return m ? sdc(a)/Math.abs(m) : Infinity; };
 var med = function(a) { var s=a.slice().sort(function(x,y){return x-y;}); var m=Math.floor(s.length/2); return s.length%2 ? s[m] : (s[m-1]+s[m])/2; };
 var APP_NAME = "eSSF Bench";
-var APP_VERSION = "v5d5";
+var APP_VERSION = "v5d7";
 
 // ── Chart export utility ─────────────────────────────────────────────────
 // Exports an SVG chart as a PNG, either as a downloaded file or to the
@@ -13934,7 +13935,34 @@ function ChooserScreen(props){
         })}
       </div>
 
-      {/* TOOLS section hidden until data layer is ready */}
+      {/* TOOLS section — separate from ASSAYS. These are helpers that
+          aren't tied to a specific assay workflow but support the analyst's
+          day-to-day decisions. */}
+      <div style={{marginBottom: "1.25rem"}}>
+        <p style={{fontSize: 11, color: "#8e9bb5", margin: "0 0 10px", letterSpacing: 1.2}}>TOOLS</p>
+
+        {card({
+          stripeColor: FEATURES.compatibility ? "#6337b9" : "#D3D1C7",
+          iconBg:      FEATURES.compatibility ? "#F1EAFB" : "#F1EFE8",
+          iconColor:   FEATURES.compatibility ? "#4a2d8f" : "#888780",
+          iconNode: (
+            // Hand-drawn: a checkmark over a flask, signaling "verify your buffer"
+            <svg width="28" height="28" viewBox="0 0 28 28" aria-hidden="true">
+              {/* Flask */}
+              <path d="M 11 4 L 11 11 L 6 22 L 22 22 L 17 11 L 17 4" fill="none" stroke={FEATURES.compatibility ? "#4a2d8f" : "#888780"} strokeWidth="1.1" strokeLinejoin="round"/>
+              <line x1="9" y1="4" x2="19" y2="4" stroke={FEATURES.compatibility ? "#4a2d8f" : "#888780"} strokeWidth="1.1" strokeLinecap="round"/>
+              {/* Liquid */}
+              <path d="M 8 17 L 20 17 L 22 22 L 6 22 Z" fill={FEATURES.compatibility ? "#D4BCE8" : "#D3D1C7"} opacity="0.55"/>
+              {/* Checkmark inside */}
+              <path d="M 10 18.5 L 12.5 21 L 17 16" fill="none" stroke={FEATURES.compatibility ? "#0a4d3c" : "#888780"} strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+          ),
+          name: "Compatibility",
+          desc: "Check your buffer before you commit to a protein assay",
+          enabled: FEATURES.compatibility,
+          onClick: function(){ onChoose("compatibility"); },
+        })}
+      </div>
 
       {/* Sign-out badge — lets the analyst sign out from the chooser
           (important on shared lab computers, where leaving the page open
@@ -13960,6 +13988,431 @@ function ChooserScreen(props){
     </div>
   </div>
   </div>;
+}
+
+
+// ═════════════════════════════════════════════════════════════════════════
+//  COMPATIBILITY TOOL — buffer/reagent interference checker
+//
+//  Standalone tool reachable from the chooser's TOOLS section. Takes a
+//  free-text sample buffer composition, parses it, and checks each
+//  component against published interference thresholds for the Thermo
+//  Pierce protein assays (BCA, BCA-RAC, Micro BCA, 660 nm, Bradford
+//  Coomassie Plus, Coomassie regular, Modified Lowry).
+//
+//  Returns per-assay verdicts (Pass / Caution / Fail) plus a dilution
+//  explorer that also considers post-dilution protein concentration vs.
+//  each assay's lower detection limit.
+//
+//  Data attribution: values transcribed from the Thermo Scientific Pierce
+//  Protein Assay Selection Guide (compatibility chart) and individual
+//  product inserts. Treat as a screening reference, not a guarantee.
+//  Verify against the latest vendor PDFs (linked in the References
+//  section) before committing to an assay choice for novel matrices.
+// ═════════════════════════════════════════════════════════════════════════
+
+// --- Compatibility data tables ---------------------------------------------
+// Each substance: max compatible concentration per assay.
+// Units: 'pct' = % w/v or v/v, 'mM' = millimolar, 'M' = molar.
+// {val: 0} = explicitly incompatible at any non-zero concentration.
+// null entry = no published value (treated as "no known issue, but unverified").
+var COMPAT_DATA = {
+  // ── Buffers / salts ──
+  tris:              { display: "Tris-HCl",              bca:{val:250,u:"mM"}, bcaRac:{val:1,u:"M"},  microBca:{val:10,u:"mM"}, p660:{val:1,u:"M"},   bradford:{val:2,u:"M"},  coomassie:{val:2,u:"M"},  lowry:{val:200,u:"mM"} },
+  hepes:             { display: "HEPES",                 bca:{val:100,u:"mM"}, bcaRac:{val:100,u:"mM"},microBca:{val:50,u:"mM"}, p660:{val:100,u:"mM"},bradford:{val:100,u:"mM"},coomassie:{val:100,u:"mM"},lowry:{val:100,u:"mM"} },
+  nacl:              { display: "NaCl",                  bca:{val:1,u:"M"},    bcaRac:{val:1,u:"M"},  microBca:{val:1,u:"M"},   p660:{val:1,u:"M"},   bradford:{val:1,u:"M"},  coomassie:{val:1,u:"M"},  lowry:{val:1,u:"M"} },
+  kcl:               { display: "KCl",                   bca:{val:1,u:"M"},    bcaRac:{val:1,u:"M"},  microBca:{val:1,u:"M"},   p660:{val:1,u:"M"},   bradford:{val:1,u:"M"},  coomassie:{val:1,u:"M"},  lowry:{val:1,u:"M"} },
+  sodium_phosphate:  { display: "Sodium phosphate",      bca:{val:100,u:"mM"}, bcaRac:{val:100,u:"mM"},microBca:{val:50,u:"mM"}, p660:{val:100,u:"mM"},bradford:{val:100,u:"mM"},coomassie:{val:100,u:"mM"},lowry:{val:100,u:"mM"} },
+  // ── Detergents ──
+  triton_x100:       { display: "Triton X-100",          bca:{val:5,u:"pct"},  bcaRac:{val:5,u:"pct"},microBca:{val:1,u:"pct"}, p660:{val:1.25,u:"pct"},bradford:{val:0.0625,u:"pct"},coomassie:{val:0.0625,u:"pct"},lowry:{val:0.031,u:"pct"} },
+  np40:              { display: "NP-40",                 bca:{val:5,u:"pct"},  bcaRac:{val:5,u:"pct"},microBca:{val:1,u:"pct"}, p660:{val:1.25,u:"pct"},bradford:{val:0.0625,u:"pct"},coomassie:{val:0.0625,u:"pct"},lowry:{val:0.031,u:"pct"} },
+  tween20:           { display: "Tween 20",              bca:{val:5,u:"pct"},  bcaRac:{val:5,u:"pct"},microBca:{val:1,u:"pct"}, p660:{val:1,u:"pct"}, bradford:{val:0.0625,u:"pct"},coomassie:{val:0.0625,u:"pct"},lowry:{val:0.031,u:"pct"} },
+  tween80:           { display: "Tween 80",              bca:{val:5,u:"pct"},  bcaRac:{val:5,u:"pct"},microBca:{val:1,u:"pct"}, p660:{val:1,u:"pct"}, bradford:{val:0.0625,u:"pct"},coomassie:{val:0.0625,u:"pct"},lowry:{val:0.031,u:"pct"} },
+  sds:               { display: "SDS",                   bca:{val:5,u:"pct"},  bcaRac:{val:5,u:"pct"},microBca:{val:0.1,u:"pct"},p660:{val:0.125,u:"pct"},bradford:{val:0.0125,u:"pct"},coomassie:{val:0.0125,u:"pct"},lowry:{val:1,u:"pct"} },
+  doc:               { display: "Sodium deoxycholate",   bca:{val:5,u:"pct"},  bcaRac:{val:5,u:"pct"},microBca:{val:1,u:"pct"}, p660:{val:0.5,u:"pct"},bradford:{val:0.04,u:"pct"},coomassie:{val:0.04,u:"pct"},lowry:{val:0.062,u:"pct"} },
+  chaps:             { display: "CHAPS",                 bca:{val:5,u:"pct"},  bcaRac:{val:5,u:"pct"},microBca:{val:1,u:"pct"}, p660:{val:5,u:"pct"}, bradford:{val:5,u:"pct"},coomassie:{val:5,u:"pct"}, lowry:{val:0.5,u:"pct"} },
+  // ── Reducing agents (BCA killers) ──
+  dtt:               { display: "DTT",                   bca:{val:1,u:"mM"},   bcaRac:{val:500,u:"mM"},microBca:{val:1,u:"mM"}, p660:{val:250,u:"mM"},bradford:{val:5,u:"mM"},coomassie:{val:5,u:"mM"},lowry:{val:1,u:"mM"} },
+  bme:               { display: "\u03b2-mercaptoethanol", bca:{val:0,u:"mM"},  bcaRac:{val:25,u:"pct"},microBca:{val:0,u:"mM"}, p660:{val:25,u:"pct"},bradford:{val:10,u:"pct"},coomassie:{val:10,u:"pct"},lowry:{val:0,u:"mM"} },
+  tcep:              { display: "TCEP",                  bca:{val:0,u:"mM"},   bcaRac:{val:100,u:"mM"},microBca:{val:0,u:"mM"}, p660:{val:100,u:"mM"},bradford:{val:100,u:"mM"},coomassie:{val:100,u:"mM"},lowry:{val:0,u:"mM"} },
+  // ── Chelators ──
+  edta:              { display: "EDTA",                  bca:{val:10,u:"mM"},  bcaRac:{val:10,u:"mM"},microBca:{val:10,u:"mM"},p660:{val:100,u:"mM"},bradford:{val:100,u:"mM"},coomassie:{val:100,u:"mM"},lowry:{val:5,u:"mM"} },
+  egta:              { display: "EGTA",                  bca:{val:10,u:"mM"},  bcaRac:{val:10,u:"mM"},microBca:{val:10,u:"mM"},p660:{val:100,u:"mM"},bradford:{val:100,u:"mM"},coomassie:{val:100,u:"mM"},lowry:{val:5,u:"mM"} },
+  // ── Denaturants ──
+  urea:              { display: "Urea",                  bca:{val:3,u:"M"},    bcaRac:{val:3,u:"M"}, microBca:{val:3,u:"M"},  p660:{val:3,u:"M"},   bradford:{val:6,u:"M"}, coomassie:{val:6,u:"M"}, lowry:{val:3,u:"M"} },
+  guanidine:         { display: "Guanidine-HCl",         bca:{val:4,u:"M"},    bcaRac:{val:4,u:"M"}, microBca:{val:1,u:"M"},  p660:{val:1,u:"M"},   bradford:{val:3.5,u:"M"},coomassie:{val:3.5,u:"M"},lowry:{val:4,u:"M"} },
+  // ── Common additives ──
+  glycerol:          { display: "Glycerol",              bca:{val:10,u:"pct"}, bcaRac:{val:10,u:"pct"},microBca:{val:10,u:"pct"},p660:{val:10,u:"pct"},bradford:{val:10,u:"pct"},coomassie:{val:10,u:"pct"},lowry:{val:10,u:"pct"} },
+  sucrose:           { display: "Sucrose",               bca:{val:40,u:"pct"}, bcaRac:{val:40,u:"pct"},microBca:{val:7.5,u:"pct"},p660:{val:25,u:"pct"},bradford:{val:30,u:"pct"},coomassie:{val:30,u:"pct"},lowry:{val:7.5,u:"pct"} },
+  glycine:           { display: "Glycine",               bca:{val:1,u:"M"},    bcaRac:{val:1,u:"M"}, microBca:{val:100,u:"mM"},p660:{val:1,u:"M"},   bradford:{val:100,u:"mM"},coomassie:{val:100,u:"mM"},lowry:{val:100,u:"mM"} },
+  histidine:         { display: "Histidine",             bca:{val:100,u:"mM"}, bcaRac:{val:100,u:"mM"},microBca:{val:50,u:"mM"},p660:{val:100,u:"mM"},bradford:{val:100,u:"mM"},coomassie:{val:100,u:"mM"},lowry:{val:50,u:"mM"} },
+  sodium_azide:      { display: "Sodium azide",          bca:{val:0.125,u:"pct"},bcaRac:{val:0.125,u:"pct"},microBca:{val:0.125,u:"pct"},p660:{val:0.125,u:"pct"},bradford:{val:0.5,u:"pct"},coomassie:{val:0.5,u:"pct"},lowry:{val:0.5,u:"pct"} },
+  ammonium_sulfate:  { display: "Ammonium sulfate",      bca:{val:1.5,u:"M"},  bcaRac:{val:1.5,u:"M"},microBca:{val:1,u:"M"},  p660:{val:1,u:"M"},   bradford:{val:1,u:"M"}, coomassie:{val:1,u:"M"}, lowry:{val:1,u:"M"} },
+};
+
+var COMPAT_SYNONYMS = {
+  "tris-hcl":"tris", "tris hcl":"tris", "tris hydroxymethyl":"tris",
+  "np-40":"np40", "nonidet p-40":"np40", "nonidet":"np40",
+  "triton x 100":"triton_x100", "triton-x-100":"triton_x100", "triton":"triton_x100",
+  "tween-20":"tween20", "tween 20":"tween20",
+  "tween-80":"tween80", "tween 80":"tween80",
+  "sodium dodecyl sulfate":"sds",
+  "na-doc":"doc", "na doc":"doc", "deoxycholate":"doc", "sodium deoxycholate":"doc",
+  "beta-mercaptoethanol":"bme", "beta mercaptoethanol":"bme",
+  "2-mercaptoethanol":"bme", "2 mercaptoethanol":"bme", "mercaptoethanol":"bme",
+  "\u03b2-mercaptoethanol":"bme", "\u03b2-me":"bme", "b-me":"bme", "\u03b2me":"bme", "bme":"bme",
+  "dithiothreitol":"dtt", "cleland":"dtt",
+  "tris(2-carboxyethyl)phosphine":"tcep",
+  "na2-edta":"edta", "edta-na2":"edta", "edta na":"edta",
+  "sodium chloride":"nacl", "salt":"nacl",
+  "potassium chloride":"kcl",
+  "sodium phosphate buffer":"sodium_phosphate", "phosphate":"sodium_phosphate",
+  "gdn-hcl":"guanidine", "gdncl":"guanidine", "guanidinium":"guanidine", "gdn":"guanidine",
+  "na-azide":"sodium_azide", "naazide":"sodium_azide", "azide":"sodium_azide", "nan3":"sodium_azide",
+  "ammonium sulphate":"ammonium_sulfate", "(nh4)2so4":"ammonium_sulfate",
+};
+
+// All 7 assays. Lower-detection-limit (lod) used for protein-conc warning
+// when the analyst dilutes. Values from each assay's published linear range.
+var COMPAT_ASSAYS = [
+  { id:"bca",        display:"BCA",                  pn:"P/N 23225",         lodUgMl: 20,  ref:"Pierce BCA Protein Assay Kit" },
+  { id:"bcaRac",     display:"BCA-RAC",              pn:"P/N 23250",         lodUgMl: 20,  ref:"Pierce BCA, Reducing Agent Compatible" },
+  { id:"microBca",   display:"Micro BCA",            pn:"P/N 23235",         lodUgMl: 0.5, ref:"Pierce Micro BCA Protein Assay" },
+  { id:"p660",       display:"660 nm",               pn:"P/N 22660",         lodUgMl: 50,  ref:"Pierce 660 nm Protein Assay" },
+  { id:"bradford",   display:"Coomassie Plus",       pn:"P/N 23236",         lodUgMl: 1,   ref:"Pierce Coomassie Plus (Bradford)" },
+  { id:"coomassie",  display:"Coomassie Regular",    pn:"P/N 23200",         lodUgMl: 25,  ref:"Pierce Coomassie Regular Protein Assay" },
+  { id:"lowry",      display:"Modified Lowry",       pn:"P/N 23240",         lodUgMl: 1,   ref:"Pierce Modified Lowry Protein Assay" },
+];
+
+function compatNormalizeUnit(u) {
+  u = (u || "").toLowerCase().replace(/\s+/g, "");
+  if (u === "%") return "pct";
+  if (u === "mm") return "mM";
+  if (u === "m") return "M";
+  if (u === "um" || u === "\u00b5m") return "uM";
+  if (u === "mg/ml") return "mg_ml";
+  if (u === "ug/ml" || u === "\u00b5g/ml") return "ug_ml";
+  return u;
+}
+
+function compatCanonicalize(name) {
+  var n = name.toLowerCase().trim();
+  if (COMPAT_DATA[n]) return n;
+  if (COMPAT_SYNONYMS[n]) return COMPAT_SYNONYMS[n];
+  var nClean = n.replace(/[\s\-]/g, "");
+  for (var k in COMPAT_DATA) {
+    if (k.replace(/_/g, "") === nClean) return k;
+  }
+  for (var s in COMPAT_SYNONYMS) {
+    if (n.indexOf(s) !== -1 || s.indexOf(n) !== -1) return COMPAT_SYNONYMS[s];
+  }
+  for (var k2 in COMPAT_DATA) {
+    var d = COMPAT_DATA[k2].display.toLowerCase();
+    if (n.indexOf(d) !== -1 || d.indexOf(n) !== -1) return k2;
+  }
+  return null;
+}
+
+function compatParseLine(raw) {
+  var line = raw.trim().toLowerCase();
+  if (!line) return null;
+  line = line.replace(/\bph\s*\d+(\.\d+)?/g, "").trim();
+  line = line.replace(/[,\.]+$/, "").trim();
+  var m, val=null, unit=null, name=null;
+  m = line.match(/^([\d.]+)\s*(%|mm|m|mg\/ml|\u00b5m|um|ug\/ml)\s+(.+)$/i);
+  if (m) {
+    val = parseFloat(m[1]); unit = compatNormalizeUnit(m[2]); name = m[3].trim();
+  } else {
+    m = line.match(/^(.+?)\s*[,:]?\s+([\d.]+)\s*(%|mm|m|mg\/ml|\u00b5m|um|ug\/ml)$/i);
+    if (m) { name = m[1].trim(); val = parseFloat(m[2]); unit = compatNormalizeUnit(m[3]); }
+  }
+  if (!name || val == null || !unit) return { error: "unparseable", raw: raw };
+  var key = compatCanonicalize(name);
+  if (!key) return { error: "unknown_substance", raw: raw, name: name, val: val, unit: unit };
+  return { key: key, name: COMPAT_DATA[key].display, val: val, unit: unit, raw: raw };
+}
+
+function compatFmtConc(v, u) {
+  if (u === "pct")    return v + "%";
+  if (u === "mM")     return v + " mM";
+  if (u === "M")      return v + " M";
+  if (u === "mg_ml")  return v + " mg/mL";
+  if (u === "ug_ml")  return v + " \u00b5g/mL";
+  return v + " " + u;
+}
+
+function compatConvert(val, fromU, toU) {
+  if (fromU === toU) return val;
+  if (fromU === "mM" && toU === "M") return val / 1000;
+  if (fromU === "M" && toU === "mM") return val * 1000;
+  if (fromU === "pct" && toU === "pct") return val;
+  return null;
+}
+
+function compatComputeVerdict(component, assayId, dilution) {
+  var compat = COMPAT_DATA[component.key];
+  if (!compat) return { status: "na", reason: "unknown substance" };
+  var limit = compat[assayId];
+  if (!limit) return { status: "na", reason: "no published limit" };
+  if (limit.val === 0) return { status: "fail", reason: "not compatible at any concentration" };
+  var effective = component.val / (dilution || 1);
+  var conv = compatConvert(effective, component.unit, limit.u);
+  if (conv == null) return { status: "na", reason: "unit conversion uncertain (" + component.unit + " vs " + limit.u + ")" };
+  var ratio = conv / limit.val;
+  if (ratio > 1)   return { status: "fail", reason: compatFmtConc(conv, limit.u) + " exceeds limit (" + compatFmtConc(limit.val, limit.u) + ")" };
+  if (ratio > 0.5) return { status: "warn", reason: compatFmtConc(conv, limit.u) + " is within 2\u00d7 of limit (" + compatFmtConc(limit.val, limit.u) + ")" };
+  return { status: "ok", reason: compatFmtConc(conv, limit.u) + " is comfortably below limit (" + compatFmtConc(limit.val, limit.u) + ")" };
+}
+
+function compatRollup(componentResults) {
+  var worst = "ok", failingC = [], warningC = [], naC = [];
+  for (var i = 0; i < componentResults.length; i++) {
+    var r = componentResults[i];
+    if (r.status === "fail")      { worst = "fail"; failingC.push(r); }
+    else if (r.status === "warn" && worst !== "fail") { worst = "warn"; warningC.push(r); }
+    else if (r.status === "na"  && worst === "ok") { worst = "na"; naC.push(r); }
+  }
+  if (worst === "fail") return { status: "fail", reason: failingC[0].component.name + " exceeds limit" + (failingC.length > 1 ? " (+" + (failingC.length-1) + " more)" : "") };
+  if (worst === "warn") return { status: "warn", reason: warningC[0].component.name + " near limit" + (warningC.length > 1 ? " (+" + (warningC.length-1) + " more)" : "") };
+  if (worst === "na" && naC.length === componentResults.length) return { status: "na", reason: "no parseable components" };
+  return { status: "ok", reason: "all components within limits" };
+}
+
+function CompatibilityTool(props) {
+  var defaultBuffer = "50 mM Tris pH 7.4\n150 mM NaCl\n1% Triton X-100\n10 mM DTT\n1 mM EDTA";
+  var _bt = useState(defaultBuffer), bufferText = _bt[0], setBufferText = _bt[1];
+  var _co = useState([]),            components = _co[0], setComponents = _co[1];
+  var _pl = useState([]),            parseLog   = _pl[0], setParseLog   = _pl[1];
+  var _dl = useState(1),             dilution   = _dl[0], setDilution   = _dl[1];
+  var _pc = useState(""),            proteinConc = _pc[0], setProteinConc = _pc[1];
+  var _enab = useState({bca:true,bcaRac:true,microBca:true,p660:true,bradford:true,coomassie:false,lowry:false}),
+      enabledAssays = _enab[0], setEnabledAssays = _enab[1];
+  var _opened = useState(null),      openedDrill = _opened[0], setOpenedDrill = _opened[1];
+
+  var parseAndCheck = function() {
+    var text = bufferText || "";
+    var lines = text.split(/[\n,]+/).map(function(s){return s.trim();}).filter(function(s){return s.length > 0;});
+    var newComponents = [];
+    var newLog = [];
+    for (var i = 0; i < lines.length; i++) {
+      var parsed = compatParseLine(lines[i]);
+      if (!parsed) continue;
+      if (parsed.error === "unparseable") {
+        newLog.push({type:"err", text:"\u2717 \"" + parsed.raw + "\" \u2014 couldn't parse (expected pattern like \"10 mM DTT\")"});
+        continue;
+      }
+      if (parsed.error === "unknown_substance") {
+        newLog.push({type:"warn", text:"\u26a0 \"" + parsed.raw + "\" \u2014 recognized \"" + parsed.name + "\" but no compatibility data on file for this substance"});
+        continue;
+      }
+      newComponents.push({key:parsed.key, name:parsed.name, val:parsed.val, unit:parsed.unit});
+    }
+    // Summary line if all parsed successfully
+    if (newComponents.length === lines.length && lines.length > 0) {
+      newLog.push({type:"ok", text:"\u2713 All " + lines.length + " line(s) parsed successfully."});
+    } else if (newComponents.length > 0) {
+      newLog.push({type:"info", text:newComponents.length + " of " + lines.length + " line(s) parsed; see warnings above."});
+    }
+    setComponents(newComponents);
+    setParseLog(newLog);
+  };
+
+  // Auto-parse on first render so the default buffer shows results immediately.
+  useEffect(function(){ parseAndCheck(); }, []);
+
+  var visibleAssays = COMPAT_ASSAYS.filter(function(a){return enabledAssays[a.id];});
+  var nCols = visibleAssays.length + 1;
+
+  // Compute verdicts per visible assay
+  var assayResults = visibleAssays.map(function(a){
+    var componentResults = components.map(function(c){
+      var v = compatComputeVerdict(c, a.id, dilution);
+      v.component = c;
+      return v;
+    });
+    return { assay: a, componentResults: componentResults, verdict: compatRollup(componentResults) };
+  });
+
+  // Compute protein-conc effective level after dilution; flag below LOD
+  var effProtein = null;
+  var proteinNum = parseFloat(proteinConc);
+  if (!isNaN(proteinNum) && proteinNum > 0) {
+    effProtein = (proteinNum * 1000) / (dilution || 1);  // mg/mL -> ug/mL
+  }
+  var assaysBelowLOD = effProtein != null ? visibleAssays.filter(function(a){return effProtein < a.lodUgMl;}) : [];
+
+  var verdictBg = function(s){ return s === "ok" ? "#e1f5ee" : s === "warn" ? "#fff6e6" : s === "fail" ? "#fef7f7" : "#fafdff"; };
+  var verdictFg = function(s){ return s === "ok" ? "#0a4d3c" : s === "warn" ? "#7a5a00" : s === "fail" ? "#b4332e" : "#8e9bb5"; };
+  var verdictLabel = function(s){ return s === "ok" ? "Pass" : s === "warn" ? "Caution" : s === "fail" ? "Fail" : "\u2014"; };
+
+  return (
+    <div style={{padding:"0 0 2.5rem",maxWidth:1100,margin:"0 auto",boxSizing:"border-box"}}>
+      <PageHeader instructor={props.instructor} setInstructor={props.setInstructor} onBack={props.onBack} workspaceLabel="Compatibility" />
+      <div style={{padding:"1.25rem 16px 0"}}>
+
+        {/* Intro */}
+        <div style={{background:"#fff",border:"1px solid #e5edf7",borderRadius:14,padding:"18px 22px",marginBottom:14}}>
+          <div style={{fontSize:18,fontWeight:800,color:"#0b2a6f",marginBottom:4,letterSpacing:-0.3}}>Check your buffer before you commit to an assay</div>
+          <p style={{fontSize:12,color:"#6f7fa0",lineHeight:1.55,margin:0}}>Sample buffer components silently kill protein assays. Enter your buffer; the tool checks each component against the published interference thresholds for the Thermo Pierce protein assays.</p>
+        </div>
+
+        {/* Freeform entry */}
+        <div style={{background:"#fff",border:"1px solid #e5edf7",borderRadius:14,padding:"16px 20px",marginBottom:14}}>
+          <div style={{fontSize:13,fontWeight:700,color:"#0b2a6f",marginBottom:4}}>Type your sample buffer</div>
+          <div style={{fontSize:11,color:"#6f7fa0",marginBottom:10}}>One per line or comma-separated. Examples: <em>"5% Triton X-100"</em>, <em>"10 mM DTT"</em>, <em>"50 mM Tris pH 7.4"</em>.</div>
+          <textarea value={bufferText} onChange={function(e){setBufferText(e.target.value);}} style={{width:"100%",padding:"12px 14px",fontSize:14,fontFamily:"-apple-system,BlinkMacSystemFont,sans-serif",background:"#fbfdff",border:"1px solid #e5edf7",borderRadius:10,lineHeight:1.6,minHeight:96,color:"#2d3748",resize:"vertical"}} />
+          <div style={{marginTop:10,display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
+            <button onClick={parseAndCheck} style={{padding:"8px 18px",fontSize:12,fontWeight:700,background:"#0b2a6f",color:"#fff",border:"none",borderRadius:8,cursor:"pointer",fontFamily:"inherit"}}>Parse and check &rarr;</button>
+            <span style={{fontSize:11,color:"#8e9bb5"}}>Grid updates automatically.</span>
+          </div>
+          {parseLog.length > 0 && parseLog.some(function(l){return l.type!=="ok";}) && (
+            <div style={{marginTop:12,padding:"10px 12px",background:"#f7fbff",border:"1px solid #dfe7f2",borderRadius:8,fontSize:11,lineHeight:1.6,fontFamily:"monospace",maxHeight:200,overflowY:"auto"}}>
+              {parseLog.map(function(l,i){
+                var col = l.type === "err" ? "#b4332e" : l.type === "warn" ? "#7a5a00" : l.type === "ok" ? "#0a4d3c" : "#5a6984";
+                return <div key={i} style={{color:col}}>{l.text}</div>;
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* Assay show/hide */}
+        <div style={{background:"#fff",border:"1px solid #e5edf7",borderRadius:14,padding:"14px 20px",marginBottom:14}}>
+          <div style={{fontSize:11,fontWeight:700,color:"#8e9bb5",letterSpacing:1.2,textTransform:"uppercase",marginBottom:8}}>Show assays in grid</div>
+          <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
+            {COMPAT_ASSAYS.map(function(a){
+              var on = !!enabledAssays[a.id];
+              return <label key={a.id} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"5px 10px",border:"1px solid "+(on?"#0b2a6f":"#e5edf7"),background:on?"#f7fbff":"#fff",borderRadius:8,fontSize:11,fontWeight:600,color:on?"#0b2a6f":"#5a6984",cursor:"pointer",userSelect:"none"}}>
+                <input type="checkbox" checked={on} onChange={function(){
+                  setEnabledAssays(function(prev){var n={};for(var k in prev)n[k]=prev[k];n[a.id]=!prev[a.id];return n;});
+                }} style={{margin:0}} />
+                {a.display}
+              </label>;
+            })}
+          </div>
+        </div>
+
+        {/* Verdict grid */}
+        <div style={{background:"#fff",border:"1px solid #e5edf7",borderRadius:14,marginBottom:14,overflow:"hidden"}}>
+          <div style={{padding:"14px 20px 10px",borderBottom:"1px solid #eef3f8"}}>
+            <div style={{fontSize:14,fontWeight:700,color:"#0b2a6f",marginBottom:3}}>Compatibility verdict</div>
+            <div style={{fontSize:11,color:"#6f7fa0",lineHeight:1.5}}>Click a verdict to see component-by-component breakdown. <strong>Pass</strong> = comfortably below limit. <strong>Caution</strong> = within 2&times; of limit. <strong>Fail</strong> = exceeds limit.</div>
+          </div>
+          {visibleAssays.length === 0 ? (
+            <div style={{padding:"40px 20px",textAlign:"center",color:"#8e9bb5",fontSize:13}}>No assays selected. Tick at least one assay above to see verdicts.</div>
+          ) : (
+            <div>
+              <div style={{display:"grid",gridTemplateColumns:"160px repeat(" + visibleAssays.length + ", 1fr)",borderBottom:"1px solid #eef3f8"}}>
+                <div style={{padding:"12px 14px",fontSize:11,fontWeight:700,color:"#0b2a6f",background:"#fafdff",borderRight:"1px solid #f4f6fa"}}>Buffer{dilution>1?" (at 1:"+dilution+" dilution)":""}</div>
+                {visibleAssays.map(function(a,i){
+                  return <div key={a.id} style={{padding:"12px 8px",fontSize:11,fontWeight:700,color:"#0b2a6f",background:"#fafdff",textAlign:"center",borderRight:i<visibleAssays.length-1?"1px solid #f4f6fa":"none",borderBottom:"1px solid #e5edf7"}}>
+                    <div>{a.display}</div>
+                    <div style={{fontSize:9,color:"#8e9bb5",fontWeight:500,marginTop:2}}>{a.pn}</div>
+                  </div>;
+                })}
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"160px repeat(" + visibleAssays.length + ", 1fr)"}}>
+                <div style={{padding:"14px",fontSize:12,fontWeight:600,color:"#2d3748",background:"#fafdff",borderRight:"1px solid #f4f6fa"}}>Verdict</div>
+                {assayResults.map(function(r,i){
+                  return <div key={r.assay.id} onClick={function(){setOpenedDrill(openedDrill===r.assay.id?null:r.assay.id);}} style={{padding:"14px",textAlign:"center",fontWeight:700,fontSize:13,cursor:components.length>0?"pointer":"default",background:verdictBg(components.length>0?r.verdict.status:"na"),color:verdictFg(components.length>0?r.verdict.status:"na"),borderRight:i<visibleAssays.length-1?"1px solid #f4f6fa":"none"}}>
+                    <div style={{fontSize:10,fontWeight:600,textTransform:"uppercase",letterSpacing:0.5,marginBottom:3}}>{components.length>0?verdictLabel(r.verdict.status):"\u2014"}</div>
+                    <div style={{fontSize:10,fontWeight:500,opacity:0.85,lineHeight:1.4}}>{components.length>0?r.verdict.reason:"parse a buffer to begin"}</div>
+                  </div>;
+                })}
+              </div>
+              {/* Drill-down */}
+              {openedDrill && components.length > 0 && (function(){
+                var r = assayResults.find(function(x){return x.assay.id === openedDrill;});
+                if (!r) return null;
+                return <div style={{padding:"14px 20px",background:"#fafdff",fontSize:12,color:"#5a6984",borderTop:"1px solid #eef3f8"}}>
+                  <div style={{fontWeight:700,color:"#0b2a6f",fontSize:12,marginBottom:8}}>{r.assay.display} \u2014 component breakdown</div>
+                  {r.componentResults.map(function(cr,i){
+                    var c = cr.component;
+                    var limitObj = COMPAT_DATA[c.key][r.assay.id];
+                    var effective = c.val / (dilution || 1);
+                    var statusBg = cr.status==="ok"?"#e1f5ee":cr.status==="warn"?"#fff6e6":cr.status==="fail"?"#fef7f7":"#f4f6fa";
+                    var statusFg = cr.status==="ok"?"#0a4d3c":cr.status==="warn"?"#7a5a00":cr.status==="fail"?"#b4332e":"#8e9bb5";
+                    var statusTxt = cr.status==="ok"?"OK":cr.status==="warn"?"Caution":cr.status==="fail"?"Fail":"\u2014";
+                    return <div key={i} style={{display:"grid",gridTemplateColumns:"1fr auto auto auto",gap:16,padding:"6px 0",alignItems:"center",borderBottom:i<r.componentResults.length-1?"1px solid #f4f6fa":"none"}}>
+                      <div style={{fontWeight:600,color:"#2d3748"}}>{c.name}</div>
+                      <div style={{fontFamily:"monospace",color:"#0b2a6f",fontWeight:600}}>{compatFmtConc(effective, c.unit)}{dilution>1?" (after "+dilution+"\u00d7 dilution)":""}</div>
+                      <div style={{fontFamily:"monospace",color:"#8e9bb5"}}>{limitObj && limitObj.val===0?"not compatible":limitObj?"limit: "+compatFmtConc(limitObj.val, limitObj.u):"\u2014"}</div>
+                      <div style={{fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:0.5,padding:"2px 8px",borderRadius:10,background:statusBg,color:statusFg}}>{statusTxt}</div>
+                    </div>;
+                  })}
+                </div>;
+              })()}
+            </div>
+          )}
+        </div>
+
+        {/* Dilution explorer */}
+        <div style={{background:"#f7f1ff",border:"1px solid #e2d7fb",borderRadius:12,padding:"14px 18px",marginBottom:14}}>
+          <div style={{fontSize:12,fontWeight:700,color:"#4a2d8f",marginBottom:4}}>What if you dilute the sample first?</div>
+          <div style={{fontSize:11,color:"#6f5a96",marginBottom:12,lineHeight:1.5}}>Move the slider to see how each assay's verdict changes. Enter expected protein concentration to also check whether diluted protein stays above each assay's lower detection limit.</div>
+          <div style={{display:"flex",gap:14,alignItems:"center",flexWrap:"wrap",marginBottom:10}}>
+            <label style={{fontSize:11,color:"#4a2d8f",fontWeight:600}}>Dilution factor:</label>
+            <input type="range" min="1" max="200" value={dilution} onChange={function(e){setDilution(parseInt(e.target.value));}} style={{flex:1,minWidth:200,accentColor:"#6337b9"}} />
+            <div style={{fontFamily:"monospace",fontSize:14,fontWeight:700,color:"#4a2d8f",padding:"4px 10px",background:"#fff",borderRadius:6,border:"1px solid #d4bce8",minWidth:60,textAlign:"center"}}>1:{dilution}</div>
+          </div>
+          <div style={{display:"flex",gap:14,alignItems:"center",flexWrap:"wrap",marginBottom:10}}>
+            <label style={{fontSize:11,color:"#4a2d8f",fontWeight:600}}>Expected protein conc:</label>
+            <input type="number" step="0.1" min="0" placeholder="e.g. 1.5" value={proteinConc} onChange={function(e){setProteinConc(e.target.value);}} style={{width:80,padding:"5px 8px",border:"1px solid #d4bce8",borderRadius:6,fontFamily:"monospace",fontSize:12,background:"#fff"}} />
+            <span style={{fontSize:11,color:"#6f5a96"}}>mg/mL in the original (undiluted) sample</span>
+          </div>
+          {components.length > 0 && (
+            <div style={{padding:"10px 12px",background:"#fff",border:"1px solid #d4bce8",borderRadius:8,fontSize:11,lineHeight:1.6,marginTop:6}}>
+              {(function(){
+                var passing = assayResults.filter(function(r){return r.verdict.status==="ok";});
+                var cautious = assayResults.filter(function(r){return r.verdict.status==="warn";});
+                var failing = assayResults.filter(function(r){return r.verdict.status==="fail";});
+                var parts = [];
+                if (passing.length) parts.push(<span key="p" style={{color:"#0a4d3c",fontWeight:700}}>{passing.map(function(r){return r.assay.display;}).join(", ")} pass</span>);
+                if (cautious.length) parts.push(<span key="c" style={{color:"#7a5a00",fontWeight:700}}>{cautious.map(function(r){return r.assay.display;}).join(", ")} caution</span>);
+                if (failing.length) parts.push(<span key="f" style={{color:"#b4332e",fontWeight:700}}>{failing.map(function(r){return r.assay.display;}).join(", ")} fail</span>);
+                return <span>At 1:{dilution} dilution: {parts.map(function(p,i){return [i>0?<span key={"sep"+i} style={{color:"#8e9bb5",margin:"0 6px"}}>&middot;</span>:null, p];})}</span>;
+              })()}
+            </div>
+          )}
+          {effProtein != null && (
+            <div style={{padding:"10px 12px",background:effProtein<10?"#fef7f7":"#e1f5ee",border:"1px solid "+(effProtein<10?"#f0c8c8":"#b8e0cd"),borderRadius:8,fontSize:11,lineHeight:1.6,marginTop:6,color:effProtein<10?"#7a3328":"#0a4d3c"}}>
+              <strong>Protein at 1:{dilution}:</strong> {effProtein.toFixed(1)} \u00b5g/mL.
+              {assaysBelowLOD.length > 0 && <span> Below the lower detection limit for: <strong>{assaysBelowLOD.map(function(a){return a.display+" ("+a.lodUgMl+" \u00b5g/mL)";}).join(", ")}</strong>. Even if buffer is compatible, signal may be unreliable.</span>}
+              {assaysBelowLOD.length === 0 && <span> Above the detection limit for all selected assays.</span>}
+            </div>
+          )}
+        </div>
+
+        {/* Honest caveats */}
+        <div style={{background:"#fff",border:"1px solid #e5edf7",borderRadius:12,padding:"14px 18px",marginBottom:14,fontSize:11,color:"#6f7fa0",lineHeight:1.6}}>
+          <div style={{fontSize:12,fontWeight:700,color:"#0b2a6f",marginBottom:6}}>Honest limitations</div>
+          <ul style={{margin:0,paddingLeft:18}}>
+            <li>Data is sourced from Thermo Pierce vendor publications. Non-Pierce equivalents (e.g., Bio-Rad Bradford) may behave differently.</li>
+            <li>Synergistic interactions between two interferents are <strong>not</strong> modeled. A buffer that passes individually for each component may still fail in combination.</li>
+            <li>Protein-specific effects (e.g., a particular antibody binding to a detergent) are not modeled.</li>
+            <li>Unit conversion between % w/v and mM requires molecular weight and is not done. Match units to what the vendor publishes (mostly mM or %).</li>
+            <li>This is a <strong>screening guide</strong> to narrow your choices; verify with small-scale spike-recovery for novel matrices.</li>
+          </ul>
+        </div>
+
+        {/* References */}
+        <div style={{background:"#fff",border:"1px solid #e5edf7",borderRadius:12,padding:"14px 18px",fontSize:11,color:"#6f7fa0",lineHeight:1.6}}>
+          <div style={{fontSize:12,fontWeight:700,color:"#0b2a6f",marginBottom:8}}>References</div>
+          <ul style={{margin:0,paddingLeft:18}}>
+            <li>Thermo Scientific Pierce Protein Assay Selection Guide (compatibility chart). <a href="https://tools.thermofisher.com/content/sfs/brochures/TR0068-Protein-assay-compatibility.pdf" target="_blank" rel="noopener noreferrer" style={{color:"#139cb6"}}>TR0068 (PDF)</a></li>
+            <li>Pierce BCA Protein Assay Kit instructions, P/N 23225 (Thermo Fisher).</li>
+            <li>Pierce BCA, Reducing Agent Compatible (BCA-RAC), P/N 23250.</li>
+            <li>Pierce Micro BCA Protein Assay Kit, P/N 23235.</li>
+            <li>Pierce 660 nm Protein Assay Kit, P/N 22660.</li>
+            <li>Pierce Coomassie Plus (Bradford) Protein Assay Kit, P/N 23236.</li>
+            <li>Pierce Coomassie Protein Assay Kit (regular), P/N 23200.</li>
+            <li>Pierce Modified Lowry Protein Assay Kit, P/N 23240.</li>
+            <li>Data accessed June 2026. Values are subject to vendor revision; verify against the current vendor PDF before relying on a borderline result.</li>
+          </ul>
+        </div>
+
+      </div>
+    </div>
+  );
 }
 
 
@@ -14949,10 +15402,14 @@ function App() {
       var iFn = fitFns.iFn;
       var mxA=Math.max.apply(null,yR),mnA=Math.min.apply(null,yR),midA=(mxA+mnA)/2;
       var samps=[];
+      // [ELISA-DEBUG] — log per-sample what analyze sees, so we can diagnose why
+      // Sample 2 sometimes disappears. Remove once root cause is understood.
+      try { console.log("[ELISA-DEBUG] Plate", pi, "smpG.length =", smpG.length, "smpG names:", smpG.map(function(g){return g.name;})); } catch(e){}
       for(var si=0;si<smpG.length;si++){
         var sDils=readDilutions(smpG[si]);
         var hasSignal=sDils.some(function(reps){return reps.some(function(v){return v!==null;});});
-        if(!hasSignal) continue;
+        try { console.log("[ELISA-DEBUG]   Sample", si, "(name="+smpG[si].name+") hasSignal:", hasSignal, "dilution row[0] reps:", sDils[0]); } catch(e){}
+        if(!hasSignal) { try { console.log("[ELISA-DEBUG]     SKIPPED \u2014 no signal in any dilution"); } catch(e){} continue; }
         var sBval=readBlankAvg(smpG[si]);
         var sB=sBval!=null?sBval:bA;
         var nm=sampleNameFor(pi,si,smpG[si].name);var dils=[],dbD=[];
@@ -15005,6 +15462,7 @@ function App() {
         }
         samps.push({name:nm,dils:dils,aS:selAll(dils,midA,assayKind),dbD:dbD,_isOriginalStd:isOriginalStdAsSample});
       }
+      try { console.log("[ELISA-DEBUG] Plate", pi, "final samps.length =", samps.length, "samps names:", samps.map(function(s){return s.name;})); } catch(e){}
       all.push({sc:{slope:lf.slope,intercept:lf.intercept,r2:lf.r2,pts:sP,model:lf.model,params:lf.params,fallback:lf.fallback},fFn:fFn,iFn:iFn,fL:lf.model==="linear"?"Linear":(lf.model==="loglog"?"Log-log":(lf.model==="5pl"?"5PL":"4PL")),samps:samps,dbS:dbS,bA:bA,mxA:mxA,mnA:mnA, altStdInfo: stdG._isAlt ? {origSampleIdx: stdG._origSampleIdx, origSampleName: stdG._origSampleName} : null});
     }
     if(all.length===0){window.alert("Analysis produced no results — the plates may be empty or missing standard curve data. Try loading the demo to verify setup.");return;}
@@ -15674,13 +16132,19 @@ function App() {
   // gated by FEATURES flags as grayed-out). When other tiles are unblocked,
   // add their respective branches here.
 
+  // Compatibility tool — standalone view, separate from the plate workflow.
+  if (chosenView === "compatibility") {
+    return <CompatibilityTool onBack={function(){ setChosenView(null); }} instructor={instructor} setInstructor={setInstructor} />;
+  }
+
   if(!on) return (
     <div style={{padding:"0 0 2.5rem",maxWidth:1320,margin:"0 auto",boxSizing:"border-box"}}>
       <PageHeader instructor={instructor} setInstructor={setInstructor} onBack={function(){ setChosenView(null); }} large={true} workspaceLabel={
         chosenView === "plate" ? "Plate assay" :
         chosenView === "ms" ? "Mass spec" :
         chosenView === "hplc" ? "HPLC" :
-        chosenView === "ddpcr" ? "ddPCR" : ""
+        chosenView === "ddpcr" ? "ddPCR" :
+        chosenView === "compatibility" ? "Compatibility" : ""
       } />
       <div style={{padding:"1.25rem 16px 0"}}>
       <div style={{background:"linear-gradient(180deg,#ffffff,#fbfdff)",borderRadius:24,border:"1px solid "+BORDER,padding:"1.5rem",boxShadow:"0 18px 44px rgba(11,42,111,0.08)",marginBottom:"1.25rem"}}>
@@ -16188,7 +16652,8 @@ function App() {
         chosenView === "plate" ? "Plate assay" :
         chosenView === "ms" ? "Mass spec" :
         chosenView === "hplc" ? "HPLC" :
-        chosenView === "ddpcr" ? "ddPCR" : ""
+        chosenView === "ddpcr" ? "ddPCR" :
+        chosenView === "compatibility" ? "Compatibility" : ""
       } />
 
       <div style={{padding:"1rem 16px"}}>
