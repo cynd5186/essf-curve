@@ -37,7 +37,7 @@ var sdc = function(a) { if (a.length<2) return 0; var m=avg(a); return Math.sqrt
 var cvc = function(a) { var m=avg(a); return m ? sdc(a)/Math.abs(m) : Infinity; };
 var med = function(a) { var s=a.slice().sort(function(x,y){return x-y;}); var m=Math.floor(s.length/2); return s.length%2 ? s[m] : (s[m-1]+s[m])/2; };
 var APP_NAME = "eSSF Bench";
-var APP_VERSION = "v5d8";
+var APP_VERSION = "v5d12";
 
 // ── Chart export utility ─────────────────────────────────────────────────
 // Exports an SVG chart as a PNG, either as a downloaded file or to the
@@ -14016,78 +14016,1016 @@ function ChooserScreen(props){
 //  section) before committing to an assay choice for novel matrices.
 // ═════════════════════════════════════════════════════════════════════════
 
-// --- Compatibility data tables ---------------------------------------------
-// Each substance: max compatible concentration per assay.
-// Units: 'pct' = % w/v or v/v, 'mM' = millimolar, 'M' = molar.
-// {val: 0} = explicitly incompatible at any non-zero concentration.
-// null entry = no published value (treated as "no known issue, but unverified").
+// ─────────────────────────────────────────────────────────────────────────
+//  COMPAT_DATA — substance interference data across two assay families
+//
+//  Each substance has per-assay max compatible concentrations:
+//
+//  PROTEIN ASSAYS (9 total):
+//    Thermo Pierce TR0068 (7 assays):
+//      bca       = Pierce BCA Protein Assay Kit (P/N 23225)
+//      bcaRac    = Pierce BCA-RAC, Reducing Agent Compatible (P/N 23250)
+//      microBca  = Pierce Micro BCA (P/N 23235)
+//      p660      = Pierce 660 nm Protein Assay (P/N 22660)
+//      bradford  = Pierce Coomassie Plus / Bradford (P/N 23236)
+//      coomassie = Pierce Coomassie Regular / Bradford (P/N 23200)
+//      lowry     = Pierce Modified Lowry (P/N 23240)
+//    Bio-Rad (2 assays):
+//      bradQSB   = Bio-Rad Quick Start Bradford (cat. #500-0201)
+//      biorad_dc = Bio-Rad DC Protein Assay (cat. #500-0111, Lowry-style)
+//
+//  MS ASSAYS (4 total):
+//      esi         = ESI direct infusion (microflow ~1 µL/min)
+//      nanoEsi     = Nano-ESI (sub-µL/min)
+//      maldi       = MALDI (protein/peptide intact MS)
+//      maldiScreen = MALDI (high-throughput screening, more stringent)
+//
+//  PROVENANCE OF VALUES:
+//    Protein-assay values: directly from vendor PDFs (Thermo TR0068, Bio-Rad
+//      Quick Start Bradford 4110065A, Bio-Rad DC LIT448). Where the vendor
+//      reports "neet" (= undiluted compatible) I use {val:1, u:"undil"}.
+//      Where vendor reports Ø (incompatible at any level), {val:0}.
+//      Where vendor reports "n/a" (not tested), I use null.
+//      Bio-Rad QSB only publishes a single concentration per substance.
+//      Bio-Rad DC publishes a short binary compatible-list — substances on
+//      that list get {val: X, u: "..."} at the published level; substances
+//      not on the list get null (= not validated, not "incompatible").
+//      Exception: Bio-Rad explicitly notes BME is INCOMPATIBLE with DC.
+//
+//    MS values:
+//      esi values for the following substances are DIRECT EXPERIMENTAL SC50
+//      from Donnelly et al. 2019 (Nat Methods 16:587, Fig 1c):
+//        sodium chloride (1.5 mM), magnesium chloride (25 µM),
+//        guanidine-HCl (1.1 mM), urea (38 µM*), triton X-100 (600 µM),
+//        tween 20 (1.7 µM), ammonium sulfate (4.2 µM), SDS (1.3 µM),
+//        Tris base (91 µM), HEPES (600 µM), PBS-equivalent (31 µM),
+//        L-histidine antibody formulation (3.4 µM).
+//        *Note: 38 µM urea SC50 is surprisingly low; user should verify on
+//        their instrument. Urea is generally well-tolerated up to ~500 mM
+//        on many MS platforms.
+//      Other esi values are estimates from general MS literature
+//        (Annesley 2003, MS proteomics core facility tolerance charts).
+//      nanoEsi values: estimated ~10× more salt-tolerant than standard
+//        ESI per Karas et al. 2000 (Fresenius J Anal Chem 366:669).
+//      maldi values: from KU SCB Core Facility published tolerance table
+//        (https://scb.ku.edu/maldi-sample-requirements) where available,
+//        otherwise estimated from MALDI sample-prep literature.
+//      maldiScreen: more conservative ~half of standard MALDI tolerances
+//        per Beverly et al. 2017 (SLAS Discov 22:1273).
+//
+//  Units: 'pct' = % w/v or v/v, 'mM' = millimolar, 'M' = molar,
+//         'uM' = micromolar, 'mg_ml' = mg/mL, 'ug_ml' = µg/mL,
+//         'undil' = undiluted (vendor "neet"), 'mg_L' = mg/L.
+//  {val: 0} = explicitly incompatible at any non-zero concentration.
+//  null = no published value (treat as unverified, NOT "fine to use").
+// ─────────────────────────────────────────────────────────────────────────
 var COMPAT_DATA = {
-  // ── Buffers / salts ──
-  tris:              { display: "Tris-HCl",              bca:{val:250,u:"mM"}, bcaRac:{val:1,u:"M"},  microBca:{val:10,u:"mM"}, p660:{val:1,u:"M"},   bradford:{val:2,u:"M"},  coomassie:{val:2,u:"M"},  lowry:{val:200,u:"mM"} },
-  hepes:             { display: "HEPES",                 bca:{val:100,u:"mM"}, bcaRac:{val:100,u:"mM"},microBca:{val:50,u:"mM"}, p660:{val:100,u:"mM"},bradford:{val:100,u:"mM"},coomassie:{val:100,u:"mM"},lowry:{val:100,u:"mM"} },
-  nacl:              { display: "NaCl",                  bca:{val:1,u:"M"},    bcaRac:{val:1,u:"M"},  microBca:{val:1,u:"M"},   p660:{val:1,u:"M"},   bradford:{val:1,u:"M"},  coomassie:{val:1,u:"M"},  lowry:{val:1,u:"M"} },
-  kcl:               { display: "KCl",                   bca:{val:1,u:"M"},    bcaRac:{val:1,u:"M"},  microBca:{val:1,u:"M"},   p660:{val:1,u:"M"},   bradford:{val:1,u:"M"},  coomassie:{val:1,u:"M"},  lowry:{val:1,u:"M"} },
-  sodium_phosphate:  { display: "Sodium phosphate",      bca:{val:100,u:"mM"}, bcaRac:{val:100,u:"mM"},microBca:{val:50,u:"mM"}, p660:{val:100,u:"mM"},bradford:{val:100,u:"mM"},coomassie:{val:100,u:"mM"},lowry:{val:100,u:"mM"} },
-  // ── Detergents ──
-  triton_x100:       { display: "Triton X-100",          bca:{val:5,u:"pct"},  bcaRac:{val:5,u:"pct"},microBca:{val:1,u:"pct"}, p660:{val:1.25,u:"pct"},bradford:{val:0.0625,u:"pct"},coomassie:{val:0.0625,u:"pct"},lowry:{val:0.031,u:"pct"} },
-  np40:              { display: "NP-40",                 bca:{val:5,u:"pct"},  bcaRac:{val:5,u:"pct"},microBca:{val:1,u:"pct"}, p660:{val:1.25,u:"pct"},bradford:{val:0.0625,u:"pct"},coomassie:{val:0.0625,u:"pct"},lowry:{val:0.031,u:"pct"} },
-  tween20:           { display: "Tween 20",              bca:{val:5,u:"pct"},  bcaRac:{val:5,u:"pct"},microBca:{val:1,u:"pct"}, p660:{val:1,u:"pct"}, bradford:{val:0.0625,u:"pct"},coomassie:{val:0.0625,u:"pct"},lowry:{val:0.031,u:"pct"} },
-  tween80:           { display: "Tween 80",              bca:{val:5,u:"pct"},  bcaRac:{val:5,u:"pct"},microBca:{val:1,u:"pct"}, p660:{val:1,u:"pct"}, bradford:{val:0.0625,u:"pct"},coomassie:{val:0.0625,u:"pct"},lowry:{val:0.031,u:"pct"} },
-  sds:               { display: "SDS",                   bca:{val:5,u:"pct"},  bcaRac:{val:5,u:"pct"},microBca:{val:0.1,u:"pct"},p660:{val:0.125,u:"pct"},bradford:{val:0.0125,u:"pct"},coomassie:{val:0.0125,u:"pct"},lowry:{val:1,u:"pct"} },
-  doc:               { display: "Sodium deoxycholate",   bca:{val:5,u:"pct"},  bcaRac:{val:5,u:"pct"},microBca:{val:1,u:"pct"}, p660:{val:0.5,u:"pct"},bradford:{val:0.04,u:"pct"},coomassie:{val:0.04,u:"pct"},lowry:{val:0.062,u:"pct"} },
-  chaps:             { display: "CHAPS",                 bca:{val:5,u:"pct"},  bcaRac:{val:5,u:"pct"},microBca:{val:1,u:"pct"}, p660:{val:5,u:"pct"}, bradford:{val:5,u:"pct"},coomassie:{val:5,u:"pct"}, lowry:{val:0.5,u:"pct"} },
-  // ── Reducing agents (BCA killers) ──
-  dtt:               { display: "DTT",                   bca:{val:1,u:"mM"},   bcaRac:{val:500,u:"mM"},microBca:{val:1,u:"mM"}, p660:{val:250,u:"mM"},bradford:{val:5,u:"mM"},coomassie:{val:5,u:"mM"},lowry:{val:1,u:"mM"} },
-  bme:               { display: "\u03b2-mercaptoethanol", bca:{val:0,u:"mM"},  bcaRac:{val:25,u:"pct"},microBca:{val:0,u:"mM"}, p660:{val:25,u:"pct"},bradford:{val:10,u:"pct"},coomassie:{val:10,u:"pct"},lowry:{val:0,u:"mM"} },
-  tcep:              { display: "TCEP",                  bca:{val:0,u:"mM"},   bcaRac:{val:100,u:"mM"},microBca:{val:0,u:"mM"}, p660:{val:100,u:"mM"},bradford:{val:100,u:"mM"},coomassie:{val:100,u:"mM"},lowry:{val:0,u:"mM"} },
-  // ── Chelators ──
-  edta:              { display: "EDTA",                  bca:{val:10,u:"mM"},  bcaRac:{val:10,u:"mM"},microBca:{val:10,u:"mM"},p660:{val:100,u:"mM"},bradford:{val:100,u:"mM"},coomassie:{val:100,u:"mM"},lowry:{val:5,u:"mM"} },
-  egta:              { display: "EGTA",                  bca:{val:10,u:"mM"},  bcaRac:{val:10,u:"mM"},microBca:{val:10,u:"mM"},p660:{val:100,u:"mM"},bradford:{val:100,u:"mM"},coomassie:{val:100,u:"mM"},lowry:{val:5,u:"mM"} },
-  // ── Denaturants ──
-  urea:              { display: "Urea",                  bca:{val:3,u:"M"},    bcaRac:{val:3,u:"M"}, microBca:{val:3,u:"M"},  p660:{val:3,u:"M"},   bradford:{val:6,u:"M"}, coomassie:{val:6,u:"M"}, lowry:{val:3,u:"M"} },
-  guanidine:         { display: "Guanidine-HCl",         bca:{val:4,u:"M"},    bcaRac:{val:4,u:"M"}, microBca:{val:1,u:"M"},  p660:{val:1,u:"M"},   bradford:{val:3.5,u:"M"},coomassie:{val:3.5,u:"M"},lowry:{val:4,u:"M"} },
-  // ── Common additives ──
-  glycerol:          { display: "Glycerol",              bca:{val:10,u:"pct"}, bcaRac:{val:10,u:"pct"},microBca:{val:10,u:"pct"},p660:{val:10,u:"pct"},bradford:{val:10,u:"pct"},coomassie:{val:10,u:"pct"},lowry:{val:10,u:"pct"} },
-  sucrose:           { display: "Sucrose",               bca:{val:40,u:"pct"}, bcaRac:{val:40,u:"pct"},microBca:{val:7.5,u:"pct"},p660:{val:25,u:"pct"},bradford:{val:30,u:"pct"},coomassie:{val:30,u:"pct"},lowry:{val:7.5,u:"pct"} },
-  glycine:           { display: "Glycine",               bca:{val:1,u:"M"},    bcaRac:{val:1,u:"M"}, microBca:{val:100,u:"mM"},p660:{val:1,u:"M"},   bradford:{val:100,u:"mM"},coomassie:{val:100,u:"mM"},lowry:{val:100,u:"mM"} },
-  histidine:         { display: "Histidine",             bca:{val:100,u:"mM"}, bcaRac:{val:100,u:"mM"},microBca:{val:50,u:"mM"},p660:{val:100,u:"mM"},bradford:{val:100,u:"mM"},coomassie:{val:100,u:"mM"},lowry:{val:50,u:"mM"} },
-  sodium_azide:      { display: "Sodium azide",          bca:{val:0.125,u:"pct"},bcaRac:{val:0.125,u:"pct"},microBca:{val:0.125,u:"pct"},p660:{val:0.125,u:"pct"},bradford:{val:0.5,u:"pct"},coomassie:{val:0.5,u:"pct"},lowry:{val:0.5,u:"pct"} },
-  ammonium_sulfate:  { display: "Ammonium sulfate",      bca:{val:1.5,u:"M"},  bcaRac:{val:1.5,u:"M"},microBca:{val:1,u:"M"},  p660:{val:1,u:"M"},   bradford:{val:1,u:"M"}, coomassie:{val:1,u:"M"}, lowry:{val:1,u:"M"} },
+  // ─── Acids ───────────────────────────────────────────────────────────
+  hcl:               { display: "HCl (hydrochloric acid)",
+                       bca:{val:100,u:"mM"}, bcaRac:null, microBca:{val:10,u:"mM"}, p660:{val:125,u:"mM"}, bradford:{val:100,u:"mM"}, coomassie:{val:100,u:"mM"}, lowry:{val:100,u:"mM"},
+                       bradQSB:{val:100,u:"mM"}, biorad_dc:{val:500,u:"mM"},
+                       esi:{val:50,u:"mM"}, nanoEsi:{val:500,u:"mM"}, maldi:{val:50,u:"mM"}, maldiScreen:{val:25,u:"mM"} },
+  formic_acid:       { display: "Formic acid",
+                       bca:null, bcaRac:null, microBca:null, p660:null, bradford:null, coomassie:null, lowry:null,
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:1,u:"pct"}, nanoEsi:{val:1,u:"pct"}, maldi:{val:1,u:"pct"}, maldiScreen:{val:1,u:"pct"} },
+  acetic_acid:       { display: "Acetic acid",
+                       bca:null, bcaRac:null, microBca:null, p660:null, bradford:null, coomassie:null, lowry:null,
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:5,u:"pct"}, nanoEsi:{val:5,u:"pct"}, maldi:{val:5,u:"pct"}, maldiScreen:{val:5,u:"pct"} },
+  tfa:               { display: "TFA (trifluoroacetic acid)",
+                       bca:null, bcaRac:null, microBca:null, p660:null, bradford:null, coomassie:null, lowry:null,
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:0.05,u:"pct"}, nanoEsi:{val:0.1,u:"pct"}, maldi:{val:0.1,u:"pct"}, maldiScreen:{val:0.1,u:"pct"} },
+  ascorbic_acid:     { display: "Ascorbic acid",
+                       bca:{val:0}, bcaRac:null, microBca:{val:0}, p660:{val:500,u:"mM"}, bradford:{val:50,u:"mM"}, coomassie:{val:50,u:"mM"}, lowry:{val:1,u:"mM"},
+                       bradQSB:{val:50,u:"mM"}, biorad_dc:null,
+                       esi:{val:1,u:"mM"}, nanoEsi:{val:10,u:"mM"}, maldi:{val:10,u:"mM"}, maldiScreen:{val:5,u:"mM"} },
+
+  // ─── Amino acids & nitrogenous additives ────────────────────────────
+  asparagine:        { display: "Asparagine",
+                       bca:{val:1,u:"mM"}, bcaRac:{val:0,u:"mM"}, microBca:null, p660:{val:40,u:"mM"}, bradford:{val:10,u:"mM"}, coomassie:{val:10,u:"mM"}, lowry:{val:5,u:"mM"},
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:5,u:"mM"}, nanoEsi:{val:50,u:"mM"}, maldi:{val:50,u:"mM"}, maldiScreen:{val:25,u:"mM"} },
+  glycine:           { display: "Glycine",
+                       bca:{val:100,u:"mM"}, bcaRac:{val:50,u:"mM"}, microBca:{val:100,u:"mM"}, p660:{val:100,u:"mM"}, bradford:{val:100,u:"mM"}, coomassie:{val:100,u:"mM"}, lowry:{val:100,u:"mM"},
+                       bradQSB:{val:100,u:"mM"}, biorad_dc:null,
+                       esi:{val:1,u:"mM"}, nanoEsi:{val:10,u:"mM"}, maldi:{val:50,u:"mM"}, maldiScreen:{val:25,u:"mM"} },
+  histidine:         { display: "L-Histidine",
+                       bca:null, bcaRac:null, microBca:null, p660:null, bradford:null, coomassie:null, lowry:null,
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:3.4,u:"uM"}, nanoEsi:{val:35,u:"uM"}, maldi:{val:25,u:"mM"}, maldiScreen:{val:12,u:"mM"} },
+  cysteine:          { display: "Cysteine",
+                       bca:{val:0}, bcaRac:{val:2.5,u:"mM"}, microBca:{val:0}, p660:{val:350,u:"mM"}, bradford:{val:10,u:"mM"}, coomassie:{val:10,u:"mM"}, lowry:{val:1,u:"mM"},
+                       bradQSB:null, biorad_dc:{val:2.5,u:"mM"},
+                       esi:{val:1,u:"mM"}, nanoEsi:{val:5,u:"mM"}, maldi:{val:5,u:"mM"}, maldiScreen:{val:2,u:"mM"} },
+  glutathione_red:   { display: "Glutathione (reduced)",
+                       bca:null, bcaRac:{val:10,u:"mM"}, microBca:null, p660:{val:100,u:"mM"}, bradford:null, coomassie:null, lowry:null,
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:1,u:"mM"}, nanoEsi:{val:10,u:"mM"}, maldi:{val:5,u:"mM"}, maldiScreen:{val:2,u:"mM"} },
+
+  // ─── Buffers (Good's buffers and similar) ───────────────────────────
+  aces:              { display: "ACES, pH 7.8",
+                       bca:{val:25,u:"mM"}, bcaRac:{val:0}, microBca:{val:10,u:"mM"}, p660:{val:50,u:"mM"}, bradford:{val:100,u:"mM"}, coomassie:{val:100,u:"mM"}, lowry:null,
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:1,u:"mM"}, nanoEsi:{val:10,u:"mM"}, maldi:{val:50,u:"mM"}, maldiScreen:{val:25,u:"mM"} },
+  bicine:            { display: "Bicine",
+                       bca:{val:20,u:"mM"}, bcaRac:{val:1,u:"mM"}, microBca:{val:2,u:"mM"}, p660:{val:1,u:"M"}, bradford:{val:100,u:"mM"}, coomassie:{val:100,u:"mM"}, lowry:null,
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:1,u:"mM"}, nanoEsi:{val:10,u:"mM"}, maldi:{val:50,u:"mM"}, maldiScreen:{val:25,u:"mM"} },
+  bis_tris:          { display: "Bis-Tris, pH 6.5",
+                       bca:{val:33,u:"mM"}, bcaRac:{val:16.5,u:"mM"}, microBca:{val:0.2,u:"mM"}, p660:{val:50,u:"mM"}, bradford:{val:100,u:"mM"}, coomassie:{val:100,u:"mM"}, lowry:null,
+                       bradQSB:{val:200,u:"mM"}, biorad_dc:null,
+                       esi:{val:1,u:"mM"}, nanoEsi:{val:10,u:"mM"}, maldi:{val:50,u:"mM"}, maldiScreen:{val:25,u:"mM"} },
+  borate:            { display: "Borate, pH 8.5",
+                       bca:{val:1,u:"undil"}, bcaRac:{val:0}, microBca:{val:12.5,u:"mM"}, p660:{val:1,u:"undil"}, bradford:{val:1,u:"undil"}, coomassie:{val:1,u:"undil"}, lowry:null,
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:1,u:"mM"}, nanoEsi:{val:10,u:"mM"}, maldi:{val:50,u:"mM"}, maldiScreen:{val:25,u:"mM"} },
+  ches:              { display: "CHES",
+                       bca:{val:100,u:"mM"}, bcaRac:{val:50,u:"mM"}, microBca:{val:100,u:"mM"}, p660:{val:500,u:"mM"}, bradford:{val:100,u:"mM"}, coomassie:{val:100,u:"mM"}, lowry:null,
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:1,u:"mM"}, nanoEsi:{val:10,u:"mM"}, maldi:{val:50,u:"mM"}, maldiScreen:{val:25,u:"mM"} },
+  epps:              { display: "EPPS, pH 8.0",
+                       bca:{val:100,u:"mM"}, bcaRac:{val:0}, microBca:{val:100,u:"mM"}, p660:{val:200,u:"mM"}, bradford:{val:100,u:"mM"}, coomassie:{val:100,u:"mM"}, lowry:null,
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:1,u:"mM"}, nanoEsi:{val:10,u:"mM"}, maldi:{val:50,u:"mM"}, maldiScreen:{val:25,u:"mM"} },
+  hepes:             { display: "HEPES, pH 7.5",
+                       bca:{val:100,u:"mM"}, bcaRac:{val:200,u:"mM"}, microBca:{val:100,u:"mM"}, p660:{val:100,u:"mM"}, bradford:{val:100,u:"mM"}, coomassie:{val:100,u:"mM"}, lowry:{val:1,u:"mM"},
+                       bradQSB:{val:100,u:"mM"}, biorad_dc:null,
+                       esi:{val:600,u:"uM"}, nanoEsi:{val:6,u:"mM"}, maldi:{val:100,u:"mM"}, maldiScreen:{val:50,u:"mM"} },
+  imidazole:         { display: "Imidazole, pH 7.0",
+                       bca:{val:50,u:"mM"}, bcaRac:{val:30,u:"mM"}, microBca:{val:12.5,u:"mM"}, p660:{val:200,u:"mM"}, bradford:{val:200,u:"mM"}, coomassie:{val:200,u:"mM"}, lowry:{val:25,u:"mM"},
+                       bradQSB:{val:200,u:"mM"}, biorad_dc:null,
+                       esi:{val:10,u:"mM"}, nanoEsi:{val:100,u:"mM"}, maldi:{val:50,u:"mM"}, maldiScreen:{val:25,u:"mM"} },
+  mes:               { display: "MES, pH 6.1",
+                       bca:{val:100,u:"mM"}, bcaRac:{val:100,u:"mM"}, microBca:{val:100,u:"mM"}, p660:{val:125,u:"mM"}, bradford:{val:100,u:"mM"}, coomassie:{val:100,u:"mM"}, lowry:{val:125,u:"mM"},
+                       bradQSB:{val:100,u:"mM"}, biorad_dc:null,
+                       esi:{val:10,u:"mM"}, nanoEsi:{val:50,u:"mM"}, maldi:{val:50,u:"mM"}, maldiScreen:{val:25,u:"mM"} },
+  mops:              { display: "MOPS, pH 7.2",
+                       bca:{val:100,u:"mM"}, bcaRac:{val:200,u:"mM"}, microBca:{val:100,u:"mM"}, p660:{val:125,u:"mM"}, bradford:{val:100,u:"mM"}, coomassie:{val:100,u:"mM"}, lowry:null,
+                       bradQSB:{val:100,u:"mM"}, biorad_dc:null,
+                       esi:{val:10,u:"mM"}, nanoEsi:{val:50,u:"mM"}, maldi:{val:50,u:"mM"}, maldiScreen:{val:25,u:"mM"} },
+  pipes:             { display: "PIPES, pH 6.8",
+                       bca:{val:100,u:"mM"}, bcaRac:{val:25,u:"mM"}, microBca:{val:100,u:"mM"}, p660:{val:100,u:"mM"}, bradford:{val:100,u:"mM"}, coomassie:{val:100,u:"mM"}, lowry:null,
+                       bradQSB:{val:200,u:"mM"}, biorad_dc:null,
+                       esi:{val:10,u:"mM"}, nanoEsi:{val:50,u:"mM"}, maldi:{val:50,u:"mM"}, maldiScreen:{val:25,u:"mM"} },
+  tricine:           { display: "Tricine, pH 8.0",
+                       bca:{val:25,u:"mM"}, bcaRac:{val:0.5,u:"mM"}, microBca:{val:2.5,u:"mM"}, p660:{val:500,u:"mM"}, bradford:{val:100,u:"mM"}, coomassie:{val:100,u:"mM"}, lowry:null,
+                       bradQSB:{val:50,u:"mM"}, biorad_dc:null,
+                       esi:{val:10,u:"mM"}, nanoEsi:{val:50,u:"mM"}, maldi:{val:50,u:"mM"}, maldiScreen:{val:25,u:"mM"} },
+  triethanolamine:   { display: "Triethanolamine, pH 7.8",
+                       bca:{val:25,u:"mM"}, bcaRac:{val:25,u:"mM"}, microBca:{val:0.5,u:"mM"}, p660:{val:100,u:"mM"}, bradford:{val:100,u:"mM"}, coomassie:{val:100,u:"mM"}, lowry:null,
+                       bradQSB:{val:50,u:"mM"}, biorad_dc:null,
+                       esi:{val:10,u:"mM"}, nanoEsi:{val:50,u:"mM"}, maldi:{val:50,u:"mM"}, maldiScreen:{val:25,u:"mM"} },
+  tris:              { display: "Tris-HCl, pH 8.0",
+                       bca:{val:250,u:"mM"}, bcaRac:{val:35,u:"mM"}, microBca:{val:50,u:"mM"}, p660:{val:250,u:"mM"}, bradford:{val:2,u:"M"}, coomassie:{val:2,u:"M"}, lowry:{val:10,u:"mM"},
+                       bradQSB:{val:1,u:"M"}, biorad_dc:{val:100,u:"mM"},
+                       esi:{val:91,u:"uM"}, nanoEsi:{val:900,u:"uM"}, maldi:{val:100,u:"mM"}, maldiScreen:{val:50,u:"mM"} },
+  naoh:              { display: "NaOH",
+                       bca:{val:100,u:"mM"}, bcaRac:{val:0}, microBca:{val:50,u:"mM"}, p660:{val:125,u:"mM"}, bradford:{val:100,u:"mM"}, coomassie:{val:100,u:"mM"}, lowry:{val:100,u:"mM"},
+                       bradQSB:{val:100,u:"mM"}, biorad_dc:{val:500,u:"mM"},
+                       esi:{val:1,u:"mM"}, nanoEsi:{val:10,u:"mM"}, maldi:{val:50,u:"mM"}, maldiScreen:{val:25,u:"mM"} },
+
+  // ─── Reducing agents ─────────────────────────────────────────────────
+  bme:               { display: "\u03b2-mercaptoethanol",
+                       bca:{val:0.01,u:"pct"}, bcaRac:{val:25,u:"mM"}, microBca:{val:1,u:"mM"}, p660:{val:1,u:"M"}, bradford:{val:1,u:"M"}, coomassie:{val:1,u:"M"}, lowry:{val:1,u:"mM"},
+                       bradQSB:{val:1,u:"M"}, biorad_dc:{val:0},
+                       esi:{val:0.1,u:"pct"}, nanoEsi:{val:1,u:"pct"}, maldi:{val:1,u:"pct"}, maldiScreen:{val:0.5,u:"pct"} },
+  dtt:               { display: "DTT (dithiothreitol)",
+                       bca:{val:1,u:"mM"}, bcaRac:{val:5,u:"mM"}, microBca:{val:0}, p660:{val:500,u:"mM"}, bradford:{val:5,u:"mM"}, coomassie:{val:5,u:"mM"}, lowry:{val:0},
+                       bradQSB:{val:10,u:"mM"}, biorad_dc:{val:1,u:"mM"},
+                       esi:{val:1,u:"mM"}, nanoEsi:{val:10,u:"mM"}, maldi:{val:5,u:"mM"}, maldiScreen:{val:5,u:"mM"} },
+  dte:               { display: "DTE (dithioerythritol)",
+                       bca:{val:1,u:"mM"}, bcaRac:{val:2.5,u:"mM"}, microBca:{val:0}, p660:{val:25,u:"mM"}, bradford:{val:1,u:"mM"}, coomassie:{val:1,u:"mM"}, lowry:{val:0},
+                       bradQSB:{val:10,u:"mM"}, biorad_dc:null,
+                       esi:{val:1,u:"mM"}, nanoEsi:{val:10,u:"mM"}, maldi:{val:5,u:"mM"}, maldiScreen:{val:5,u:"mM"} },
+  tcep:              { display: "TCEP",
+                       bca:{val:0}, bcaRac:{val:10,u:"mM"}, microBca:{val:0}, p660:{val:40,u:"mM"}, bradford:{val:125,u:"mM"}, coomassie:{val:125,u:"mM"}, lowry:{val:0},
+                       bradQSB:{val:20,u:"mM"}, biorad_dc:null,
+                       esi:{val:1,u:"mM"}, nanoEsi:{val:10,u:"mM"}, maldi:{val:5,u:"mM"}, maldiScreen:{val:5,u:"mM"} },
+  tbp:               { display: "TBP (tributylphosphine)",
+                       bca:null, bcaRac:null, microBca:null, p660:null, bradford:null, coomassie:null, lowry:null,
+                       bradQSB:{val:5,u:"mM"}, biorad_dc:null,
+                       esi:{val:1,u:"mM"}, nanoEsi:{val:10,u:"mM"}, maldi:{val:5,u:"mM"}, maldiScreen:{val:2,u:"mM"} },
+  hydrides:          { display: "Hydrides (NaBH4, NaCNBH3)",
+                       bca:{val:0}, bcaRac:null, microBca:{val:0}, p660:{val:0}, bradford:null, coomassie:null, lowry:null,
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:0}, nanoEsi:{val:0}, maldi:{val:1,u:"mM"}, maldiScreen:{val:0.5,u:"mM"} },
+
+  // ─── Detergents (anionic / cationic / zwitterionic / nonionic) ──────
+  sds:               { display: "SDS",
+                       bca:{val:5,u:"pct"}, bcaRac:{val:5,u:"pct"}, microBca:{val:5,u:"pct"}, p660:{val:0.01,u:"pct"}, bradford:{val:0.016,u:"pct"}, coomassie:{val:0.125,u:"pct"}, lowry:{val:1,u:"pct"},
+                       bradQSB:{val:0.025,u:"pct"}, biorad_dc:{val:10,u:"pct"},
+                       esi:{val:0.00004,u:"pct"}, nanoEsi:{val:0.0004,u:"pct"}, maldi:{val:0.01,u:"pct"}, maldiScreen:{val:0.005,u:"pct"} },
+  cetylpyridinium:   { display: "Cetylpyridinium chloride (CPC)",
+                       bca:null, bcaRac:null, microBca:null, p660:{val:2.5,u:"pct"}, bradford:null, coomassie:null, lowry:null,
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:0}, nanoEsi:{val:0.001,u:"pct"}, maldi:{val:0.01,u:"pct"}, maldiScreen:{val:0.005,u:"pct"} },
+  ctab:              { display: "CTAB",
+                       bca:null, bcaRac:null, microBca:null, p660:{val:2.5,u:"pct"}, bradford:null, coomassie:null, lowry:null,
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:0}, nanoEsi:{val:0.001,u:"pct"}, maldi:{val:0.01,u:"pct"}, maldiScreen:{val:0.005,u:"pct"} },
+  dtab:              { display: "DTAB",
+                       bca:null, bcaRac:null, microBca:null, p660:{val:2,u:"pct"}, bradford:null, coomassie:null, lowry:null,
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:0}, nanoEsi:{val:0.001,u:"pct"}, maldi:{val:0.01,u:"pct"}, maldiScreen:{val:0.005,u:"pct"} },
+  doc:               { display: "Sodium deoxycholate (DOC)",
+                       bca:{val:5,u:"pct"}, bcaRac:null, microBca:{val:5,u:"pct"}, p660:{val:0.25,u:"pct"}, bradford:{val:0.4,u:"pct"}, coomassie:{val:0.05,u:"pct"}, lowry:null,
+                       bradQSB:{val:0.2,u:"pct"}, biorad_dc:null,
+                       esi:{val:0}, nanoEsi:{val:0.001,u:"pct"}, maldi:{val:0.05,u:"pct"}, maldiScreen:{val:0.01,u:"pct"} },
+  chaps:             { display: "CHAPS",
+                       bca:{val:5,u:"pct"}, bcaRac:{val:10,u:"pct"}, microBca:{val:1,u:"pct"}, p660:{val:5,u:"pct"}, bradford:{val:5,u:"pct"}, coomassie:{val:5,u:"pct"}, lowry:{val:0.062,u:"pct"},
+                       bradQSB:{val:10,u:"pct"}, biorad_dc:{val:1,u:"pct"},
+                       esi:{val:0.001,u:"pct"}, nanoEsi:{val:0.01,u:"pct"}, maldi:{val:0.01,u:"pct"}, maldiScreen:{val:0.005,u:"pct"} },
+  chapso:            { display: "CHAPSO",
+                       bca:{val:5,u:"pct"}, bcaRac:{val:0}, microBca:{val:5,u:"pct"}, p660:{val:4,u:"pct"}, bradford:{val:5,u:"pct"}, coomassie:{val:5,u:"pct"}, lowry:{val:0.031,u:"pct"},
+                       bradQSB:{val:10,u:"pct"}, biorad_dc:{val:1,u:"pct"},
+                       esi:{val:0.001,u:"pct"}, nanoEsi:{val:0.01,u:"pct"}, maldi:{val:0.01,u:"pct"}, maldiScreen:{val:0.005,u:"pct"} },
+  asb14:             { display: "ASB-14",
+                       bca:null, bcaRac:null, microBca:null, p660:null, bradford:null, coomassie:null, lowry:null,
+                       bradQSB:{val:0.025,u:"pct"}, biorad_dc:null,
+                       esi:{val:0}, nanoEsi:{val:0.001,u:"pct"}, maldi:{val:0.01,u:"pct"}, maldiScreen:{val:0.005,u:"pct"} },
+  sb310:             { display: "SB 3-10",
+                       bca:null, bcaRac:null, microBca:null, p660:null, bradford:null, coomassie:null, lowry:null,
+                       bradQSB:{val:0.1,u:"pct"}, biorad_dc:null,
+                       esi:{val:0}, nanoEsi:{val:0.001,u:"pct"}, maldi:{val:0.01,u:"pct"}, maldiScreen:{val:0.005,u:"pct"} },
+  zwittergent314:    { display: "Zwittergent 3-14",
+                       bca:{val:1,u:"pct"}, bcaRac:{val:2,u:"pct"}, microBca:{val:0}, p660:{val:0.05,u:"pct"}, bradford:{val:0.025,u:"pct"}, coomassie:{val:0.025,u:"pct"}, lowry:null,
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:0}, nanoEsi:{val:0.001,u:"pct"}, maldi:{val:0.01,u:"pct"}, maldiScreen:{val:0.005,u:"pct"} },
+  triton_x100:       { display: "Triton X-100",
+                       bca:{val:5,u:"pct"}, bcaRac:{val:7,u:"pct"}, microBca:{val:5,u:"pct"}, p660:{val:1,u:"pct"}, bradford:{val:0.0625,u:"pct"}, coomassie:{val:0.125,u:"pct"}, lowry:{val:0.031,u:"pct"},
+                       bradQSB:{val:0.05,u:"pct"}, biorad_dc:{val:1,u:"pct"},
+                       esi:{val:0.04,u:"pct"}, nanoEsi:{val:0.4,u:"pct"}, maldi:{val:0.1,u:"pct"}, maldiScreen:{val:0.01,u:"pct"} },
+  triton_x114:       { display: "Triton X-114",
+                       bca:{val:1,u:"pct"}, bcaRac:{val:2,u:"pct"}, microBca:{val:0.05,u:"pct"}, p660:{val:0.5,u:"pct"}, bradford:{val:0.0625,u:"pct"}, coomassie:{val:0.125,u:"pct"}, lowry:{val:0.031,u:"pct"},
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:0}, nanoEsi:{val:0.001,u:"pct"}, maldi:{val:0.1,u:"pct"}, maldiScreen:{val:0.01,u:"pct"} },
+  triton_x305:       { display: "Triton X-305",
+                       bca:{val:1,u:"pct"}, bcaRac:{val:1,u:"pct"}, microBca:{val:1,u:"pct"}, p660:{val:9,u:"pct"}, bradford:{val:0.125,u:"pct"}, coomassie:{val:0.5,u:"pct"}, lowry:{val:0.031,u:"pct"},
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:0}, nanoEsi:{val:0.001,u:"pct"}, maldi:{val:0.1,u:"pct"}, maldiScreen:{val:0.01,u:"pct"} },
+  triton_x405:       { display: "Triton X-405",
+                       bca:{val:1,u:"pct"}, bcaRac:{val:0}, microBca:{val:1,u:"pct"}, p660:{val:5,u:"pct"}, bradford:{val:0.025,u:"pct"}, coomassie:{val:0.5,u:"pct"}, lowry:{val:0.031,u:"pct"},
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:0}, nanoEsi:{val:0.001,u:"pct"}, maldi:{val:0.1,u:"pct"}, maldiScreen:{val:0.01,u:"pct"} },
+  brij35:            { display: "Brij-35",
+                       bca:{val:5,u:"pct"}, bcaRac:{val:0.63,u:"pct"}, microBca:{val:5,u:"pct"}, p660:{val:5,u:"pct"}, bradford:{val:0.062,u:"pct"}, coomassie:{val:0.125,u:"pct"}, lowry:{val:0.031,u:"pct"},
+                       bradQSB:null, biorad_dc:{val:1,u:"pct"},
+                       esi:{val:0.001,u:"pct"}, nanoEsi:{val:0.01,u:"pct"}, maldi:{val:0.1,u:"pct"}, maldiScreen:{val:0.01,u:"pct"} },
+  brij56:            { display: "Brij-56",
+                       bca:{val:1,u:"pct"}, bcaRac:null, microBca:{val:1,u:"pct"}, p660:null, bradford:{val:0.031,u:"pct"}, coomassie:{val:0.031,u:"pct"}, lowry:{val:0.062,u:"pct"},
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:0.001,u:"pct"}, nanoEsi:{val:0.01,u:"pct"}, maldi:{val:0.1,u:"pct"}, maldiScreen:{val:0.01,u:"pct"} },
+  brij58:            { display: "Brij-58",
+                       bca:{val:1,u:"pct"}, bcaRac:{val:0.5,u:"pct"}, microBca:{val:1,u:"pct"}, p660:{val:5,u:"pct"}, bradford:{val:0.016,u:"pct"}, coomassie:{val:0.031,u:"pct"}, lowry:{val:0.062,u:"pct"},
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:0.001,u:"pct"}, nanoEsi:{val:0.01,u:"pct"}, maldi:{val:0.1,u:"pct"}, maldiScreen:{val:0.01,u:"pct"} },
+  np40:              { display: "NP-40 (Nonidet P-40)",
+                       bca:{val:5,u:"pct"}, bcaRac:{val:0}, microBca:{val:5,u:"pct"}, p660:{val:5,u:"pct"}, bradford:{val:0.5,u:"pct"}, coomassie:{val:0.5,u:"pct"}, lowry:{val:0.016,u:"pct"},
+                       bradQSB:{val:0.25,u:"pct"}, biorad_dc:{val:2,u:"pct"},
+                       esi:{val:0}, nanoEsi:{val:0.001,u:"pct"}, maldi:{val:0.1,u:"pct"}, maldiScreen:{val:0.01,u:"pct"} },
+  octyl_glucoside:   { display: "n-Octyl-\u03b2-D-glucoside (OG)",
+                       bca:{val:5,u:"pct"}, bcaRac:{val:2.5,u:"pct"}, microBca:{val:0.1,u:"pct"}, p660:{val:5,u:"pct"}, bradford:{val:0.5,u:"pct"}, coomassie:{val:0.5,u:"pct"}, lowry:{val:0.031,u:"pct"},
+                       bradQSB:{val:0.5,u:"pct"}, biorad_dc:{val:1,u:"pct"},
+                       esi:{val:0.5,u:"pct"}, nanoEsi:{val:2,u:"pct"}, maldi:{val:0.1,u:"pct"}, maldiScreen:{val:0.05,u:"pct"} },
+  octyl_thiogluco:   { display: "n-Octyl-\u03b2-D-thioglucopyranoside",
+                       bca:{val:5,u:"pct"}, bcaRac:{val:7,u:"pct"}, microBca:{val:5,u:"pct"}, p660:{val:10,u:"pct"}, bradford:{val:3,u:"pct"}, coomassie:{val:3,u:"pct"}, lowry:null,
+                       bradQSB:{val:1,u:"pct"}, biorad_dc:null,
+                       esi:{val:0.5,u:"pct"}, nanoEsi:{val:2,u:"pct"}, maldi:{val:0.1,u:"pct"}, maldiScreen:{val:0.05,u:"pct"} },
+  ddm:               { display: "n-Dodecyl-\u03b2-D-maltoside (DDM)",
+                       bca:null, bcaRac:null, microBca:null, p660:null, bradford:null, coomassie:null, lowry:null,
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:0.02,u:"pct"}, nanoEsi:{val:0.5,u:"pct"}, maldi:{val:0.05,u:"pct"}, maldiScreen:{val:0.02,u:"pct"} },
+  c12e8:             { display: "C12E8 (octaethyleneglycol dodecyl ether)",
+                       bca:null, bcaRac:null, microBca:null, p660:null, bradford:null, coomassie:null, lowry:null,
+                       bradQSB:null, biorad_dc:{val:0.2,u:"pct"},
+                       esi:{val:0.001,u:"pct"}, nanoEsi:{val:0.01,u:"pct"}, maldi:{val:0.1,u:"pct"}, maldiScreen:{val:0.01,u:"pct"} },
+  thesit:            { display: "Thesit",
+                       bca:null, bcaRac:null, microBca:null, p660:null, bradford:null, coomassie:null, lowry:null,
+                       bradQSB:null, biorad_dc:{val:1,u:"pct"},
+                       esi:{val:0.001,u:"pct"}, nanoEsi:{val:0.01,u:"pct"}, maldi:{val:0.1,u:"pct"}, maldiScreen:{val:0.01,u:"pct"} },
+  tween20:           { display: "Tween 20",
+                       bca:{val:5,u:"pct"}, bcaRac:{val:10,u:"pct"}, microBca:{val:5,u:"pct"}, p660:{val:10,u:"pct"}, bradford:{val:0.031,u:"pct"}, coomassie:{val:0.062,u:"pct"}, lowry:{val:0.062,u:"pct"},
+                       bradQSB:{val:0.01,u:"pct"}, biorad_dc:{val:1,u:"pct"},
+                       esi:{val:0.0002,u:"pct"}, nanoEsi:{val:0.002,u:"pct"}, maldi:{val:0.1,u:"pct"}, maldiScreen:{val:0.01,u:"pct"} },
+  tween60:           { display: "Tween 60",
+                       bca:{val:5,u:"pct"}, bcaRac:{val:5,u:"pct"}, microBca:{val:0.5,u:"pct"}, p660:{val:5,u:"pct"}, bradford:{val:0.025,u:"pct"}, coomassie:{val:0.1,u:"pct"}, lowry:null,
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:0.001,u:"pct"}, nanoEsi:{val:0.01,u:"pct"}, maldi:{val:0.1,u:"pct"}, maldiScreen:{val:0.01,u:"pct"} },
+  tween80:           { display: "Tween 80",
+                       bca:{val:5,u:"pct"}, bcaRac:{val:2.5,u:"pct"}, microBca:{val:5,u:"pct"}, p660:{val:5,u:"pct"}, bradford:{val:0.016,u:"pct"}, coomassie:{val:0.062,u:"pct"}, lowry:{val:0.031,u:"pct"},
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:0.001,u:"pct"}, nanoEsi:{val:0.01,u:"pct"}, maldi:{val:0.1,u:"pct"}, maldiScreen:{val:0.01,u:"pct"} },
+  span20:            { display: "Span 20",
+                       bca:{val:1,u:"pct"}, bcaRac:null, microBca:{val:1,u:"pct"}, p660:null, bradford:{val:0.5,u:"pct"}, coomassie:{val:0.5,u:"pct"}, lowry:{val:0.25,u:"pct"},
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:0.001,u:"pct"}, nanoEsi:{val:0.01,u:"pct"}, maldi:{val:0.1,u:"pct"}, maldiScreen:{val:0.01,u:"pct"} },
+
+  // ─── Denaturants / chaotropes ───────────────────────────────────────
+  urea:              { display: "Urea",
+                       bca:{val:3,u:"M"}, bcaRac:{val:3,u:"M"}, microBca:{val:3,u:"M"}, p660:{val:8,u:"M"}, bradford:{val:3,u:"M"}, coomassie:{val:3,u:"M"}, lowry:{val:3,u:"M"},
+                       bradQSB:{val:4,u:"M"}, biorad_dc:{val:4,u:"M"},
+                       esi:{val:38,u:"uM"}, nanoEsi:{val:380,u:"uM"}, maldi:{val:500,u:"mM"}, maldiScreen:{val:200,u:"mM"} },
+  guanidine:         { display: "Guanidine-HCl",
+                       bca:{val:4,u:"M"}, bcaRac:{val:1.5,u:"M"}, microBca:{val:4,u:"M"}, p660:{val:2.5,u:"M"}, bradford:{val:3.5,u:"M"}, coomassie:{val:3.5,u:"M"}, lowry:null,
+                       bradQSB:{val:2,u:"M"}, biorad_dc:{val:400,u:"mM"},
+                       esi:{val:1.1,u:"mM"}, nanoEsi:{val:11,u:"mM"}, maldi:{val:250,u:"mM"}, maldiScreen:{val:100,u:"mM"} },
+  thiourea:          { display: "Thiourea",
+                       bca:null, bcaRac:null, microBca:null, p660:{val:2,u:"M"}, bradford:null, coomassie:null, lowry:null,
+                       bradQSB:{val:1,u:"M"}, biorad_dc:null,
+                       esi:{val:10,u:"mM"}, nanoEsi:{val:100,u:"mM"}, maldi:{val:100,u:"mM"}, maldiScreen:{val:50,u:"mM"} },
+
+  // ─── Chelators ───────────────────────────────────────────────────────
+  edta:              { display: "EDTA",
+                       bca:{val:10,u:"mM"}, bcaRac:{val:5,u:"mM"}, microBca:{val:0.5,u:"mM"}, p660:{val:20,u:"mM"}, bradford:{val:100,u:"mM"}, coomassie:{val:100,u:"mM"}, lowry:{val:1,u:"mM"},
+                       bradQSB:{val:200,u:"mM"}, biorad_dc:{val:25,u:"mM"},
+                       esi:{val:0.5,u:"mM"}, nanoEsi:{val:5,u:"mM"}, maldi:{val:5,u:"mM"}, maldiScreen:{val:2,u:"mM"} },
+  egta:              { display: "EGTA",
+                       bca:{val:0}, bcaRac:{val:5,u:"mM"}, microBca:{val:0}, p660:{val:20,u:"mM"}, bradford:{val:2,u:"mM"}, coomassie:{val:2,u:"mM"}, lowry:{val:1,u:"mM"},
+                       bradQSB:{val:200,u:"mM"}, biorad_dc:null,
+                       esi:{val:0.5,u:"mM"}, nanoEsi:{val:5,u:"mM"}, maldi:{val:5,u:"mM"}, maldiScreen:{val:2,u:"mM"} },
+
+  // ─── Salts (alkali / alkaline earth / transition metal) ─────────────
+  nacl:              { display: "NaCl (sodium chloride)",
+                       bca:{val:1,u:"M"}, bcaRac:{val:150,u:"mM"}, microBca:{val:1,u:"M"}, p660:{val:1.25,u:"M"}, bradford:{val:5,u:"M"}, coomassie:{val:5,u:"M"}, lowry:{val:1,u:"M"},
+                       bradQSB:{val:2.5,u:"M"}, biorad_dc:null,
+                       esi:{val:1.5,u:"mM"}, nanoEsi:{val:15,u:"mM"}, maldi:{val:50,u:"mM"}, maldiScreen:{val:25,u:"mM"} },
+  kcl:               { display: "KCl (potassium chloride)",
+                       bca:null, bcaRac:null, microBca:null, p660:null, bradford:null, coomassie:null, lowry:null,
+                       bradQSB:{val:2,u:"M"}, biorad_dc:null,
+                       esi:{val:1.5,u:"mM"}, nanoEsi:{val:15,u:"mM"}, maldi:{val:50,u:"mM"}, maldiScreen:{val:25,u:"mM"} },
+  na_acetate:        { display: "Sodium acetate, pH 4.8",
+                       bca:{val:200,u:"mM"}, bcaRac:{val:0}, microBca:{val:200,u:"mM"}, p660:{val:100,u:"mM"}, bradford:{val:180,u:"mM"}, coomassie:{val:180,u:"mM"}, lowry:{val:200,u:"mM"},
+                       bradQSB:{val:200,u:"mM"}, biorad_dc:null,
+                       esi:{val:50,u:"mM"}, nanoEsi:{val:500,u:"mM"}, maldi:{val:50,u:"mM"}, maldiScreen:{val:25,u:"mM"} },
+  na_bicarbonate:    { display: "Sodium bicarbonate",
+                       bca:{val:100,u:"mM"}, bcaRac:{val:0}, microBca:{val:100,u:"mM"}, p660:{val:100,u:"mM"}, bradford:{val:100,u:"mM"}, coomassie:{val:100,u:"mM"}, lowry:{val:100,u:"mM"},
+                       bradQSB:{val:200,u:"mM"}, biorad_dc:null,
+                       esi:{val:50,u:"mM"}, nanoEsi:{val:500,u:"mM"}, maldi:{val:50,u:"mM"}, maldiScreen:{val:25,u:"mM"} },
+  na_carbonate:      { display: "Sodium carbonate",
+                       bca:null, bcaRac:null, microBca:null, p660:null, bradford:null, coomassie:null, lowry:null,
+                       bradQSB:{val:100,u:"mM"}, biorad_dc:null,
+                       esi:{val:1,u:"mM"}, nanoEsi:{val:10,u:"mM"}, maldi:{val:25,u:"mM"}, maldiScreen:{val:10,u:"mM"} },
+  na_citrate:        { display: "Sodium citrate, pH 4.8",
+                       bca:{val:200,u:"mM"}, bcaRac:{val:50,u:"mM"}, microBca:{val:5,u:"mM"}, p660:{val:12.5,u:"mM"}, bradford:{val:200,u:"mM"}, coomassie:{val:200,u:"mM"}, lowry:null,
+                       bradQSB:{val:200,u:"mM"}, biorad_dc:null,
+                       esi:{val:1,u:"mM"}, nanoEsi:{val:10,u:"mM"}, maldi:{val:50,u:"mM"}, maldiScreen:{val:25,u:"mM"} },
+  na_phosphate:      { display: "Sodium phosphate",
+                       bca:{val:100,u:"mM"}, bcaRac:{val:100,u:"mM"}, microBca:{val:100,u:"mM"}, p660:{val:500,u:"mM"}, bradford:{val:100,u:"mM"}, coomassie:{val:100,u:"mM"}, lowry:{val:100,u:"mM"},
+                       bradQSB:{val:500,u:"mM"}, biorad_dc:null,
+                       esi:{val:0.3,u:"mM"}, nanoEsi:{val:3,u:"mM"}, maldi:{val:10,u:"mM"}, maldiScreen:{val:5,u:"mM"} },
+  k_phosphate:       { display: "Potassium phosphate",
+                       bca:null, bcaRac:null, microBca:null, p660:null, bradford:null, coomassie:null, lowry:null,
+                       bradQSB:{val:500,u:"mM"}, biorad_dc:null,
+                       esi:{val:0.3,u:"mM"}, nanoEsi:{val:3,u:"mM"}, maldi:{val:10,u:"mM"}, maldiScreen:{val:5,u:"mM"} },
+  pbs:               { display: "PBS (100 mM Na-phosphate, 150 mM NaCl pH 7.2)",
+                       bca:{val:1,u:"undil"}, bcaRac:{val:1,u:"undil"}, microBca:{val:1,u:"undil"}, p660:{val:1,u:"undil"}, bradford:{val:1,u:"undil"}, coomassie:{val:1,u:"undil"}, lowry:null,
+                       bradQSB:{val:1,u:"undil"}, biorad_dc:null,
+                       esi:{val:0.02,u:"undil"}, nanoEsi:{val:0.2,u:"undil"}, maldi:{val:0.1,u:"undil"}, maldiScreen:{val:0.05,u:"undil"} },
+  tbs:               { display: "TBS (25 mM Tris, 150 mM NaCl pH 7.6)",
+                       bca:{val:1,u:"undil"}, bcaRac:{val:1,u:"undil"}, microBca:{val:1,u:"undil"}, p660:{val:1,u:"undil"}, bradford:{val:1,u:"undil"}, coomassie:{val:1,u:"undil"}, lowry:null,
+                       bradQSB:{val:0.5,u:"undil"}, biorad_dc:null,
+                       esi:{val:0.02,u:"undil"}, nanoEsi:{val:0.2,u:"undil"}, maldi:{val:0.1,u:"undil"}, maldiScreen:{val:0.05,u:"undil"} },
+  ammonium_sulfate:  { display: "Ammonium sulfate",
+                       bca:{val:1.5,u:"M"}, bcaRac:{val:0}, microBca:{val:0}, p660:{val:125,u:"mM"}, bradford:{val:1,u:"M"}, coomassie:{val:1,u:"M"}, lowry:{val:0},
+                       bradQSB:{val:1,u:"M"}, biorad_dc:{val:500,u:"mM"},
+                       esi:{val:4.2,u:"uM"}, nanoEsi:{val:42,u:"uM"}, maldi:{val:50,u:"mM"}, maldiScreen:{val:20,u:"mM"} },
+  ammonium_acetate:  { display: "Ammonium acetate",
+                       bca:null, bcaRac:null, microBca:null, p660:null, bradford:null, coomassie:null, lowry:null,
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:500,u:"mM"}, nanoEsi:{val:1,u:"M"}, maldi:{val:500,u:"mM"}, maldiScreen:{val:500,u:"mM"} },
+  ammonium_bicarbonate: { display: "Ammonium bicarbonate (ABC)",
+                       bca:null, bcaRac:null, microBca:null, p660:null, bradford:null, coomassie:null, lowry:null,
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:100,u:"mM"}, nanoEsi:{val:500,u:"mM"}, maldi:{val:50,u:"mM"}, maldiScreen:{val:50,u:"mM"} },
+  cacl2:             { display: "Calcium chloride",
+                       bca:{val:10,u:"mM"}, bcaRac:{val:1,u:"mM"}, microBca:{val:10,u:"mM"}, p660:{val:40,u:"mM"}, bradford:{val:10,u:"mM"}, coomassie:{val:10,u:"mM"}, lowry:null,
+                       bradQSB:{val:40,u:"mM"}, biorad_dc:{val:50,u:"mM"},
+                       esi:{val:25,u:"uM"}, nanoEsi:{val:250,u:"uM"}, maldi:{val:10,u:"mM"}, maldiScreen:{val:5,u:"mM"} },
+  mgcl2:             { display: "Magnesium chloride",
+                       bca:null, bcaRac:{val:100,u:"mM"}, microBca:null, p660:{val:1,u:"M"}, bradford:null, coomassie:null, lowry:null,
+                       bradQSB:{val:1,u:"M"}, biorad_dc:null,
+                       esi:{val:25,u:"uM"}, nanoEsi:{val:250,u:"uM"}, maldi:{val:10,u:"mM"}, maldiScreen:{val:5,u:"mM"} },
+  cesium_bicarb:     { display: "Cesium bicarbonate",
+                       bca:{val:100,u:"mM"}, bcaRac:{val:0}, microBca:{val:100,u:"mM"}, p660:{val:100,u:"mM"}, bradford:{val:100,u:"mM"}, coomassie:{val:100,u:"mM"}, lowry:{val:50,u:"mM"},
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:1,u:"mM"}, nanoEsi:{val:10,u:"mM"}, maldi:{val:10,u:"mM"}, maldiScreen:{val:5,u:"mM"} },
+  cocl2:             { display: "Cobalt chloride",
+                       bca:{val:0.8,u:"mM"}, bcaRac:{val:0.4,u:"mM"}, microBca:{val:0}, p660:{val:20,u:"mM"}, bradford:{val:10,u:"mM"}, coomassie:{val:10,u:"mM"}, lowry:null,
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:25,u:"uM"}, nanoEsi:{val:250,u:"uM"}, maldi:{val:5,u:"mM"}, maldiScreen:{val:2,u:"mM"} },
+  fecl3:             { display: "Ferric chloride",
+                       bca:{val:10,u:"mM"}, bcaRac:{val:5,u:"mM"}, microBca:{val:0.5,u:"mM"}, p660:{val:5,u:"mM"}, bradford:{val:10,u:"mM"}, coomassie:{val:10,u:"mM"}, lowry:null,
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:25,u:"uM"}, nanoEsi:{val:250,u:"uM"}, maldi:{val:5,u:"mM"}, maldiScreen:{val:2,u:"mM"} },
+  nicl2:             { display: "Nickel chloride",
+                       bca:{val:10,u:"mM"}, bcaRac:{val:0}, microBca:{val:0.2,u:"mM"}, p660:{val:10,u:"mM"}, bradford:{val:10,u:"mM"}, coomassie:{val:10,u:"mM"}, lowry:null,
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:25,u:"uM"}, nanoEsi:{val:250,u:"uM"}, maldi:{val:5,u:"mM"}, maldiScreen:{val:2,u:"mM"} },
+  zncl2:             { display: "Zinc chloride",
+                       bca:{val:10,u:"mM"}, bcaRac:{val:0}, microBca:{val:0.5,u:"mM"}, p660:{val:10,u:"mM"}, bradford:{val:10,u:"mM"}, coomassie:{val:10,u:"mM"}, lowry:null,
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:25,u:"uM"}, nanoEsi:{val:250,u:"uM"}, maldi:{val:5,u:"mM"}, maldiScreen:{val:2,u:"mM"} },
+  na_orthovanadate:  { display: "Sodium orthovanadate",
+                       bca:{val:1,u:"mM"}, bcaRac:{val:0.5,u:"mM"}, microBca:{val:1,u:"mM"}, p660:{val:50,u:"mM"}, bradford:{val:1,u:"mM"}, coomassie:{val:1,u:"mM"}, lowry:null,
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:0.1,u:"mM"}, nanoEsi:{val:1,u:"mM"}, maldi:{val:2,u:"mM"}, maldiScreen:{val:1,u:"mM"} },
+  k_thiocyanate:     { display: "Potassium thiocyanate",
+                       bca:{val:3,u:"M"}, bcaRac:{val:0}, microBca:null, p660:{val:250,u:"mM"}, bradford:{val:3,u:"M"}, coomassie:{val:3,u:"M"}, lowry:{val:100,u:"mM"},
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:1,u:"mM"}, nanoEsi:{val:10,u:"mM"}, maldi:{val:50,u:"mM"}, maldiScreen:{val:25,u:"mM"} },
+  sodium_azide:      { display: "Sodium azide",
+                       bca:{val:0.2,u:"pct"}, bcaRac:{val:0.01,u:"pct"}, microBca:{val:0.2,u:"pct"}, p660:{val:0.125,u:"pct"}, bradford:{val:0.5,u:"pct"}, coomassie:{val:0.5,u:"pct"}, lowry:{val:0.2,u:"pct"},
+                       bradQSB:{val:0.5,u:"pct"}, biorad_dc:{val:0.05,u:"pct"},
+                       esi:{val:0.01,u:"pct"}, nanoEsi:{val:0.05,u:"pct"}, maldi:{val:0.1,u:"pct"}, maldiScreen:{val:0.05,u:"pct"} },
+  thimerosal:        { display: "Thimerosal",
+                       bca:{val:0.01,u:"pct"}, bcaRac:{val:0.03,u:"pct"}, microBca:{val:0}, p660:{val:0.25,u:"pct"}, bradford:{val:0.01,u:"pct"}, coomassie:{val:0.01,u:"pct"}, lowry:{val:0.01,u:"pct"},
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:0.001,u:"pct"}, nanoEsi:{val:0.01,u:"pct"}, maldi:{val:0.05,u:"pct"}, maldiScreen:{val:0.02,u:"pct"} },
+
+  // ─── Sugars / polyols / osmolytes ────────────────────────────────────
+  glucose:           { display: "Glucose",
+                       bca:{val:10,u:"mM"}, bcaRac:{val:0}, microBca:{val:1,u:"mM"}, p660:{val:500,u:"mM"}, bradford:{val:1,u:"M"}, coomassie:{val:1,u:"M"}, lowry:{val:100,u:"mM"},
+                       bradQSB:{val:20,u:"pct"}, biorad_dc:null,
+                       esi:{val:10,u:"mM"}, nanoEsi:{val:100,u:"mM"}, maldi:{val:50,u:"mM"}, maldiScreen:{val:25,u:"mM"} },
+  glycerol:          { display: "Glycerol",
+                       bca:{val:10,u:"pct"}, bcaRac:{val:5,u:"pct"}, microBca:{val:1,u:"pct"}, p660:{val:50,u:"pct"}, bradford:{val:10,u:"pct"}, coomassie:{val:10,u:"pct"}, lowry:{val:10,u:"pct"},
+                       bradQSB:{val:5,u:"pct"}, biorad_dc:null,
+                       esi:{val:0.5,u:"pct"}, nanoEsi:{val:5,u:"pct"}, maldi:{val:1.2,u:"pct"}, maldiScreen:{val:1,u:"pct"} },
+  sucrose:           { display: "Sucrose",
+                       bca:{val:40,u:"pct"}, bcaRac:{val:40,u:"pct"}, microBca:{val:4,u:"pct"}, p660:{val:50,u:"pct"}, bradford:{val:10,u:"pct"}, coomassie:{val:10,u:"pct"}, lowry:{val:7.5,u:"pct"},
+                       bradQSB:{val:10,u:"pct"}, biorad_dc:null,
+                       esi:{val:0.1,u:"pct"}, nanoEsi:{val:1,u:"pct"}, maldi:{val:1,u:"pct"}, maldiScreen:{val:0.5,u:"pct"} },
+  mannitol:          { display: "Mannitol",
+                       bca:null, bcaRac:null, microBca:null, p660:{val:100,u:"mM"}, bradford:null, coomassie:null, lowry:null,
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:10,u:"mM"}, nanoEsi:{val:100,u:"mM"}, maldi:{val:50,u:"mM"}, maldiScreen:{val:25,u:"mM"} },
+  melibiose:         { display: "Melibiose",
+                       bca:{val:0}, bcaRac:null, microBca:null, p660:{val:500,u:"mM"}, bradford:{val:100,u:"mM"}, coomassie:{val:100,u:"mM"}, lowry:{val:25,u:"mM"},
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:10,u:"mM"}, nanoEsi:{val:100,u:"mM"}, maldi:{val:25,u:"mM"}, maldiScreen:{val:10,u:"mM"} },
+  n_acetylglucosamine: { display: "N-Acetylglucosamine",
+                       bca:{val:10,u:"mM"}, bcaRac:{val:0}, microBca:{val:0}, p660:{val:100,u:"mM"}, bradford:{val:100,u:"mM"}, coomassie:{val:100,u:"mM"}, lowry:null,
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:10,u:"mM"}, nanoEsi:{val:100,u:"mM"}, maldi:{val:50,u:"mM"}, maldiScreen:{val:25,u:"mM"} },
+
+  // ─── Organic solvents ───────────────────────────────────────────────
+  acetone:           { display: "Acetone",
+                       bca:{val:10,u:"pct"}, bcaRac:{val:0}, microBca:{val:1,u:"pct"}, p660:{val:50,u:"pct"}, bradford:{val:10,u:"pct"}, coomassie:{val:10,u:"pct"}, lowry:{val:10,u:"pct"},
+                       bradQSB:{val:10,u:"pct"}, biorad_dc:null,
+                       esi:{val:10,u:"pct"}, nanoEsi:{val:30,u:"pct"}, maldi:{val:50,u:"pct"}, maldiScreen:{val:20,u:"pct"} },
+  acetonitrile:      { display: "Acetonitrile",
+                       bca:{val:10,u:"pct"}, bcaRac:{val:30,u:"pct"}, microBca:{val:1,u:"pct"}, p660:{val:50,u:"pct"}, bradford:{val:10,u:"pct"}, coomassie:{val:10,u:"pct"}, lowry:{val:10,u:"pct"},
+                       bradQSB:{val:10,u:"pct"}, biorad_dc:null,
+                       esi:{val:50,u:"pct"}, nanoEsi:{val:50,u:"pct"}, maldi:{val:50,u:"pct"}, maldiScreen:{val:25,u:"pct"} },
+  ethanol:           { display: "Ethanol",
+                       bca:{val:10,u:"pct"}, bcaRac:{val:0}, microBca:{val:1,u:"pct"}, p660:{val:50,u:"pct"}, bradford:{val:10,u:"pct"}, coomassie:{val:10,u:"pct"}, lowry:{val:10,u:"pct"},
+                       bradQSB:{val:10,u:"pct"}, biorad_dc:null,
+                       esi:{val:50,u:"pct"}, nanoEsi:{val:50,u:"pct"}, maldi:{val:50,u:"pct"}, maldiScreen:{val:25,u:"pct"} },
+  methanol:          { display: "Methanol",
+                       bca:{val:10,u:"pct"}, bcaRac:{val:0.5,u:"pct"}, microBca:{val:1,u:"pct"}, p660:{val:50,u:"pct"}, bradford:{val:10,u:"pct"}, coomassie:{val:10,u:"pct"}, lowry:{val:10,u:"pct"},
+                       bradQSB:{val:10,u:"pct"}, biorad_dc:null,
+                       esi:{val:50,u:"pct"}, nanoEsi:{val:50,u:"pct"}, maldi:{val:50,u:"pct"}, maldiScreen:{val:25,u:"pct"} },
+  dmf:               { display: "DMF",
+                       bca:{val:10,u:"pct"}, bcaRac:{val:5,u:"pct"}, microBca:{val:1,u:"pct"}, p660:{val:50,u:"pct"}, bradford:{val:10,u:"pct"}, coomassie:{val:10,u:"pct"}, lowry:{val:10,u:"pct"},
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:10,u:"pct"}, nanoEsi:{val:20,u:"pct"}, maldi:{val:5,u:"pct"}, maldiScreen:{val:2,u:"pct"} },
+  dmso:              { display: "DMSO",
+                       bca:{val:10,u:"pct"}, bcaRac:{val:0.25,u:"pct"}, microBca:{val:1,u:"pct"}, p660:{val:50,u:"pct"}, bradford:{val:10,u:"pct"}, coomassie:{val:10,u:"pct"}, lowry:{val:10,u:"pct"},
+                       bradQSB:{val:5,u:"pct"}, biorad_dc:null,
+                       esi:{val:5,u:"pct"}, nanoEsi:{val:20,u:"pct"}, maldi:{val:1,u:"pct"}, maldiScreen:{val:1,u:"pct"} },
+
+  // ─── Protease inhibitors ────────────────────────────────────────────
+  aprotinin:         { display: "Aprotinin",
+                       bca:{val:10,u:"mg_L"}, bcaRac:{val:0}, microBca:{val:1,u:"mg_L"}, p660:{val:2,u:"mM"}, bradford:{val:10,u:"mg_L"}, coomassie:{val:10,u:"mg_L"}, lowry:{val:10,u:"mg_L"},
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:1,u:"mg_L"}, nanoEsi:{val:10,u:"mg_L"}, maldi:{val:10,u:"mg_L"}, maldiScreen:{val:5,u:"mg_L"} },
+  leupeptin:         { display: "Leupeptin",
+                       bca:{val:10,u:"mg_L"}, bcaRac:{val:0}, microBca:{val:10,u:"mg_L"}, p660:{val:80,u:"uM"}, bradford:{val:10,u:"mg_L"}, coomassie:{val:10,u:"mg_L"}, lowry:{val:10,u:"mg_L"},
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:1,u:"mg_L"}, nanoEsi:{val:10,u:"mg_L"}, maldi:{val:10,u:"mg_L"}, maldiScreen:{val:5,u:"mg_L"} },
+  pmsf:              { display: "PMSF",
+                       bca:{val:1,u:"mM"}, bcaRac:{val:0.125,u:"mM"}, microBca:{val:1,u:"mM"}, p660:{val:1,u:"mM"}, bradford:{val:1,u:"mM"}, coomassie:{val:1,u:"mM"}, lowry:{val:1,u:"mM"},
+                       bradQSB:{val:2,u:"mM"}, biorad_dc:null,
+                       esi:{val:0.1,u:"mM"}, nanoEsi:{val:1,u:"mM"}, maldi:{val:1,u:"mM"}, maldiScreen:{val:0.5,u:"mM"} },
+  tlck:              { display: "TLCK",
+                       bca:{val:0.1,u:"mg_L"}, bcaRac:{val:0}, microBca:{val:0.1,u:"mg_L"}, p660:{val:5,u:"mg_ml"}, bradford:{val:0.1,u:"mg_ml"}, coomassie:{val:0.1,u:"mg_L"}, lowry:{val:0.01,u:"mg_L"},
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:0.1,u:"mg_L"}, nanoEsi:{val:1,u:"mg_L"}, maldi:{val:1,u:"mg_L"}, maldiScreen:{val:0.5,u:"mg_L"} },
+  tpck:              { display: "TPCK",
+                       bca:{val:0.1,u:"mg_L"}, bcaRac:{val:0}, microBca:{val:0.1,u:"mg_L"}, p660:{val:4,u:"mg_ml"}, bradford:{val:0.1,u:"mg_ml"}, coomassie:{val:0.1,u:"mg_L"}, lowry:{val:0.1,u:"mg_L"},
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:0.1,u:"mg_L"}, nanoEsi:{val:1,u:"mg_L"}, maldi:{val:1,u:"mg_L"}, maldiScreen:{val:0.5,u:"mg_L"} },
+
+  // ─── Dyes / indicators ──────────────────────────────────────────────
+  bromophenol_blue:  { display: "Bromophenol blue (in 50 mM NaOH)",
+                       bca:{val:0}, bcaRac:{val:0}, microBca:{val:0}, p660:{val:0.031,u:"pct"}, bradford:{val:0}, coomassie:{val:0}, lowry:{val:0},
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:0}, nanoEsi:{val:0}, maldi:{val:0.01,u:"pct"}, maldiScreen:{val:0.005,u:"pct"} },
+  phenol_red:        { display: "Phenol Red",
+                       bca:{val:0}, bcaRac:{val:3.125,u:"ug_ml"}, microBca:{val:0}, p660:{val:0.5,u:"mg_ml"}, bradford:{val:0.5,u:"mg_ml"}, coomassie:{val:0.5,u:"mg_ml"}, lowry:null,
+                       bradQSB:{val:0.5,u:"mg_ml"}, biorad_dc:null,
+                       esi:{val:0.01,u:"mg_ml"}, nanoEsi:{val:0.1,u:"mg_ml"}, maldi:{val:0.1,u:"mg_ml"}, maldiScreen:{val:0.05,u:"mg_ml"} },
+
+  // ─── Vendor extraction/lysis reagents ───────────────────────────────
+  bper:              { display: "B-PER",
+                       bca:{val:1,u:"undil"}, bcaRac:{val:0.33,u:"undil"}, microBca:null, p660:{val:0.5,u:"undil"}, bradford:{val:0.5,u:"undil"}, coomassie:{val:0.5,u:"undil"}, lowry:null,
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:0}, nanoEsi:{val:0.05,u:"undil"}, maldi:{val:0.1,u:"undil"}, maldiScreen:{val:0.05,u:"undil"} },
+  iper:              { display: "I-PER",
+                       bca:{val:1,u:"undil"}, bcaRac:null, microBca:null, p660:{val:0.25,u:"undil"}, bradford:null, coomassie:null, lowry:null,
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:0}, nanoEsi:{val:0.05,u:"undil"}, maldi:{val:0.1,u:"undil"}, maldiScreen:{val:0.05,u:"undil"} },
+  mper:              { display: "M-PER",
+                       bca:{val:1,u:"undil"}, bcaRac:{val:0.5,u:"undil"}, microBca:null, p660:{val:0.5,u:"undil"}, bradford:{val:1,u:"undil"}, coomassie:null, lowry:null,
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:0}, nanoEsi:{val:0.05,u:"undil"}, maldi:{val:0.1,u:"undil"}, maldiScreen:{val:0.05,u:"undil"} },
+  tper:              { display: "T-PER",
+                       bca:{val:0.5,u:"undil"}, bcaRac:null, microBca:null, p660:{val:0.5,u:"undil"}, bradford:{val:1,u:"undil"}, coomassie:null, lowry:null,
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:0}, nanoEsi:{val:0.05,u:"undil"}, maldi:{val:0.1,u:"undil"}, maldiScreen:{val:0.05,u:"undil"} },
+  yper:              { display: "Y-PER",
+                       bca:{val:1,u:"undil"}, bcaRac:null, microBca:null, p660:{val:0}, bradford:null, coomassie:null, lowry:null,
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:0}, nanoEsi:{val:0.05,u:"undil"}, maldi:{val:0.1,u:"undil"}, maldiScreen:{val:0.05,u:"undil"} },
+  ripa:              { display: "RIPA buffer (50 mM Tris, 150 mM NaCl, 0.5% DOC, 1% NP-40, 0.1% SDS)",
+                       bca:{val:1,u:"undil"}, bcaRac:{val:0.5,u:"undil"}, microBca:{val:0.1,u:"undil"}, p660:{val:1,u:"undil"}, bradford:{val:0.025,u:"undil"}, coomassie:{val:0.1,u:"undil"}, lowry:null,
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:0}, nanoEsi:{val:0}, maldi:{val:0.01,u:"undil"}, maldiScreen:{val:0.005,u:"undil"} },
+  laemmli:           { display: "Laemmli SDS sample buffer (65 mM Tris, 10% glycerol, 2% SDS, 0.025% BPB)",
+                       bca:{val:0}, bcaRac:{val:0}, microBca:{val:0}, p660:{val:1,u:"undil"}, bradford:{val:0}, coomassie:{val:0}, lowry:{val:0},
+                       bradQSB:null, biorad_dc:null,
+                       esi:{val:0}, nanoEsi:{val:0}, maldi:{val:0.01,u:"undil"}, maldiScreen:{val:0.005,u:"undil"} },
+};
+
+// ─────────────────────────────────────────────────────────────────────────
+//  COMPAT_CROSS_REF — cross-source comparison table
+//
+//  For each (substance, assay) pair, we store ALL published values across
+//  every source we have, with provenance. This enables disagreement
+//  detection — when two sources disagree by more than 2×, the UI flags it
+//  so the user can see the dispute and decide for themselves.
+//
+//  Structure: substance_key → { assay_id → [ { source, val, u, note? }, ... ] }
+//
+//  Sources currently covered:
+//    PROTEIN ASSAYS:
+//      "Pierce_TR0068"     — Thermo Pierce TR0068 (the ~95-substance table)
+//      "Sigma_B9643"       — Sigma-Aldrich BCA Protein Assay Kit B9643/BCA1
+//      "BioRad_QSB"        — Bio-Rad Quick Start Bradford (#500-0201)
+//      "BioRad_DC"         — Bio-Rad DC Protein Assay (#500-0111, LIT448)
+//    MS:
+//      "Donnelly_2019"     — Donnelly et al. Nat Methods 16:587 Fig 1c
+//                            (direct ESI SC50 by titration)
+//      "Harvard_saltbuf"   — Harvard Center for Mass Spec saltbuffer.pdf
+//                            (aggregated from Kallweit 1996, Yao 1998, Coligan,
+//                             Gevaert 1998 ABRF, Ogorzalek Protein Sci, Kay 1993)
+//      "KU_SCB"            — University of Kansas SCB MALDI tolerance table
+//      "UNM"               — Univ. New Mexico MS facility (qualitative; "must avoid")
+//
+//  Disagreement detection logic (run at render time, not stored here):
+//    - For molar units, compare values after unit normalization.
+//    - If max/min ratio > 2, flag as MINOR disagreement (yellow).
+//    - If max/min ratio > 5, flag as MAJOR disagreement (red).
+//    - If one source says "incompatible at any concentration" (val:0) and
+//      another publishes a numeric value > 0, flag as STRUCTURAL conflict.
+// ─────────────────────────────────────────────────────────────────────────
+var COMPAT_CROSS_REF = {
+  // ─── Tris ───
+  tris: {
+    bca: [
+      { source:"Pierce_TR0068", val:250, u:"mM" },
+      { source:"Sigma_B9643",   val:250, u:"mM" },
+    ],
+    bradford: [
+      { source:"Pierce_TR0068", val:2,   u:"M" },
+      { source:"BioRad_QSB",    val:1,   u:"M" },
+    ],
+    biorad_dc: [
+      { source:"BioRad_DC",     val:100, u:"mM" },
+    ],
+    esi: [
+      { source:"Donnelly_2019", val:91,  u:"uM", note:"direct SC50 titration" },
+    ],
+    maldi: [
+      { source:"KU_SCB",        val:100, u:"mM", note:"1.0 wt%" },
+      { source:"Harvard_saltbuf", val:100, u:"mM", note:"1.0 wt%, agrees with KU" },
+    ],
+  },
+
+  // ─── HEPES ───
+  hepes: {
+    bca: [
+      { source:"Pierce_TR0068", val:100, u:"mM" },
+      { source:"Sigma_B9643",   val:100, u:"mM" },
+    ],
+    bradford: [
+      { source:"Pierce_TR0068", val:100, u:"mM" },
+      { source:"BioRad_QSB",    val:100, u:"mM" },
+    ],
+    esi: [
+      { source:"Donnelly_2019", val:600, u:"uM", note:"direct SC50 titration" },
+    ],
+    maldi: [
+      { source:"KU_SCB",        val:100, u:"mM", note:"2.4 wt%" },
+      { source:"Harvard_saltbuf", val:100, u:"mM", note:"2.4 wt%, agrees with KU" },
+    ],
+  },
+
+  // ─── NaCl ───
+  nacl: {
+    bca: [
+      { source:"Pierce_TR0068", val:1,   u:"M" },
+      { source:"Sigma_B9643",   val:1,   u:"M" },
+    ],
+    bradford: [
+      { source:"Pierce_TR0068", val:5,   u:"M" },
+      { source:"BioRad_QSB",    val:2.5, u:"M" },
+    ],
+    esi: [
+      { source:"Donnelly_2019",   val:1.5,  u:"mM", note:"direct SC50 titration" },
+    ],
+    maldi: [
+      { source:"KU_SCB",          val:50,  u:"mM", note:"0.29 wt%" },
+      { source:"Harvard_saltbuf", val:50,  u:"mM", note:"0.29 wt%, agrees with KU" },
+    ],
+  },
+
+  // ─── Urea ───
+  urea: {
+    bca: [
+      { source:"Pierce_TR0068", val:3, u:"M" },
+      { source:"Sigma_B9643",   val:3, u:"M" },
+    ],
+    bradford: [
+      { source:"Pierce_TR0068", val:3, u:"M" },
+      { source:"BioRad_QSB",    val:4, u:"M" },
+    ],
+    biorad_dc: [
+      { source:"BioRad_DC",     val:4, u:"M" },
+    ],
+    esi: [
+      { source:"Donnelly_2019", val:38, u:"uM", note:"surprisingly low — paper-reported value; verify on instrument" },
+    ],
+    maldi: [
+      { source:"KU_SCB",          val:500, u:"mM", note:"3.0 wt%" },
+      { source:"Harvard_saltbuf", val:500, u:"mM", note:"3.0 wt%, agrees with KU" },
+    ],
+  },
+
+  // ─── Guanidine-HCl ───
+  guanidine: {
+    bca: [
+      { source:"Pierce_TR0068", val:4, u:"M" },
+      { source:"Sigma_B9643",   val:4, u:"M" },
+    ],
+    bradford: [
+      { source:"Pierce_TR0068", val:3.5, u:"M" },
+      { source:"BioRad_QSB",    val:2,   u:"M" },
+    ],
+    biorad_dc: [
+      { source:"BioRad_DC",     val:400, u:"mM" },
+    ],
+    esi: [
+      { source:"Donnelly_2019", val:1.1, u:"mM", note:"direct SC50 titration" },
+    ],
+    maldi: [
+      { source:"KU_SCB",          val:250, u:"mM", note:"2.4 wt%" },
+      { source:"Harvard_saltbuf", val:250, u:"mM", note:"2.4 wt%, agrees with KU" },
+    ],
+  },
+
+  // ─── SDS ───
+  sds: {
+    bca: [
+      { source:"Pierce_TR0068", val:5, u:"pct" },
+      { source:"Sigma_B9643",   val:5, u:"pct" },
+    ],
+    bradford: [
+      { source:"Pierce_TR0068", val:0.016, u:"pct" },
+      { source:"BioRad_QSB",    val:0.025, u:"pct" },
+    ],
+    biorad_dc: [
+      { source:"BioRad_DC",     val:10, u:"pct" },
+    ],
+    esi: [
+      { source:"Donnelly_2019",   val:1.3, u:"uM", note:"direct SC50 titration (~0.00004 wt%)" },
+      { source:"Harvard_saltbuf", val:0.335, u:"mM", note:"0.01 wt% — agrees with Donnelly (~0.00004 wt%) order of magnitude but ~260\u00d7 more permissive" },
+    ],
+    maldi: [
+      { source:"KU_SCB",          val:0.35, u:"mM", note:"0.01 wt%" },
+      { source:"Harvard_saltbuf", val:0.35, u:"mM", note:"0.01 wt%, agrees with KU" },
+    ],
+  },
+
+  // ─── Triton X-100 ───
+  triton_x100: {
+    bca: [
+      { source:"Pierce_TR0068", val:5, u:"pct" },
+      { source:"Sigma_B9643",   val:5, u:"pct" },
+    ],
+    bradford: [
+      { source:"Pierce_TR0068", val:0.0625, u:"pct" },
+      { source:"BioRad_QSB",    val:0.05,   u:"pct" },
+    ],
+    biorad_dc: [
+      { source:"BioRad_DC",     val:1, u:"pct" },
+    ],
+    esi: [
+      { source:"Donnelly_2019",   val:0.04, u:"pct", note:"Donnelly SC50 = 600 \u00b5M = ~0.04 wt% (MW 647)" },
+      { source:"Harvard_saltbuf", val:0.1,  u:"pct", note:"more permissive than Donnelly (~2.5\u00d7)" },
+    ],
+    maldi: [
+      { source:"KU_SCB",          val:0.1, u:"pct", note:"1.7 mM" },
+      { source:"Harvard_saltbuf", val:0.1, u:"pct", note:"1.6 mM, agrees with KU" },
+    ],
+  },
+
+  // ─── Tween 20 ───
+  tween20: {
+    bca: [
+      { source:"Pierce_TR0068", val:5, u:"pct" },
+      { source:"Sigma_B9643",   val:5, u:"pct" },
+    ],
+    bradford: [
+      { source:"Pierce_TR0068", val:0.031, u:"pct" },
+      { source:"BioRad_QSB",    val:0.01,  u:"pct" },
+    ],
+    biorad_dc: [
+      { source:"BioRad_DC",     val:1, u:"pct" },
+    ],
+    esi: [
+      { source:"Donnelly_2019",   val:0.0002, u:"pct", note:"Donnelly SC50 = 1.7 \u00b5M (MW 1228)" },
+      { source:"Harvard_saltbuf", val:0.1,    u:"pct", note:"DISAGREES with Donnelly by ~500\u00d7 — Harvard cites Ogorzalek (Protein Sci 1994), Donnelly direct titration" },
+    ],
+  },
+
+  // ─── Glycerol ───
+  glycerol: {
+    bca: [
+      { source:"Pierce_TR0068", val:10, u:"pct" },
+      { source:"Sigma_B9643",   val:10, u:"pct" },
+    ],
+    bradford: [
+      { source:"Pierce_TR0068", val:10, u:"pct" },
+      { source:"BioRad_QSB",    val:5,  u:"pct" },
+    ],
+    maldi: [
+      { source:"KU_SCB",          val:130, u:"mM", note:"1.2 wt%" },
+      { source:"Harvard_saltbuf", val:130, u:"mM", note:"1.2 wt%, agrees with KU" },
+      { source:"UNM",             val:0,                  note:"UNM categorically refuses glycerol (\"PEG-like, dominates spectrum\")" },
+    ],
+  },
+
+  // ─── DTT ───
+  dtt: {
+    bca: [
+      { source:"Pierce_TR0068", val:1, u:"mM" },
+      { source:"Sigma_B9643",   val:1, u:"mM" },
+    ],
+    bradford: [
+      { source:"Pierce_TR0068", val:5,  u:"mM" },
+      { source:"BioRad_QSB",    val:10, u:"mM" },
+    ],
+    biorad_dc: [
+      { source:"BioRad_DC",     val:1, u:"mM" },
+    ],
+    maldi: [
+      { source:"Harvard_saltbuf", val:500, u:"mM", note:"7.7 wt% per Gevaert 1998 ABRF — very permissive" },
+    ],
+  },
+
+  // ─── BME (2-mercaptoethanol) ───
+  bme: {
+    bca: [
+      { source:"Pierce_TR0068", val:0.01, u:"pct", note:"~1.4 mM equivalent" },
+      { source:"Sigma_B9643",   val:1,    u:"mM",  note:"~0.007 wt% equivalent — agrees with Pierce within ~2\u00d7" },
+    ],
+    bradford: [
+      { source:"Pierce_TR0068", val:1, u:"M" },
+      { source:"BioRad_QSB",    val:1, u:"M" },
+    ],
+    biorad_dc: [
+      { source:"BioRad_DC",     val:0,        note:"vendor explicitly: INCOMPATIBLE" },
+    ],
+  },
+
+  // ─── EDTA ───
+  edta: {
+    bca: [
+      { source:"Pierce_TR0068", val:10, u:"mM" },
+      { source:"Sigma_B9643",   val:10, u:"mM", note:"Sigma also flags chelators >10 mM as broadly problematic for BCA" },
+    ],
+    bradford: [
+      { source:"Pierce_TR0068", val:100, u:"mM" },
+      { source:"BioRad_QSB",    val:200, u:"mM" },
+    ],
+    biorad_dc: [
+      { source:"BioRad_DC",     val:25, u:"mM" },
+    ],
+  },
+
+  // ─── Cobalt chloride — KNOWN DISAGREEMENT ───
+  cocl2: {
+    bca: [
+      { source:"Pierce_TR0068", val:0.8, u:"mM", note:"Pierce reports 0.8 mM as max compatible" },
+      { source:"Sigma_B9643",   val:0.8, u:"M",  note:"Sigma's published value (0.8 M) is 1000\u00d7 higher than Pierce's — likely a typo in one of the two source PDFs; recommend the Pierce value for safety" },
+    ],
+  },
+
+  // ─── CHAPS ───
+  chaps: {
+    bca: [
+      { source:"Pierce_TR0068", val:5, u:"pct" },
+      { source:"Sigma_B9643",   val:5, u:"pct" },
+    ],
+    bradford: [
+      { source:"Pierce_TR0068", val:5,  u:"pct" },
+      { source:"BioRad_QSB",    val:10, u:"pct" },
+    ],
+    biorad_dc: [
+      { source:"BioRad_DC",     val:1,  u:"pct" },
+    ],
+    maldi: [
+      { source:"KU_SCB",          val:0.01, u:"pct", note:"0.16 mM" },
+      { source:"Harvard_saltbuf", val:0.01, u:"pct", note:"0.16 mM, agrees with KU" },
+    ],
+    esi: [
+      { source:"Harvard_saltbuf", val:0.1, u:"pct", note:"1.6 mM per Ogorzalek 1994" },
+    ],
+  },
 };
 
 var COMPAT_SYNONYMS = {
-  "tris-hcl":"tris", "tris hcl":"tris", "tris hydroxymethyl":"tris",
-  "np-40":"np40", "nonidet p-40":"np40", "nonidet":"np40",
-  "triton x 100":"triton_x100", "triton-x-100":"triton_x100", "triton":"triton_x100",
-  "tween-20":"tween20", "tween 20":"tween20",
-  "tween-80":"tween80", "tween 80":"tween80",
-  "sodium dodecyl sulfate":"sds",
-  "na-doc":"doc", "na doc":"doc", "deoxycholate":"doc", "sodium deoxycholate":"doc",
+  // Buffers (Good's buffers)
+  "tris-hcl":"tris", "tris hcl":"tris", "tris hydroxymethyl":"tris", "tris base":"tris", "trizma":"tris",
+  "hepes":"hepes", "n-2-hydroxyethylpiperazine":"hepes",
+  "mes":"mes", "2-morpholinoethanesulfonic":"mes",
+  "mops":"mops", "3-morpholinopropanesulfonic":"mops",
+  "pipes":"pipes", "piperazine-n,n":"pipes",
+  "bicine":"bicine",
+  "bis-tris":"bis_tris", "bis tris":"bis_tris", "bistris":"bis_tris",
+  "tricine":"tricine",
+  "ches":"ches",
+  "epps":"epps", "hepps":"epps",
+  "aces":"aces",
+  "borate":"borate", "boric acid":"borate", "sodium borate":"borate",
+  "imidazole":"imidazole",
+  "triethanolamine":"triethanolamine", "tea":"triethanolamine",
+  // Acids/bases
+  "hydrochloric acid":"hcl", "hcl":"hcl",
+  "naoh":"naoh", "sodium hydroxide":"naoh",
+  "formic acid":"formic_acid", "fa":"formic_acid", "hcooh":"formic_acid",
+  "acetic acid":"acetic_acid",
+  "trifluoroacetic acid":"tfa", "tfa":"tfa",
+  "ascorbic acid":"ascorbic_acid", "vitamin c":"ascorbic_acid", "ascorbate":"ascorbic_acid",
+  // Detergents
+  "np-40":"np40", "nonidet p-40":"np40", "nonidet":"np40", "igepal":"np40",
+  "triton x 100":"triton_x100", "triton-x-100":"triton_x100", "triton":"triton_x100", "tritonx100":"triton_x100",
+  "triton x-114":"triton_x114", "triton-x-114":"triton_x114",
+  "triton x-305":"triton_x305", "triton-x-305":"triton_x305",
+  "triton x-405":"triton_x405", "triton-x-405":"triton_x405",
+  "tween-20":"tween20", "tween 20":"tween20", "polysorbate 20":"tween20",
+  "tween-60":"tween60", "tween 60":"tween60",
+  "tween-80":"tween80", "tween 80":"tween80", "polysorbate 80":"tween80",
+  "span 20":"span20", "span-20":"span20",
+  "brij-35":"brij35", "brij 35":"brij35", "brij35":"brij35",
+  "brij-56":"brij56", "brij 56":"brij56",
+  "brij-58":"brij58", "brij 58":"brij58",
+  "sodium dodecyl sulfate":"sds", "sds":"sds",
+  "na-doc":"doc", "na doc":"doc", "deoxycholate":"doc", "sodium deoxycholate":"doc", "doc":"doc",
+  "chaps":"chaps", "3-[(3-cholamidopropyl)dimethylammonio]-1-propanesulfonate":"chaps",
+  "chapso":"chapso",
+  "asb-14":"asb14", "asb 14":"asb14", "amidosulfobetaine":"asb14",
+  "sb 3-10":"sb310", "sb3-10":"sb310", "sb-3-10":"sb310",
+  "zwittergent 3-14":"zwittergent314", "zwittergent3-14":"zwittergent314", "zwittergent":"zwittergent314",
+  "octyl beta-glucoside":"octyl_glucoside", "octyl-beta-glucoside":"octyl_glucoside", "octyl glucoside":"octyl_glucoside", "og":"octyl_glucoside",
+  "n-octyl-beta-d-glucopyranoside":"octyl_glucoside",
+  "octylthioglucoside":"octyl_thiogluco", "octyl thioglucopyranoside":"octyl_thiogluco", "octyl-thioglucopyranoside":"octyl_thiogluco",
+  "ddm":"ddm", "dodecyl maltoside":"ddm", "n-dodecyl-beta-d-maltoside":"ddm",
+  "c12e8":"c12e8", "octaethyleneglycol":"c12e8",
+  "thesit":"thesit",
+  "cetylpyridinium chloride":"cetylpyridinium", "cpc":"cetylpyridinium",
+  "ctab":"ctab", "cetyltrimethylammonium bromide":"ctab",
+  "dtab":"dtab", "dodecyltrimethylammonium bromide":"dtab",
+  // Reducing agents
   "beta-mercaptoethanol":"bme", "beta mercaptoethanol":"bme",
   "2-mercaptoethanol":"bme", "2 mercaptoethanol":"bme", "mercaptoethanol":"bme",
-  "\u03b2-mercaptoethanol":"bme", "\u03b2-me":"bme", "b-me":"bme", "\u03b2me":"bme", "bme":"bme",
-  "dithiothreitol":"dtt", "cleland":"dtt",
-  "tris(2-carboxyethyl)phosphine":"tcep",
-  "na2-edta":"edta", "edta-na2":"edta", "edta na":"edta",
-  "sodium chloride":"nacl", "salt":"nacl",
-  "potassium chloride":"kcl",
-  "sodium phosphate buffer":"sodium_phosphate", "phosphate":"sodium_phosphate",
-  "gdn-hcl":"guanidine", "gdncl":"guanidine", "guanidinium":"guanidine", "gdn":"guanidine",
-  "na-azide":"sodium_azide", "naazide":"sodium_azide", "azide":"sodium_azide", "nan3":"sodium_azide",
-  "ammonium sulphate":"ammonium_sulfate", "(nh4)2so4":"ammonium_sulfate",
+  "\u03b2-mercaptoethanol":"bme", "\u03b2-me":"bme", "b-me":"bme", "\u03b2me":"bme", "bme":"bme", "2-me":"bme",
+  "dithiothreitol":"dtt", "cleland":"dtt", "dtt":"dtt",
+  "dithioerythritol":"dte", "dte":"dte",
+  "tris(2-carboxyethyl)phosphine":"tcep", "tcep":"tcep", "tcep-hcl":"tcep",
+  "tributylphosphine":"tbp", "tbp":"tbp",
+  "sodium borohydride":"hydrides", "nabh4":"hydrides", "sodium cyanoborohydride":"hydrides", "nacnbh3":"hydrides", "hydrides":"hydrides",
+  // Chelators
+  "na2-edta":"edta", "edta-na2":"edta", "edta na":"edta", "ethylenediaminetetraacetic":"edta", "edta":"edta",
+  "egta":"egta", "ethylene glycol tetraacetic":"egta",
+  // Salts
+  "sodium chloride":"nacl", "salt":"nacl", "nacl":"nacl",
+  "potassium chloride":"kcl", "kcl":"kcl",
+  "sodium acetate":"na_acetate", "na-acetate":"na_acetate", "naoac":"na_acetate",
+  "sodium bicarbonate":"na_bicarbonate", "nahco3":"na_bicarbonate", "baking soda":"na_bicarbonate",
+  "sodium carbonate":"na_carbonate", "na2co3":"na_carbonate",
+  "sodium citrate":"na_citrate", "na-citrate":"na_citrate", "trisodium citrate":"na_citrate",
+  "sodium phosphate buffer":"na_phosphate", "phosphate":"na_phosphate", "phosphate buffer":"na_phosphate", "sodium phosphate":"na_phosphate", "na-phosphate":"na_phosphate",
+  "potassium phosphate":"k_phosphate", "k-phosphate":"k_phosphate", "kpi":"k_phosphate",
+  "pbs":"pbs", "phosphate-buffered saline":"pbs", "phosphate buffered saline":"pbs", "dulbecco":"pbs",
+  "tbs":"tbs", "tris-buffered saline":"tbs", "tris buffered saline":"tbs",
+  "ammonium sulphate":"ammonium_sulfate", "(nh4)2so4":"ammonium_sulfate", "ammonium sulfate":"ammonium_sulfate",
+  "ammonium acetate":"ammonium_acetate", "nh4ac":"ammonium_acetate", "nh4oac":"ammonium_acetate", "amac":"ammonium_acetate", "ammonium-acetate":"ammonium_acetate",
+  "ammonium bicarbonate":"ammonium_bicarbonate", "abc":"ammonium_bicarbonate", "nh4hco3":"ammonium_bicarbonate", "ambic":"ammonium_bicarbonate",
+  "calcium chloride":"cacl2", "cacl2":"cacl2", "cacl":"cacl2",
+  "magnesium chloride":"mgcl2", "mgcl2":"mgcl2", "mgcl":"mgcl2",
+  "cesium bicarbonate":"cesium_bicarb", "cscarb":"cesium_bicarb",
+  "cobalt chloride":"cocl2", "cocl2":"cocl2",
+  "ferric chloride":"fecl3", "fecl3":"fecl3", "iron chloride":"fecl3",
+  "nickel chloride":"nicl2", "nicl2":"nicl2",
+  "zinc chloride":"zncl2", "zncl2":"zncl2",
+  "sodium orthovanadate":"na_orthovanadate", "orthovanadate":"na_orthovanadate", "na3vo4":"na_orthovanadate",
+  "potassium thiocyanate":"k_thiocyanate", "kscn":"k_thiocyanate",
+  "na-azide":"sodium_azide", "naazide":"sodium_azide", "azide":"sodium_azide", "nan3":"sodium_azide", "sodium azide":"sodium_azide",
+  "thimerosal":"thimerosal", "merthiolate":"thimerosal",
+  // Denaturants
+  "urea":"urea",
+  "gdn-hcl":"guanidine", "gdncl":"guanidine", "guanidinium":"guanidine", "gdn":"guanidine", "guanidine hydrochloride":"guanidine", "gdn hcl":"guanidine", "guhcl":"guanidine",
+  "thiourea":"thiourea",
+  // Amino acids
+  "asparagine":"asparagine", "asn":"asparagine",
+  "glycine":"glycine", "gly":"glycine",
+  "histidine":"histidine", "his":"histidine", "l-histidine":"histidine",
+  "cysteine":"cysteine", "cys":"cysteine", "l-cysteine":"cysteine",
+  "glutathione":"glutathione_red", "reduced glutathione":"glutathione_red", "gsh":"glutathione_red",
+  // Sugars/polyols
+  "glucose":"glucose", "dextrose":"glucose",
+  "glycerol":"glycerol", "glycerine":"glycerol",
+  "sucrose":"sucrose",
+  "mannitol":"mannitol",
+  "melibiose":"melibiose",
+  "n-acetylglucosamine":"n_acetylglucosamine", "glcnac":"n_acetylglucosamine",
+  // Solvents
+  "acetone":"acetone",
+  "acetonitrile":"acetonitrile", "acn":"acetonitrile", "mecn":"acetonitrile",
+  "ethanol":"ethanol", "etoh":"ethanol",
+  "methanol":"methanol", "meoh":"methanol",
+  "dmf":"dmf", "dimethylformamide":"dmf", "n,n-dimethylformamide":"dmf",
+  "dimethyl sulfoxide":"dmso", "dmso":"dmso",
+  // Protease inhibitors
+  "aprotinin":"aprotinin",
+  "leupeptin":"leupeptin",
+  "pmsf":"pmsf", "phenylmethanesulfonyl fluoride":"pmsf", "phenylmethylsulfonyl":"pmsf",
+  "tlck":"tlck", "tosyl-l-lysyl-chloromethane":"tlck",
+  "tpck":"tpck", "tosyl-l-phenylalanyl-chloromethane":"tpck",
+  // Dyes
+  "bromophenol blue":"bromophenol_blue", "bpb":"bromophenol_blue",
+  "phenol red":"phenol_red", "phenolsulfonphthalein":"phenol_red",
+  // Vendor lysis reagents
+  "b-per":"bper", "bper":"bper",
+  "i-per":"iper", "iper":"iper",
+  "m-per":"mper", "mper":"mper",
+  "t-per":"tper", "tper":"tper",
+  "y-per":"yper", "yper":"yper",
+  "ripa":"ripa", "ripa buffer":"ripa",
+  "laemmli":"laemmli", "laemmli buffer":"laemmli", "sds sample buffer":"laemmli", "loading buffer":"laemmli",
 };
 
-// All 7 assays. Lower-detection-limit (lod) used for protein-conc warning
-// when the analyst dilutes. Values from each assay's published linear range.
-var COMPAT_ASSAYS = [
-  { id:"bca",        display:"BCA",                  pn:"P/N 23225",         lodUgMl: 20,  ref:"Pierce BCA Protein Assay Kit" },
-  { id:"bcaRac",     display:"BCA-RAC",              pn:"P/N 23250",         lodUgMl: 20,  ref:"Pierce BCA, Reducing Agent Compatible" },
-  { id:"microBca",   display:"Micro BCA",            pn:"P/N 23235",         lodUgMl: 0.5, ref:"Pierce Micro BCA Protein Assay" },
-  { id:"p660",       display:"660 nm",               pn:"P/N 22660",         lodUgMl: 50,  ref:"Pierce 660 nm Protein Assay" },
-  { id:"bradford",   display:"Coomassie Plus",       pn:"P/N 23236",         lodUgMl: 1,   ref:"Pierce Coomassie Plus (Bradford)" },
-  { id:"coomassie",  display:"Coomassie Regular",    pn:"P/N 23200",         lodUgMl: 25,  ref:"Pierce Coomassie Regular Protein Assay" },
-  { id:"lowry",      display:"Modified Lowry",       pn:"P/N 23240",         lodUgMl: 1,   ref:"Pierce Modified Lowry Protein Assay" },
-];
+// Assay families: protein assays vs MS modes.
+// COMPAT_MODES has the per-mode assay arrays + display metadata.
+var COMPAT_MODES = {
+  protein: {
+    label: "Protein assay",
+    sublabel: "BCA, Bradford, 660 nm, Lowry, etc.",
+    description: "Check buffer compatibility with colorimetric/fluorometric protein quantification assays.",
+    assays: [
+      { id:"bca",        display:"BCA (Pierce)",         pn:"P/N 23225",         lodUgMl: 20,  ref:"Pierce BCA Protein Assay Kit" },
+      { id:"bcaRac",     display:"BCA-RAC (Pierce)",     pn:"P/N 23250",         lodUgMl: 20,  ref:"Pierce BCA, Reducing Agent Compatible" },
+      { id:"microBca",   display:"Micro BCA (Pierce)",   pn:"P/N 23235",         lodUgMl: 0.5, ref:"Pierce Micro BCA Protein Assay" },
+      { id:"p660",       display:"660 nm (Pierce)",      pn:"P/N 22660",         lodUgMl: 50,  ref:"Pierce 660 nm Protein Assay" },
+      { id:"bradford",   display:"Coomassie Plus (Pierce)", pn:"P/N 23236",      lodUgMl: 1,   ref:"Pierce Coomassie Plus (Bradford)" },
+      { id:"coomassie",  display:"Coomassie Reg (Pierce)", pn:"P/N 23200",       lodUgMl: 25,  ref:"Pierce Coomassie Regular Protein Assay" },
+      { id:"lowry",      display:"Mod Lowry (Pierce)",   pn:"P/N 23240",         lodUgMl: 1,   ref:"Pierce Modified Lowry Protein Assay" },
+      { id:"bradQSB",    display:"Quick Start Bradford (Bio-Rad)", pn:"#500-0201", lodUgMl: 125, ref:"Bio-Rad Quick Start Bradford" },
+      { id:"biorad_dc",  display:"DC Protein Assay (Bio-Rad)", pn:"#500-0111",   lodUgMl: 200, ref:"Bio-Rad DC (Lowry-style, detergent-compatible)" },
+    ],
+    defaultEnabled: {bca:true, bcaRac:true, microBca:true, p660:true, bradford:true, coomassie:false, lowry:false, bradQSB:true, biorad_dc:false},
+    showLOD: true,  // Show protein-concentration + LOD logic in dilution explorer
+    defaultBuffer: "50 mM Tris pH 7.4\n150 mM NaCl\n1% Triton X-100\n10 mM DTT\n1 mM EDTA",
+  },
+  ms: {
+    label: "Mass spec",
+    sublabel: "ESI, nano-ESI, MALDI",
+    description: "Check buffer compatibility with mass spectrometry ionization. ESI is highly sensitive to nonvolatile salts and detergents; MALDI is more tolerant but still affected.",
+    assays: [
+      { id:"esi",         display:"ESI (direct infusion)", pn:"~1 \u00b5L/min", ref:"Donnelly et al. Nat Methods 2019" },
+      { id:"nanoEsi",     display:"Nano-ESI",              pn:"<1 \u00b5L/min", ref:"Karas et al. Fresenius J Anal Chem 2000" },
+      { id:"maldi",       display:"MALDI (protein/peptide)", pn:"intact MS",     ref:"KU SCB MALDI table; Cohen & Chait 1996" },
+      { id:"maldiScreen", display:"MALDI (screening)",     pn:"throughput",     ref:"Beverly et al. 2017 MALDI screening study" },
+    ],
+    defaultEnabled: {esi:true, nanoEsi:true, maldi:true, maldiScreen:true},
+    showLOD: false,  // MS doesn't have an LOD in the same way; suppression is the concern
+    defaultBuffer: "20 mM Tris pH 7.4\n100 mM NaCl\n1 mM EDTA\n0.1% NP-40",
+  },
+};
 
 function compatNormalizeUnit(u) {
   u = (u || "").toLowerCase().replace(/\s+/g, "");
@@ -14095,8 +15033,12 @@ function compatNormalizeUnit(u) {
   if (u === "mm") return "mM";
   if (u === "m") return "M";
   if (u === "um" || u === "\u00b5m") return "uM";
+  if (u === "nm") return "nM";
   if (u === "mg/ml") return "mg_ml";
   if (u === "ug/ml" || u === "\u00b5g/ml") return "ug_ml";
+  if (u === "mg/l") return "mg_L";
+  if (u === "g/l") return "g_L";
+  if (u === "ng/ml" || u === "ng/\u00b5l") return "ng_ml";
   return u;
 }
 
@@ -14124,11 +15066,13 @@ function compatParseLine(raw) {
   line = line.replace(/\bph\s*\d+(\.\d+)?/g, "").trim();
   line = line.replace(/[,\.]+$/, "").trim();
   var m, val=null, unit=null, name=null;
-  m = line.match(/^([\d.]+)\s*(%|mm|m|mg\/ml|\u00b5m|um|ug\/ml)\s+(.+)$/i);
+  // Match "<value> <unit> <name>" pattern  
+  m = line.match(/^([\d.]+)\s*(%|mm|m|nm|mg\/ml|mg\/l|g\/l|ng\/ml|\u00b5m|um|\u00b5g\/ml|ug\/ml)\s+(.+)$/i);
   if (m) {
     val = parseFloat(m[1]); unit = compatNormalizeUnit(m[2]); name = m[3].trim();
   } else {
-    m = line.match(/^(.+?)\s*[,:]?\s+([\d.]+)\s*(%|mm|m|mg\/ml|\u00b5m|um|ug\/ml)$/i);
+    // Match "<name> <value> <unit>" pattern
+    m = line.match(/^(.+?)\s*[,:]?\s+([\d.]+)\s*(%|mm|m|nm|mg\/ml|mg\/l|g\/l|ng\/ml|\u00b5m|um|\u00b5g\/ml|ug\/ml)$/i);
     if (m) { name = m[1].trim(); val = parseFloat(m[2]); unit = compatNormalizeUnit(m[3]); }
   }
   if (!name || val == null || !unit) return { error: "unparseable", raw: raw };
@@ -14140,17 +15084,61 @@ function compatParseLine(raw) {
 function compatFmtConc(v, u) {
   if (u === "pct")    return v + "%";
   if (u === "mM")     return v + " mM";
+  if (u === "uM")     return v + " \u00b5M";
+  if (u === "nM")     return v + " nM";
   if (u === "M")      return v + " M";
   if (u === "mg_ml")  return v + " mg/mL";
   if (u === "ug_ml")  return v + " \u00b5g/mL";
+  if (u === "ng_ml")  return v + " ng/mL";
+  if (u === "mg_L")   return v + " mg/L";
+  if (u === "g_L")    return v + " g/L";
+  if (u === "undil")  return "neat (undiluted)";
   return v + " " + u;
 }
 
 function compatConvert(val, fromU, toU) {
   if (fromU === toU) return val;
-  if (fromU === "mM" && toU === "M") return val / 1000;
-  if (fromU === "M" && toU === "mM") return val * 1000;
-  if (fromU === "pct" && toU === "pct") return val;
+  // Molar conversions
+  if (fromU === "mM" && toU === "M")   return val / 1000;
+  if (fromU === "M"  && toU === "mM")  return val * 1000;
+  if (fromU === "uM" && toU === "mM")  return val / 1000;
+  if (fromU === "mM" && toU === "uM")  return val * 1000;
+  if (fromU === "uM" && toU === "M")   return val / 1000000;
+  if (fromU === "M"  && toU === "uM")  return val * 1000000;
+  if (fromU === "nM" && toU === "uM")  return val / 1000;
+  if (fromU === "uM" && toU === "nM")  return val * 1000;
+  if (fromU === "nM" && toU === "mM")  return val / 1000000;
+  if (fromU === "mM" && toU === "nM")  return val * 1000000;
+  // Mass concentration conversions
+  if (fromU === "mg_ml" && toU === "ug_ml") return val * 1000;
+  if (fromU === "ug_ml" && toU === "mg_ml") return val / 1000;
+  if (fromU === "ng_ml" && toU === "ug_ml") return val / 1000;
+  if (fromU === "ug_ml" && toU === "ng_ml") return val * 1000;
+  if (fromU === "mg_L"  && toU === "ug_ml") return val;        // mg/L === ug/mL
+  if (fromU === "ug_ml" && toU === "mg_L")  return val;
+  if (fromU === "mg_L"  && toU === "mg_ml") return val / 1000;
+  if (fromU === "mg_ml" && toU === "mg_L")  return val * 1000;
+  if (fromU === "g_L"   && toU === "mg_ml") return val;        // g/L === mg/mL
+  if (fromU === "mg_ml" && toU === "g_L")   return val;
+  // Same-class shortcuts
+  if (fromU === "pct"  && toU === "pct") return val;
+  // Undiluted (vendor "neet") is special: the substance is reported as
+  // tolerable at full strength. If the user is adding a substance at any
+  // fractional amount, compare numerically — but we treat the "undil" value
+  // 1.0 as "full undiluted strength". Otherwise we can't convert.
+  if (toU === "undil") {
+    // Vendor reports the substance is tolerated at full undiluted ("neet")
+    // strength. Any concentration the user adds is necessarily <= full
+    // strength (because they can't add it at >100% of itself). For "%"
+    // inputs, normalize to a fraction-of-full-strength: a value of 100%
+    // = full strength = 1.0. So "5% RIPA" = 0.05 of full strength, and
+    // compared against limit.val=1.0 it passes comfortably.
+    if (fromU === "pct") return val / 100;
+    // Other units we can't convert to a fraction-of-substance without
+    // knowing the substance's normal concentration. Return null and let
+    // the verdict fall through to "na".
+    return null;
+  }
   return null;
 }
 
@@ -14183,17 +15171,154 @@ function compatRollup(componentResults) {
   return { status: "ok", reason: "all components within limits" };
 }
 
+// ─── Cross-source disagreement detection ─────────────────────────────────
+// Looks up multiple published values for a (substance, assay) pair and
+// returns a normalized comparison + a severity flag.
+//
+// Severity ladder:
+//   "agree"     — all sources within 2× of each other
+//   "minor"     — max/min ratio in 2×..5× range
+//   "major"     — max/min ratio > 5×
+//   "conflict"  — one source says val:0 (incompatible), another publishes
+//                 a non-zero numeric limit
+//   "single"    — only one source available; nothing to compare against
+//   "none"      — no sources at all
+var COMPAT_SOURCE_LABELS = {
+  Pierce_TR0068:   { label: "Pierce TR0068",                short: "Pierce",     url: "https://tools.thermofisher.com/content/sfs/brochures/TR0068-Protein-assay-compatibility.pdf" },
+  Sigma_B9643:     { label: "Sigma B9643 BCA bulletin",     short: "Sigma",      url: "https://www.sigmaaldrich.com/deepweb/assets/sigmaaldrich/product/documents/691/059/b9643bul.pdf" },
+  BioRad_QSB:      { label: "Bio-Rad Quick Start Bradford", short: "Bio-Rad QSB",url: "https://www.bio-rad.com/webroot/web/pdf/lsr/literature/4110065A.pdf" },
+  BioRad_DC:       { label: "Bio-Rad DC LIT448",            short: "Bio-Rad DC", url: "https://www.bio-rad.com/webroot/web/pdf/lsr/literature/LIT448.pdf" },
+  Donnelly_2019:   { label: "Donnelly Nat Methods 2019",    short: "Donnelly",   url: "https://www.nature.com/articles/s41592-019-0457-0" },
+  Harvard_saltbuf: { label: "Harvard Mass Spec Facility",   short: "Harvard",    url: "https://massspec.fas.harvard.edu/sites/g/files/omnuum7301/files/smms/files/saltbuffer.pdf" },
+  KU_SCB:          { label: "KU SCB Core Facility",         short: "KU",         url: "https://scb.ku.edu/maldi-sample-requirements" },
+  UNM:             { label: "UNM MS Facility (qualitative)",short: "UNM",        url: "https://massspec.unm.edu/pdfs/SAMPLE%20PREPARATION%20GUIDE.pdf" },
+};
+
+function compatDetectDisagreement(substanceKey, assayId) {
+  var entry = COMPAT_CROSS_REF[substanceKey];
+  if (!entry) return { severity: "none" };
+  var sources = entry[assayId];
+  if (!sources || sources.length === 0) return { severity: "none" };
+  if (sources.length === 1) return { severity: "single", sources: sources };
+
+  // Detect structural conflict: any zero values mixed with non-zero
+  var hasZero = false, hasNonzero = false;
+  for (var i = 0; i < sources.length; i++) {
+    if (sources[i].val === 0) hasZero = true;
+    else if (typeof sources[i].val === "number" && sources[i].val > 0) hasNonzero = true;
+  }
+  if (hasZero && hasNonzero) return { severity: "conflict", sources: sources };
+
+  // Compare numeric values after unit normalization. Pick a target unit
+  // (the first source's unit) and convert everything else into it.
+  var ref = sources[0];
+  var refUnit = ref.u;
+  var convVals = [];
+  for (var j = 0; j < sources.length; j++) {
+    var s = sources[j];
+    if (typeof s.val !== "number" || s.val === 0) continue;
+    if (s.u === refUnit) {
+      convVals.push(s.val);
+    } else {
+      var c = compatConvert(s.val, s.u, refUnit);
+      if (c != null) convVals.push(c);
+      else {
+        // Can't convert — bail out as a "single" comparison
+        return { severity: "incomparable", sources: sources, note: "unit conversion not possible between " + s.u + " and " + refUnit };
+      }
+    }
+  }
+  if (convVals.length < 2) return { severity: "single", sources: sources };
+  var minV = Math.min.apply(null, convVals);
+  var maxV = Math.max.apply(null, convVals);
+  var ratio = maxV / minV;
+  var severity = ratio <= 2 ? "agree" : ratio <= 5 ? "minor" : "major";
+  return { severity: severity, sources: sources, ratio: ratio, minV: minV, maxV: maxV, refUnit: refUnit };
+}
+
+// Find all (substance, assay) pairs in COMPAT_CROSS_REF that have any
+// disagreement worse than "agree". Returns a flat array sorted by severity.
+function compatAllDisagreements() {
+  var SEV_ORDER = { conflict: 0, major: 1, minor: 2, incomparable: 3, single: 4, agree: 5, none: 6 };
+  var out = [];
+  for (var sub in COMPAT_CROSS_REF) {
+    var entry = COMPAT_CROSS_REF[sub];
+    for (var assay in entry) {
+      var d = compatDetectDisagreement(sub, assay);
+      if (d.severity === "agree" || d.severity === "single" || d.severity === "none") continue;
+      out.push({
+        substance: sub,
+        substanceLabel: (COMPAT_DATA[sub] && COMPAT_DATA[sub].display) || sub,
+        assay: assay,
+        severity: d.severity,
+        sources: d.sources,
+        ratio: d.ratio,
+        minV: d.minV,
+        maxV: d.maxV,
+        refUnit: d.refUnit,
+        note: d.note,
+      });
+    }
+  }
+  out.sort(function(a, b) { return SEV_ORDER[a.severity] - SEV_ORDER[b.severity]; });
+  return out;
+}
+
 function CompatibilityTool(props) {
-  var defaultBuffer = "50 mM Tris pH 7.4\n150 mM NaCl\n1% Triton X-100\n10 mM DTT\n1 mM EDTA";
-  var _bt = useState(defaultBuffer), bufferText = _bt[0], setBufferText = _bt[1];
+  var _mode = useState("protein"), mode = _mode[0], setMode = _mode[1];
+  var modeConfig = COMPAT_MODES[mode];
+  var _bt = useState(modeConfig.defaultBuffer), bufferText = _bt[0], setBufferText = _bt[1];
   var _co = useState([]),            components = _co[0], setComponents = _co[1];
   var _pl = useState([]),            parseLog   = _pl[0], setParseLog   = _pl[1];
   var _dl = useState(1),             dilution   = _dl[0], setDilution   = _dl[1];
   var _pc = useState(""),            proteinConc = _pc[0], setProteinConc = _pc[1];
-  var _enab = useState({bca:true,bcaRac:true,microBca:true,p660:true,bradford:true,coomassie:false,lowry:false}),
+  var _enab = useState(COMPAT_MODES.protein.defaultEnabled),
       enabledAssays = _enab[0], setEnabledAssays = _enab[1];
   var _opened = useState(null),      openedDrill = _opened[0], setOpenedDrill = _opened[1];
-  var _infoTab = useState(null),     infoTab = _infoTab[0], setInfoTab = _infoTab[1];  // null | "how" | "refs" | "limits"
+  var _infoTab = useState(null),     infoTab = _infoTab[0], setInfoTab = _infoTab[1];  // null | "how" | "refs" | "limits" | "xref"
+
+  // ── Budget Lookup state (reverse-direction query: "I know the assay, show me
+  //    the budgets") — see Mode A / B / C in the design mockup.
+  var _budgetOpen = useState(false),       budgetOpen = _budgetOpen[0], setBudgetOpen = _budgetOpen[1];
+  var _budgetView = useState("grid"),      budgetView = _budgetView[0], setBudgetView = _budgetView[1];   // "byAssay" | "bySubstance" | "grid"
+  var _budgetSubs = useState([]),          budgetSubs = _budgetSubs[0], setBudgetSubs = _budgetSubs[1];   // array of substance keys
+  var _budgetAssays = useState([]),        budgetAssays = _budgetAssays[0], setBudgetAssays = _budgetAssays[1];  // array of assay IDs
+  var _budgetSearch = useState(""),        budgetSearch = _budgetSearch[0], setBudgetSearch = _budgetSearch[1];  // autocomplete text
+  // Initialize defaults once the mode is known (run on mount + when mode changes)
+  useEffect(function() {
+    if (budgetSubs.length === 0 && budgetAssays.length === 0) {
+      // Sensible defaults: 5 common substances, 5 common assays for the current mode
+      var defaultSubs = ["edta", "dtt", "tris", "nacl", "triton_x100"];
+      setBudgetSubs(defaultSubs);
+      var defaultAssayList = mode === "protein"
+        ? ["bca", "bcaRac", "bradford", "bradQSB", "biorad_dc"]
+        : ["esi", "nanoEsi", "maldi"];
+      setBudgetAssays(defaultAssayList);
+    }
+  }, []);
+  // When mode changes, reset assay selection to that mode's defaults
+  useEffect(function() {
+    var defaultAssayList = mode === "protein"
+      ? ["bca", "bcaRac", "bradford", "bradQSB", "biorad_dc"]
+      : ["esi", "nanoEsi", "maldi"];
+    setBudgetAssays(defaultAssayList);
+  }, [mode]);
+
+  // When mode changes, swap to that mode's defaults (default-enabled assays, fresh dilution, etc.)
+  // But preserve the user's typed buffer text if they've already entered one — only swap if they
+  // haven't customized.
+  var switchMode = function(newMode) {
+    if (newMode === mode) return;
+    setMode(newMode);
+    setEnabledAssays(COMPAT_MODES[newMode].defaultEnabled);
+    setOpenedDrill(null);
+    setDilution(1);
+    // Heuristic: if the user is still on the previous mode's default buffer, swap to the new
+    // default. Otherwise, keep what they typed.
+    if (bufferText === COMPAT_MODES[mode].defaultBuffer) {
+      setBufferText(COMPAT_MODES[newMode].defaultBuffer);
+    }
+  };
 
   var parseAndCheck = function() {
     var text = bufferText || "";
@@ -14217,10 +15342,10 @@ function CompatibilityTool(props) {
     setParseLog(newLog);
   };
 
-  // Auto-parse on first render so the default buffer shows results immediately.
-  useEffect(function(){ parseAndCheck(); }, []);
+  // Auto-parse on first render and when mode changes so default-buffer always populates the grid.
+  useEffect(function(){ parseAndCheck(); }, [mode]);
 
-  var visibleAssays = COMPAT_ASSAYS.filter(function(a){return enabledAssays[a.id];});
+  var visibleAssays = modeConfig.assays.filter(function(a){return enabledAssays[a.id];});
 
   // Compute verdicts per visible assay at the CURRENT dilution
   var assayResults = visibleAssays.map(function(a){
@@ -14282,10 +15407,22 @@ function CompatibilityTool(props) {
       <PageHeader instructor={props.instructor} setInstructor={props.setInstructor} onBack={props.onBack} workspaceLabel="Compatibility" />
       <div style={{padding:"1.25rem 16px 0"}}>
 
-        {/* Intro — single line, lean */}
+        {/* Intro — single line, lean. Adjusts copy based on mode. */}
         <div style={{background:"#fff",border:"1px solid #e5edf7",borderRadius:14,padding:"16px 22px",marginBottom:14}}>
           <div style={{fontSize:18,fontWeight:800,color:"#0b2a6f",marginBottom:2,letterSpacing:-0.3}}>Check your buffer before you commit to an assay</div>
-          <p style={{fontSize:12,color:"#6f7fa0",lineHeight:1.55,margin:0}}>Some buffer components silently kill protein assays. Enter your sample buffer; the tool checks each component against published interference thresholds.</p>
+          <p style={{fontSize:12,color:"#6f7fa0",lineHeight:1.55,margin:0}}>{modeConfig.description}</p>
+        </div>
+
+        {/* Mode picker — Protein assay vs Mass spec */}
+        <div style={{display:"flex",gap:6,background:"#eef3f8",borderRadius:14,padding:5,border:"1px solid #e2e9f2",marginBottom:14}}>
+          {Object.keys(COMPAT_MODES).map(function(modeKey){
+            var m = COMPAT_MODES[modeKey];
+            var isActive = mode === modeKey;
+            return <button key={modeKey} onClick={function(){switchMode(modeKey);}} style={{flex:1,padding:"10px 14px",fontSize:12,fontWeight:600,cursor:"pointer",background:isActive?"#fff":"transparent",color:isActive?"#0b2a6f":"#4a5568",border:"none",borderRadius:10,textAlign:"center",fontFamily:"inherit",boxShadow:isActive?"0 4px 14px rgba(11,42,111,0.10)":"none",borderBottom:isActive?"3px solid #139cb6":"none"}}>
+              <div style={{fontWeight:isActive?700:600}}>{m.label}</div>
+              <div style={{fontSize:10,color:isActive?"#5a6984":"#8e9bb5",fontWeight:500,marginTop:2}}>{m.sublabel}</div>
+            </button>;
+          })}
         </div>
 
         {/* Buffer entry */}
@@ -14326,7 +15463,7 @@ function CompatibilityTool(props) {
         <div style={{background:"#fff",border:"1px solid #e5edf7",borderRadius:14,padding:"14px 20px",marginBottom:14}}>
           <div style={{fontSize:11,fontWeight:700,color:"#8e9bb5",letterSpacing:1.2,textTransform:"uppercase",marginBottom:8}}>Show assays in grid</div>
           <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
-            {COMPAT_ASSAYS.map(function(a){
+            {modeConfig.assays.map(function(a){
               var on = !!enabledAssays[a.id];
               return <label key={a.id} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"5px 10px",border:"1px solid "+(on?"#0b2a6f":"#e5edf7"),background:on?"#f7fbff":"#fff",borderRadius:8,fontSize:11,fontWeight:600,color:on?"#0b2a6f":"#5a6984",cursor:"pointer",userSelect:"none"}}>
                 <input type="checkbox" checked={on} onChange={function(){
@@ -14402,11 +15539,13 @@ function CompatibilityTool(props) {
             <input type="range" min="1" max="200" value={dilution} onChange={function(e){setDilution(parseInt(e.target.value));}} style={{flex:1,minWidth:200,accentColor:"#6337b9"}} />
             <div style={{fontFamily:"monospace",fontSize:14,fontWeight:700,color:"#4a2d8f",padding:"4px 10px",background:"#fff",borderRadius:6,border:"1px solid #d4bce8",minWidth:60,textAlign:"center"}}>1:{dilution}</div>
           </div>
-          <div style={{display:"flex",gap:14,alignItems:"center",flexWrap:"wrap",marginBottom:10}}>
-            <label style={{fontSize:11,color:"#4a2d8f",fontWeight:600,minWidth:120}}>Expected protein:</label>
-            <input type="number" step="0.1" min="0" placeholder="e.g. 1.5" value={proteinConc} onChange={function(e){setProteinConc(e.target.value);}} style={{width:90,padding:"5px 8px",border:"1px solid #d4bce8",borderRadius:6,fontFamily:"monospace",fontSize:12,background:"#fff"}} />
-            <span style={{fontSize:11,color:"#6f5a96"}}>mg/mL in the undiluted sample</span>
-          </div>
+          {modeConfig.showLOD && (
+            <div style={{display:"flex",gap:14,alignItems:"center",flexWrap:"wrap",marginBottom:10}}>
+              <label style={{fontSize:11,color:"#4a2d8f",fontWeight:600,minWidth:120}}>Expected protein:</label>
+              <input type="number" step="0.1" min="0" placeholder="e.g. 1.5" value={proteinConc} onChange={function(e){setProteinConc(e.target.value);}} style={{width:90,padding:"5px 8px",border:"1px solid #d4bce8",borderRadius:6,fontFamily:"monospace",fontSize:12,background:"#fff"}} />
+              <span style={{fontSize:11,color:"#6f5a96"}}>mg/mL in the undiluted sample</span>
+            </div>
+          )}
 
           {/* At this dilution: per-assay status — also clarifying what "pass" means here */}
           {components.length > 0 && (
@@ -14424,8 +15563,8 @@ function CompatibilityTool(props) {
             </div>
           )}
 
-          {/* Protein-side status */}
-          {effProtein != null && (
+          {/* Protein-side status (only in protein-assay mode) */}
+          {modeConfig.showLOD && effProtein != null && (
             <div style={{padding:"10px 12px",background:effProtein<10?"#fef7f7":"#e1f5ee",border:"1px solid "+(effProtein<10?"#f0c8c8":"#b8e0cd"),borderRadius:8,fontSize:11,lineHeight:1.6,marginTop:6,color:effProtein<10?"#7a3328":"#0a4d3c"}}>
               <strong>Protein at 1:{dilution}:</strong> {effProtein.toFixed(1)} {"\u00b5"}g/mL.
               {assaysBelowLOD.length > 0 && <span> Below lower detection limit for: <strong>{assaysBelowLOD.map(function(a){return a.display+" (LOD "+a.lodUgMl+" "+"\u00b5"+"g/mL)";}).join(", ")}</strong>. Even if buffer is compatible, signal will be unreliable.</span>}
@@ -14434,10 +15573,17 @@ function CompatibilityTool(props) {
             </div>
           )}
 
-          {/* Trust band — the headline answer */}
-          {effProtein != null && trustingAssays.length > 0 && (
+          {/* Trust band (only in protein-assay mode where LOD logic applies) */}
+          {modeConfig.showLOD && effProtein != null && trustingAssays.length > 0 && (
             <div style={{padding:"10px 12px",background:"#f0f9f4",border:"1px solid #b8e0cd",borderRadius:8,fontSize:11,lineHeight:1.6,marginTop:6,color:"#0a4d3c"}}>
               <strong>{"\u2713"} Likely to trust at 1:{dilution}:</strong> {trustingAssays.join(", ")} (buffer passes, protein well above LOD).
+            </div>
+          )}
+
+          {/* MS-specific note for the dilution explorer — different concern than LOD */}
+          {!modeConfig.showLOD && components.length > 0 && dilution > 1 && (
+            <div style={{padding:"10px 12px",background:"#f0f4fc",border:"1px solid #bcd1ed",borderRadius:8,fontSize:11,lineHeight:1.6,marginTop:6,color:"#0b2a6f"}}>
+              <strong>Note for MS:</strong> diluting reduces interferent concentration, but also reduces your analyte signal. Direct-infusion ESI typically needs ~1{"\u00b5"}M+ analyte; nano-ESI tolerates lower. For nonvolatile salts, dilution often isn't enough — buffer exchange into volatile salt (ammonium acetate or ammonium bicarbonate) via MWCO ultrafiltration or chromatography (LC-MS) is the usual fix.
             </div>
           )}
 
@@ -14449,10 +15595,447 @@ function CompatibilityTool(props) {
           )}
         </div>
 
+        {/* ─────────────────────────────────────────────────────────────
+           Budget Lookup — reverse-direction query
+           ───────────────────────────────────────────────────────────── */}
+        <div style={{background:"#fff",border:"1px solid #e5edf7",borderRadius:12,marginTop:14,marginBottom:14}}>
+          <div onClick={function(){setBudgetOpen(!budgetOpen);}}
+               style={{padding:"12px 16px",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between",borderBottom:budgetOpen?"1px solid #eef3f8":"none"}}>
+            <div>
+              <div style={{fontSize:13,fontWeight:700,color:"#0b2a6f"}}>Looking it up the other way?</div>
+              <div style={{fontSize:11,color:"#5a6984",marginTop:2,lineHeight:1.5}}>If you know the assay (not the sample), or want to tell a collaborator how much interferent they can include {"\u2014"} use this section to query the same data in reverse.</div>
+            </div>
+            <div style={{fontSize:18,color:"#5a6984",marginLeft:14,userSelect:"none"}}>{budgetOpen ? "\u2212" : "+"}</div>
+          </div>
+
+          {budgetOpen && (() => {
+            // Helper: compute the color band for a cell based on relative tightness within its column.
+            // Most permissive in the column = green, most restrictive = red, others scale.
+            var colorFor = function(val, allValsInColumn) {
+              if (val == null || val === 0) return { bg:"#f4f6fb", fg:"#8e9bb5" };
+              var valid = allValsInColumn.filter(function(v){ return v != null && v > 0; });
+              if (valid.length < 2) return { bg:"#e9f5ee", fg:"#1a6e3a" };
+              var maxV = Math.max.apply(null, valid);
+              var minV = Math.min.apply(null, valid);
+              if (maxV === minV) return { bg:"#e9f5ee", fg:"#1a6e3a" };
+              var logV = Math.log10(val);
+              var logMax = Math.log10(maxV);
+              var logMin = Math.log10(minV);
+              var frac = (logV - logMin) / (logMax - logMin);
+              if (frac >= 0.66) return { bg:"#e9f5ee", fg:"#1a6e3a" };  // top third = permissive
+              if (frac >= 0.33) return { bg:"#fff5d6", fg:"#8a6f1a" };  // middle = moderate
+              return { bg:"#fbe5e3", fg:"#b4332e" };                     // bottom third = tight
+            };
+            // Get the assay metadata for the current mode
+            var availableAssays = COMPAT_MODES[mode].assays;
+            // Helper: get a comparable numeric value for a (substance, assay) pair.
+            // Picks the unit common across the column and converts everything to it.
+            var getValAndUnit = function(subKey, assayId) {
+              var sub = COMPAT_DATA[subKey];
+              if (!sub) return null;
+              var lim = sub[assayId];
+              if (lim == null) return null;
+              if (lim.val === 0) return { val: 0, u: lim.u || "", incompat: true };
+              return { val: lim.val, u: lim.u || "" };
+            };
+            // For coloring, normalize each column to a single unit by converting
+            // values where possible. If a value's unit can't be converted to the
+            // chosen unit, exclude it from the min/max comparison but still display.
+            var columnVals = {};
+            budgetAssays.forEach(function(aid) {
+              var firstUnit = null;
+              var vals = [];
+              budgetSubs.forEach(function(skey) {
+                var v = getValAndUnit(skey, aid);
+                if (!v || v.incompat) return;
+                if (!firstUnit) firstUnit = v.u;
+                if (v.u === firstUnit) {
+                  vals.push(v.val);
+                } else {
+                  var conv = compatConvert(v.val, v.u, firstUnit);
+                  if (conv != null) vals.push(conv);
+                }
+              });
+              columnVals[aid] = { unit: firstUnit, vals: vals };
+            });
+
+            // Substance picker: searchable autocomplete
+            var allSubKeys = Object.keys(COMPAT_DATA);
+            var searchLower = budgetSearch.toLowerCase().trim();
+            var matchingSubs = searchLower
+              ? allSubKeys.filter(function(k) {
+                  if (budgetSubs.indexOf(k) !== -1) return false;
+                  var disp = (COMPAT_DATA[k].display || "").toLowerCase();
+                  if (disp.indexOf(searchLower) !== -1) return true;
+                  if (k.indexOf(searchLower) !== -1) return true;
+                  for (var syn in COMPAT_SYNONYMS) {
+                    if (COMPAT_SYNONYMS[syn] === k && syn.indexOf(searchLower) !== -1) return true;
+                  }
+                  return false;
+                }).slice(0, 8)
+              : [];
+
+            // Tab styling
+            var tabBtn = function(id, label) {
+              var active = budgetView === id;
+              return (
+                <button onClick={function(){ setBudgetView(id); }}
+                        style={{padding:"6px 12px",fontSize:11,fontWeight:600,color:active?"#fff":"#5a6984",
+                                background:active?"#6337b9":"#f4f6fb",border:"1px solid "+(active?"#6337b9":"#dfe7f2"),
+                                borderRadius:18,cursor:"pointer",fontFamily:"inherit"}}>{label}</button>
+              );
+            };
+
+            // Pill for selected substance/assay (removable)
+            var selectedPill = function(label, onRemove, color) {
+              return (
+                <span key={label} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"4px 4px 4px 10px",
+                                          fontSize:11,fontWeight:600,color:color||"#0b2a6f",background:"#f0eaf9",
+                                          border:"1px solid #d4bce8",borderRadius:14,marginRight:6,marginBottom:4}}>
+                  {label}
+                  <span onClick={onRemove} style={{cursor:"pointer",color:"#8e9bb5",fontSize:14,lineHeight:1,
+                                                    width:18,height:18,display:"inline-flex",alignItems:"center",justifyContent:"center",
+                                                    borderRadius:"50%",userSelect:"none"}}>{"\u00d7"}</span>
+                </span>
+              );
+            };
+
+            return (
+              <div style={{padding:"14px 16px"}}>
+                {/* View tabs */}
+                <div style={{display:"flex",gap:6,marginBottom:12,flexWrap:"wrap"}}>
+                  {tabBtn("byAssay",     "By assay \u2192 substances")}
+                  {tabBtn("bySubstance", "By substance \u2192 assays")}
+                  {tabBtn("grid",        "Grid view")}
+                </div>
+
+                {/* Substance picker (used by Grid + By Assay) */}
+                {(budgetView === "grid" || budgetView === "byAssay") && (
+                  <div style={{marginBottom:12}}>
+                    <div style={{fontSize:10.5,fontWeight:600,color:"#5a6984",textTransform:"uppercase",letterSpacing:0.4,marginBottom:6}}>
+                      Substances{budgetView==="byAssay"?" (rows)":""}
+                    </div>
+                    <div style={{marginBottom:6}}>
+                      {budgetSubs.map(function(k) {
+                        return selectedPill(
+                          (COMPAT_DATA[k] && COMPAT_DATA[k].display) || k,
+                          function() { setBudgetSubs(budgetSubs.filter(function(x){return x!==k;})); }
+                        );
+                      })}
+                    </div>
+                    <div style={{position:"relative"}}>
+                      <input type="text" value={budgetSearch}
+                             onChange={function(e){setBudgetSearch(e.target.value);}}
+                             placeholder="Add substance: type Tris, EDTA, SDS, …"
+                             style={{width:"100%",padding:"7px 10px",fontSize:12,border:"1px solid #dfe7f2",
+                                     borderRadius:8,fontFamily:"inherit",color:"#0b2a6f",outline:"none"}} />
+                      {matchingSubs.length > 0 && (
+                        <div style={{position:"absolute",top:"100%",left:0,right:0,marginTop:4,background:"#fff",
+                                     border:"1px solid #dfe7f2",borderRadius:8,boxShadow:"0 4px 12px rgba(11,42,111,0.08)",
+                                     zIndex:10,maxHeight:280,overflowY:"auto"}}>
+                          {matchingSubs.map(function(k) {
+                            return (
+                              <div key={k} onClick={function(){
+                                     setBudgetSubs(budgetSubs.concat([k]));
+                                     setBudgetSearch("");
+                                   }}
+                                   style={{padding:"7px 10px",fontSize:12,color:"#0b2a6f",cursor:"pointer",borderBottom:"1px solid #f0f4fa"}}
+                                   onMouseEnter={function(e){e.currentTarget.style.background="#f7fbff";}}
+                                   onMouseLeave={function(e){e.currentTarget.style.background="#fff";}}>
+                                {(COMPAT_DATA[k] && COMPAT_DATA[k].display) || k}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Assay picker (used by Grid + By Substance) */}
+                {(budgetView === "grid" || budgetView === "bySubstance") && (
+                  <div style={{marginBottom:14}}>
+                    <div style={{fontSize:10.5,fontWeight:600,color:"#5a6984",textTransform:"uppercase",letterSpacing:0.4,marginBottom:6}}>
+                      Assays{budgetView==="grid"?" (columns)":""}
+                    </div>
+                    <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+                      {availableAssays.map(function(a) {
+                        var selected = budgetAssays.indexOf(a.id) !== -1;
+                        return (
+                          <button key={a.id} onClick={function() {
+                            if (selected) {
+                              setBudgetAssays(budgetAssays.filter(function(x){return x!==a.id;}));
+                            } else {
+                              setBudgetAssays(budgetAssays.concat([a.id]));
+                            }
+                          }} style={{padding:"5px 10px",fontSize:11,fontWeight:600,
+                                     color:selected?"#fff":"#5a6984",
+                                     background:selected?"#6337b9":"#f4f6fb",
+                                     border:"1px solid "+(selected?"#6337b9":"#dfe7f2"),
+                                     borderRadius:14,cursor:"pointer",fontFamily:"inherit"}}>
+                            {a.display}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* ── GRID VIEW (Mode C) ── */}
+                {budgetView === "grid" && (
+                  <div>
+                    {budgetSubs.length === 0 || budgetAssays.length === 0 ? (
+                      <div style={{padding:"24px",textAlign:"center",fontSize:12,color:"#8e9bb5",fontStyle:"italic",background:"#f9fafd",borderRadius:8}}>
+                        Pick at least one substance and one assay to build the grid.
+                      </div>
+                    ) : (
+                      <div style={{overflowX:"auto"}}>
+                        <table style={{width:"100%",borderCollapse:"collapse",fontSize:11.5}}>
+                          <thead>
+                            <tr>
+                              <th style={{textAlign:"left",padding:"8px 10px",fontSize:10,fontWeight:700,
+                                          color:"#5a6984",textTransform:"uppercase",letterSpacing:0.4,
+                                          borderBottom:"1px solid #dfe7f2",background:"#f9fafd"}}>
+                                Substance
+                              </th>
+                              {budgetAssays.map(function(aid) {
+                                var assay = availableAssays.filter(function(a){return a.id===aid;})[0];
+                                return (
+                                  <th key={aid} onClick={function(){ setBudgetView("byAssay"); setBudgetAssays([aid]); }}
+                                      style={{textAlign:"center",padding:"8px 10px",fontSize:10,fontWeight:700,
+                                              color:"#0b2a6f",borderBottom:"1px solid #dfe7f2",background:"#f9fafd",
+                                              cursor:"pointer",minWidth:90}}
+                                      title="Click to see all substances for this assay">
+                                    {assay ? assay.display : aid}
+                                  </th>
+                                );
+                              })}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {budgetSubs.map(function(skey) {
+                              var sub = COMPAT_DATA[skey];
+                              if (!sub) return null;
+                              return (
+                                <tr key={skey}>
+                                  <td onClick={function(){ setBudgetView("bySubstance"); setBudgetSubs([skey]); }}
+                                      style={{padding:"8px 10px",fontWeight:600,color:"#0b2a6f",
+                                              borderBottom:"1px solid #eef3f8",cursor:"pointer"}}
+                                      title="Click to see all assays for this substance">
+                                    {sub.display}
+                                  </td>
+                                  {budgetAssays.map(function(aid) {
+                                    var lim = sub[aid];
+                                    var colData = columnVals[aid] || { unit: null, vals: [] };
+                                    var color = { bg:"#f4f6fb", fg:"#8e9bb5" };
+                                    var displayText = "\u2014";
+                                    if (lim == null) {
+                                      displayText = "\u2014";
+                                    } else if (lim.val === 0) {
+                                      color = { bg:"#fbe5e3", fg:"#b4332e" };
+                                      displayText = "incompat.";
+                                    } else {
+                                      // Convert this cell's value to the column's reference unit for color comparison
+                                      var compareVal = lim.val;
+                                      if (colData.unit && lim.u !== colData.unit) {
+                                        var conv = compatConvert(lim.val, lim.u, colData.unit);
+                                        if (conv != null) compareVal = conv;
+                                      }
+                                      color = colorFor(compareVal, colData.vals);
+                                      displayText = compatFmtConc(lim.val, lim.u);
+                                    }
+                                    // Check for cross-source disagreement on this pair
+                                    var xref = compatDetectDisagreement(skey, aid);
+                                    var hasDisagreement = xref.severity === "major" || xref.severity === "conflict";
+                                    return (
+                                      <td key={aid} style={{padding:"6px",borderBottom:"1px solid #eef3f8",textAlign:"center"}}>
+                                        <div style={{display:"inline-block",padding:"4px 8px",borderRadius:6,
+                                                     fontFamily:"ui-monospace, monospace",fontSize:10.5,
+                                                     background:color.bg,color:color.fg,fontWeight:600,
+                                                     position:"relative"}}
+                                             title={hasDisagreement ? "Cross-source disagreement \u2014 see Cross-source tab" : ""}>
+                                          {displayText}
+                                          {hasDisagreement && (
+                                            <span style={{position:"absolute",top:-4,right:-4,
+                                                          background:"#bf7a1a",color:"#fff",borderRadius:"50%",
+                                                          width:12,height:12,fontSize:8,fontWeight:700,
+                                                          display:"flex",alignItems:"center",justifyContent:"center",
+                                                          border:"1px solid #fff"}}>!</span>
+                                          )}
+                                        </div>
+                                      </td>
+                                    );
+                                  })}
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                        <div style={{fontSize:10,color:"#8e9bb5",marginTop:10,lineHeight:1.6,paddingTop:8,borderTop:"1px dashed #eef3f8"}}>
+                          <strong style={{color:"#5a6984"}}>Reading the grid:</strong> Each cell shows the maximum published concentration of that substance compatible with that assay. <span style={{display:"inline-block",padding:"1px 6px",background:"#e9f5ee",color:"#1a6e3a",borderRadius:3,fontFamily:"ui-monospace, monospace",fontSize:9}}>green</span> = most permissive in the column, <span style={{display:"inline-block",padding:"1px 6px",background:"#fff5d6",color:"#8a6f1a",borderRadius:3,fontFamily:"ui-monospace, monospace",fontSize:9}}>yellow</span> = middle, <span style={{display:"inline-block",padding:"1px 6px",background:"#fbe5e3",color:"#b4332e",borderRadius:3,fontFamily:"ui-monospace, monospace",fontSize:9}}>red</span> = tightest, <span style={{color:"#8e9bb5"}}>{"\u2014"}</span> = no published value. The orange "!" marker flags substances where sources disagree by more than 5{"\u00d7"}. Click any row label to switch to substance-focused view; click any column header to switch to assay-focused view.
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* ── BY ASSAY VIEW (Mode A) ── */}
+                {budgetView === "byAssay" && (
+                  <div>
+                    {budgetAssays.length !== 1 ? (
+                      <div style={{padding:"14px",fontSize:12,color:"#8e9bb5",fontStyle:"italic",background:"#f9fafd",borderRadius:8,textAlign:"center"}}>
+                        Select exactly one assay to see all substances and their budgets for it.
+                      </div>
+                    ) : (() => {
+                      var aid = budgetAssays[0];
+                      var assay = availableAssays.filter(function(a){return a.id===aid;})[0];
+                      if (!assay) return null;
+                      // Compile all substances with a published value for this assay, sorted by ascending tolerance (tightest first)
+                      var rows = [];
+                      Object.keys(COMPAT_DATA).forEach(function(skey) {
+                        var sub = COMPAT_DATA[skey];
+                        var lim = sub[aid];
+                        if (lim == null) return;
+                        rows.push({ key: skey, sub: sub, lim: lim });
+                      });
+                      // Sort: incompat first, then by value ascending (after normalizing to a common unit family where possible)
+                      rows.sort(function(a, b) {
+                        if (a.lim.val === 0 && b.lim.val !== 0) return -1;
+                        if (b.lim.val === 0 && a.lim.val !== 0) return 1;
+                        // Crude: just sort by raw val (units mixed). Could improve with grouping by unit family.
+                        return a.lim.val - b.lim.val;
+                      });
+                      return (
+                        <div>
+                          <div style={{marginBottom:10,padding:"10px 12px",background:"#f4f0fb",border:"1px solid #e0d4f2",borderRadius:8,fontSize:11.5,color:"#5a3a8a"}}>
+                            <strong>{assay.display}</strong> {assay.pn ? "\u00b7 "+assay.pn : ""} {"\u2014 "}<span style={{color:"#5a6984"}}>budgets for {rows.length} substances with published data</span>
+                          </div>
+                          <div style={{maxHeight:480,overflowY:"auto",border:"1px solid #eef3f8",borderRadius:8}}>
+                            <table style={{width:"100%",borderCollapse:"collapse",fontSize:11.5}}>
+                              <thead>
+                                <tr>
+                                  <th style={{textAlign:"left",padding:"8px 10px",fontSize:10,fontWeight:700,color:"#5a6984",textTransform:"uppercase",letterSpacing:0.4,borderBottom:"1px solid #dfe7f2",background:"#f9fafd",position:"sticky",top:0}}>Substance</th>
+                                  <th style={{textAlign:"left",padding:"8px 10px",fontSize:10,fontWeight:700,color:"#5a6984",textTransform:"uppercase",letterSpacing:0.4,borderBottom:"1px solid #dfe7f2",background:"#f9fafd",position:"sticky",top:0}}>Max compatible</th>
+                                  <th style={{textAlign:"left",padding:"8px 10px",fontSize:10,fontWeight:700,color:"#5a6984",textTransform:"uppercase",letterSpacing:0.4,borderBottom:"1px solid #dfe7f2",background:"#f9fafd",position:"sticky",top:0}}>Cross-source</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {rows.map(function(r, i) {
+                                  var xref = compatDetectDisagreement(r.key, aid);
+                                  var hasMajor = xref.severity === "major" || xref.severity === "conflict";
+                                  var hasMinor = xref.severity === "minor";
+                                  return (
+                                    <tr key={r.key} style={{background:i%2?"#fafbfd":"#fff"}}>
+                                      <td style={{padding:"7px 10px",fontWeight:600,color:"#0b2a6f"}}>{r.sub.display}</td>
+                                      <td style={{padding:"7px 10px",fontFamily:"ui-monospace, monospace",
+                                                  color: r.lim.val === 0 ? "#b4332e" : "#0b2a6f"}}>
+                                        {r.lim.val === 0 ? "incompatible at any conc." : compatFmtConc(r.lim.val, r.lim.u)}
+                                      </td>
+                                      <td style={{padding:"7px 10px",fontSize:10,color:"#5a6984"}}>
+                                        {hasMajor && <span style={{color:"#bf7a1a",fontWeight:600}}>{"\u26a0"} disputed</span>}
+                                        {hasMinor && <span style={{color:"#8a6f1a"}}>minor variance</span>}
+                                        {!hasMajor && !hasMinor && (xref.sources && xref.sources.length > 1) && <span>{xref.sources.length} sources agree</span>}
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      );
+                    })()}
+                  </div>
+                )}
+
+                {/* ── BY SUBSTANCE VIEW (Mode B) ── */}
+                {budgetView === "bySubstance" && (
+                  <div>
+                    {budgetSubs.length !== 1 ? (
+                      <div style={{padding:"14px",fontSize:12,color:"#8e9bb5",fontStyle:"italic",background:"#f9fafd",borderRadius:8,textAlign:"center"}}>
+                        Select exactly one substance to see which assays handle it best.
+                      </div>
+                    ) : (() => {
+                      var skey = budgetSubs[0];
+                      var sub = COMPAT_DATA[skey];
+                      if (!sub) return null;
+                      var proteinRows = [];
+                      var msRows = [];
+                      COMPAT_MODES.protein.assays.forEach(function(a) {
+                        var lim = sub[a.id];
+                        if (lim != null) proteinRows.push({ assay: a, lim: lim });
+                      });
+                      COMPAT_MODES.ms.assays.forEach(function(a) {
+                        var lim = sub[a.id];
+                        if (lim != null) msRows.push({ assay: a, lim: lim });
+                      });
+                      // Sort by descending tolerance (most permissive first)
+                      var sorter = function(a, b) {
+                        if (a.lim.val === 0 && b.lim.val !== 0) return 1;
+                        if (b.lim.val === 0 && a.lim.val !== 0) return -1;
+                        return b.lim.val - a.lim.val;
+                      };
+                      proteinRows.sort(sorter);
+                      msRows.sort(sorter);
+
+                      var renderRows = function(rows, sectionLabel) {
+                        if (rows.length === 0) return null;
+                        return (
+                          <div style={{marginBottom:14}}>
+                            <div style={{fontSize:10,fontWeight:700,color:"#5a3a8a",textTransform:"uppercase",letterSpacing:0.4,marginBottom:6}}>{sectionLabel}</div>
+                            <table style={{width:"100%",borderCollapse:"collapse",fontSize:11.5}}>
+                              <thead>
+                                <tr>
+                                  <th style={{textAlign:"left",padding:"7px 10px",fontSize:10,fontWeight:700,color:"#5a6984",textTransform:"uppercase",letterSpacing:0.4,borderBottom:"1px solid #dfe7f2",background:"#f9fafd"}}>Assay</th>
+                                  <th style={{textAlign:"left",padding:"7px 10px",fontSize:10,fontWeight:700,color:"#5a6984",textTransform:"uppercase",letterSpacing:0.4,borderBottom:"1px solid #dfe7f2",background:"#f9fafd"}}>Max {sub.display}</th>
+                                  <th style={{textAlign:"left",padding:"7px 10px",fontSize:10,fontWeight:700,color:"#5a6984",textTransform:"uppercase",letterSpacing:0.4,borderBottom:"1px solid #dfe7f2",background:"#f9fafd"}}>Note</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {rows.map(function(r, i) {
+                                  var xref = compatDetectDisagreement(skey, r.assay.id);
+                                  var disagrees = xref.severity === "major" || xref.severity === "conflict";
+                                  return (
+                                    <tr key={r.assay.id} style={{background:i%2?"#fafbfd":"#fff"}}>
+                                      <td style={{padding:"7px 10px",fontWeight:600,color:"#0b2a6f"}}>{r.assay.display}</td>
+                                      <td style={{padding:"7px 10px",fontFamily:"ui-monospace, monospace",color: r.lim.val === 0 ? "#b4332e" : (i === 0 ? "#1a6e3a" : "#0b2a6f"),fontWeight:i===0?700:400}}>
+                                        {r.lim.val === 0 ? "incompatible" : compatFmtConc(r.lim.val, r.lim.u)}
+                                      </td>
+                                      <td style={{padding:"7px 10px",fontSize:10,color:"#5a6984",fontStyle:"italic"}}>
+                                        {i === 0 && r.lim.val !== 0 && "most permissive choice"}
+                                        {disagrees && (i !== 0 || r.lim.val === 0) && <span style={{color:"#bf7a1a"}}>{"\u26a0"} sources disagree</span>}
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
+                          </div>
+                        );
+                      };
+                      return (
+                        <div>
+                          <div style={{marginBottom:12,padding:"10px 12px",background:"#f4f0fb",border:"1px solid #e0d4f2",borderRadius:8,fontSize:11.5,color:"#5a3a8a"}}>
+                            <strong>{sub.display}</strong> {"\u2014 "}<span style={{color:"#5a6984"}}>tolerances across {proteinRows.length + msRows.length} assays with published data</span>
+                          </div>
+                          {renderRows(proteinRows, "Protein assays")}
+                          {renderRows(msRows, "Mass spec")}
+                        </div>
+                      );
+                    })()}
+                  </div>
+                )}
+
+              </div>
+            );
+          })()}
+        </div>
+
         {/* Collapsible "How this works · References · Limitations" strip */}
         <div style={{background:"#fff",border:"1px solid #e5edf7",borderRadius:12,marginBottom:0}}>
-          <div style={{display:"flex",alignItems:"center",justifyContent:"flex-start",gap:4,padding:"8px 12px",borderBottom:infoTab?"1px solid #eef3f8":"none"}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"flex-start",gap:4,padding:"8px 12px",borderBottom:infoTab?"1px solid #eef3f8":"none",flexWrap:"wrap"}}>
             {infoTabBtn("how",    "\u24d8 How this works")}
+            {infoTabBtn("xref",   "Cross-source")}
             {infoTabBtn("refs",   "References")}
             {infoTabBtn("limits", "Limitations")}
           </div>
@@ -14461,32 +16044,159 @@ function CompatibilityTool(props) {
               For each component you enter, the tool looks up the maximum compatible concentration for each assay from published vendor data. <strong>Pass</strong> means your concentration is at most half the limit (comfortable margin). <strong>Caution</strong> means you're within 2{"\u00d7"} of the limit (functional but borderline). <strong>Fail</strong> means you exceed the limit. The "what-if dilution" section divides every component's concentration by the dilution factor and re-runs the check, plus checks whether your protein stays above each assay's lower detection limit.
             </div>
           )}
+          {infoTab === "xref" && (() => {
+            var disagreements = compatAllDisagreements();
+            var conflicts = disagreements.filter(function(d){return d.severity==="conflict";});
+            var majors    = disagreements.filter(function(d){return d.severity==="major";});
+            var minors    = disagreements.filter(function(d){return d.severity==="minor";});
+            var incomp    = disagreements.filter(function(d){return d.severity==="incomparable";});
+            var totalXrefPairs = 0;
+            for (var k in COMPAT_CROSS_REF) {
+              for (var a in COMPAT_CROSS_REF[k]) totalXrefPairs++;
+            }
+            var severityStyles = {
+              conflict:     { bg:"#fef2f1", border:"#f5d4d1", text:"#b4332e", label:"Structural conflict"  },
+              major:        { bg:"#fef6ed", border:"#f5dbc1", text:"#bf7a1a", label:"Major disagreement"   },
+              minor:        { bg:"#fffaeb", border:"#f0e3b6", text:"#8a6f1a", label:"Minor disagreement"   },
+              incomparable: { bg:"#f4f6fb", border:"#dfe7f2", text:"#5a6984", label:"Incomparable units"   },
+            };
+            var rowFor = function(d, i) {
+              var sty = severityStyles[d.severity] || severityStyles.minor;
+              var assayLabel = (function() {
+                var modes = ["protein","ms"];
+                for (var mi=0;mi<modes.length;mi++) {
+                  var assays = COMPAT_MODES[modes[mi]].assays;
+                  for (var ai=0;ai<assays.length;ai++) if (assays[ai].id===d.assay) return assays[ai].display;
+                }
+                return d.assay;
+              })();
+              return (
+                <div key={i} style={{background:sty.bg,border:"1px solid "+sty.border,borderRadius:8,padding:"10px 12px",marginBottom:8}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:4}}>
+                    <div style={{fontWeight:700,color:"#0b2a6f",fontSize:12}}>
+                      {d.substanceLabel} <span style={{color:"#5a6984",fontWeight:500}}>· {assayLabel}</span>
+                    </div>
+                    <div style={{fontSize:10,fontWeight:700,color:sty.text,textTransform:"uppercase",letterSpacing:0.5}}>
+                      {sty.label}{d.ratio?" \u00b7 "+d.ratio.toFixed(1)+"\u00d7 spread":""}
+                    </div>
+                  </div>
+                  <div style={{fontSize:11,color:"#5a6984",lineHeight:1.6}}>
+                    {d.sources.map(function(s, si) {
+                      var lab = COMPAT_SOURCE_LABELS[s.source] || { short: s.source };
+                      var valDisplay = (s.val === 0) ? "incompatible at any conc." : compatFmtConc(s.val, s.u);
+                      return (
+                        <div key={si} style={{marginBottom:2}}>
+                          <strong style={{color:"#0b2a6f"}}>{lab.short}:</strong> {valDisplay}
+                          {s.note ? <span style={{color:"#8e9bb5",fontStyle:"italic"}}> \u2014 {s.note}</span> : null}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            };
+            return (
+              <div style={{padding:"12px 18px",fontSize:11,color:"#5a6984",lineHeight:1.6}}>
+                <div style={{fontSize:11,marginBottom:10,padding:"8px 10px",background:"#f4f6fb",border:"1px solid #dfe7f2",borderRadius:8}}>
+                  <strong style={{color:"#0b2a6f"}}>What this is.</strong> When the same substance has been measured by multiple sources, the tool compares them and surfaces disagreements. Vendor compatibility tables are not always consistent with each other or with academic measurements; this view lets you see where to be skeptical. Currently cross-referencing <strong>{totalXrefPairs} substance\u00d7assay pairs</strong> across <strong>{Object.keys(COMPAT_SOURCE_LABELS).length} sources</strong>.
+                </div>
+                {conflicts.length > 0 && (
+                  <div style={{marginBottom:14}}>
+                    <div style={{fontSize:11,fontWeight:700,color:"#b4332e",marginBottom:6}}>Structural conflicts ({conflicts.length})</div>
+                    <div style={{fontSize:10,color:"#8e9bb5",marginBottom:6,fontStyle:"italic"}}>One source declares the substance incompatible at any concentration; another publishes a usable limit. Treat the vendor that knows their own reagent best as primary.</div>
+                    {conflicts.map(rowFor)}
+                  </div>
+                )}
+                {majors.length > 0 && (
+                  <div style={{marginBottom:14}}>
+                    <div style={{fontSize:11,fontWeight:700,color:"#bf7a1a",marginBottom:6}}>Major disagreements ({majors.length})</div>
+                    <div style={{fontSize:10,color:"#8e9bb5",marginBottom:6,fontStyle:"italic"}}>Sources disagree by more than 5{"\u00d7"}. Likely different conditions, different analytes, or one source has a typo. The most permissive value is rarely the right one to trust for a borderline case.</div>
+                    {majors.map(rowFor)}
+                  </div>
+                )}
+                {minors.length > 0 && (
+                  <div style={{marginBottom:14}}>
+                    <div style={{fontSize:11,fontWeight:700,color:"#8a6f1a",marginBottom:6}}>Minor disagreements ({minors.length})</div>
+                    <div style={{fontSize:10,color:"#8e9bb5",marginBottom:6,fontStyle:"italic"}}>Sources disagree by 2{"\u2013"}5{"\u00d7"}. Usually reflects different protein standards, instrument generations, or matrix choices. Default to the more conservative value.</div>
+                    {minors.map(rowFor)}
+                  </div>
+                )}
+                {incomp.length > 0 && (
+                  <div style={{marginBottom:14}}>
+                    <div style={{fontSize:11,fontWeight:700,color:"#5a6984",marginBottom:6}}>Incomparable units ({incomp.length})</div>
+                    <div style={{fontSize:10,color:"#8e9bb5",marginBottom:6,fontStyle:"italic"}}>Sources publish in units that can't be reconciled without molecular weight (e.g., % w/v vs molar). Listed for completeness.</div>
+                    {incomp.map(rowFor)}
+                  </div>
+                )}
+                <div style={{marginTop:10,padding:"8px 10px",background:"#f0f9f4",border:"1px solid #c9e8d6",borderRadius:8,fontSize:10}}>
+                  <strong style={{color:"#1a6e3a"}}>Broad agreement noted.</strong> The remaining {totalXrefPairs - (conflicts.length+majors.length+minors.length+incomp.length)} cross-referenced pairs show vendor/literature sources within 2{"\u00d7"} of each other \u2014 a useful sanity check that the underlying interference data is more reproducible than the format diversity might suggest.
+                </div>
+              </div>
+            );
+          })()}
           {infoTab === "refs" && (
             <div style={{padding:"12px 18px",fontSize:11,color:"#5a6984",lineHeight:1.7}}>
+              <div style={{fontWeight:700,color:"#0b2a6f",marginBottom:6,marginTop:2}}>Protein-assay references</div>
               <ul style={{margin:0,paddingLeft:18}}>
-                <li>Thermo Scientific Pierce Protein Assay Selection Guide (compatibility chart). <a href="https://tools.thermofisher.com/content/sfs/brochures/TR0068-Protein-assay-compatibility.pdf" target="_blank" rel="noopener noreferrer" style={{color:"#139cb6"}}>TR0068 (PDF)</a></li>
+                <li>Thermo Scientific Pierce Protein Assay Selection Guide (compatibility chart). <a href="https://tools.thermofisher.com/content/sfs/brochures/TR0068-Protein-assay-compatibility.pdf" target="_blank" rel="noopener noreferrer" style={{color:"#139cb6"}}>TR0068 (PDF)</a> — primary source for all 7 Pierce protein-assay columns (~95 substances).</li>
                 <li>Pierce BCA Protein Assay Kit instructions, P/N 23225 (Thermo Fisher).</li>
                 <li>Pierce BCA, Reducing Agent Compatible (BCA-RAC), P/N 23250.</li>
+                <li>Pierce Microplate BCA Protein Assay Kit – Reducing Agent Compatible, P/N 23252. <a href="https://assets.fishersci.com/TFS-Assets/LSG/manuals/MAN0011614_Pierce_MicroplateBCAProteinAsy_ReducAgntComp_UG.pdf" target="_blank" rel="noopener noreferrer" style={{color:"#139cb6"}}>PDF</a></li>
                 <li>Pierce Micro BCA Protein Assay Kit, P/N 23235.</li>
                 <li>Pierce 660 nm Protein Assay Kit, P/N 22660.</li>
                 <li>Pierce Coomassie Plus (Bradford) Protein Assay Kit, P/N 23236.</li>
                 <li>Pierce Coomassie Protein Assay Kit (regular), P/N 23200.</li>
                 <li>Pierce Modified Lowry Protein Assay Kit, P/N 23240.</li>
-                <li>Bio-Rad Quick Start Bradford Protein Assay Instruction Manual (cat. #500-0201). <a href="https://www.bio-rad.com/webroot/web/pdf/lsr/literature/4110065A.pdf" target="_blank" rel="noopener noreferrer" style={{color:"#139cb6"}}>PDF</a></li>
-                <li>Compton SJ and Jones CG (1985). Mechanism of dye response and interference in the Bradford protein assay. <em>Anal Biochem</em> 151:369-374.</li>
+                <li>Bio-Rad Quick Start Bradford Protein Assay Instruction Manual (cat. #500-0201). <a href="https://www.bio-rad.com/webroot/web/pdf/lsr/literature/4110065A.pdf" target="_blank" rel="noopener noreferrer" style={{color:"#139cb6"}}>PDF</a> — single-vendor Bradford reagent.</li>
+                <li>Bio-Rad DC Protein Assay Instruction Manual (cat. #500-0111, LIT448). <a href="https://www.bio-rad.com/webroot/web/pdf/lsr/literature/LIT448.pdf" target="_blank" rel="noopener noreferrer" style={{color:"#139cb6"}}>PDF</a> — Lowry-style assay, detergent-tolerant. <em>Note vendor explicitly lists BME as incompatible.</em></li>
+                <li>Sigma-Aldrich Bicinchoninic Acid Protein Assay Kit, B9643 / BCA1 technical bulletin. <a href="https://www.sigmaaldrich.com/deepweb/assets/sigmaaldrich/product/documents/375/141/b9643pis-ms.pdf" target="_blank" rel="noopener noreferrer" style={{color:"#139cb6"}}>PDF</a> (Sigma BCA shares the same Smith 1985 chemistry as Pierce BCA; data effectively equivalent).</li>
+                <li>Smith PK, Krohn RI, Hermanson GT, et al. (1985). Measurement of protein using bicinchoninic acid. <em>Anal Biochem</em> 150:76-85. — Foundational BCA paper.</li>
                 <li>Bradford MM (1976). A rapid and sensitive method for the quantitation of microgram quantities of protein utilizing the principle of protein-dye binding. <em>Anal Biochem</em> 72:248-254.</li>
-                <li>Data accessed June 2026. Verify against the current vendor PDF before relying on a borderline result.</li>
+                <li>Compton SJ and Jones CG (1985). Mechanism of dye response and interference in the Bradford protein assay. <em>Anal Biochem</em> 151:369-374.</li>
+                <li>Lowry OH, Rosebrough NJ, Farr AL, Randall RJ (1951). Protein measurement with the Folin phenol reagent. <em>J Biol Chem</em> 193:265-275.</li>
+                <li>Peterson GL (1979). Review of the Folin phenol protein quantitation method of Lowry, Rosebrough, Farr, and Randall. <em>Anal Biochem</em> 100:201-220.</li>
+                <li>Kessler R, Fanestil D (1986). Interference by lipids in the determination of protein using bicinchoninic acid. <em>Anal Biochem</em> 159:138-142.</li>
               </ul>
+              <div style={{fontWeight:700,color:"#0b2a6f",marginBottom:6,marginTop:14}}>MS references</div>
+              <ul style={{margin:0,paddingLeft:18}}>
+                <li>Donnelly DP, Rawlins CM, DeHart CJ, Fornelli L, et al. (2019). Best practices and benchmarks for intact protein analysis for top-down mass spectrometry. <em>Nat Methods</em> 16:587-594. <a href="https://www.nature.com/articles/s41592-019-0457-0" target="_blank" rel="noopener noreferrer" style={{color:"#139cb6"}}>Open access</a> — primary source for ESI SC50 (half-maximum suppression concentration) values. Fig. 1c provides direct SC50 measurements for NaCl, MgCl{"\u2082"}, guanidinium-HCl, urea, Triton X-100, Tween 20, ammonium sulfate, SDS, Tris, HEPES, PBS, and antibody (L-histidine) formulation.</li>
+                <li>University of Kansas Synthetic Chemical Biology Core Facility, MALDI Sample Requirements / salt tolerance table. <a href="https://scb.ku.edu/maldi-sample-requirements" target="_blank" rel="noopener noreferrer" style={{color:"#139cb6"}}>scb.ku.edu</a> — primary source for MALDI tolerances (ammonium bicarbonate, CHAPS, glycerol, Gdn-HCl, HEPES, phosphate, SDS, Na-azide, NaCl, Na-acetate, Tris, Triton/NP-40, urea).</li>
+                <li>Karas M, Bahr U, D{"\u00fc"}lcks T (2000). Nano-electrospray ionization mass spectrometry: addressing analytical problems beyond routine. <em>Fresenius J Anal Chem</em> 366:669-676. — basis for nano-ESI vs standard-ESI tolerance ratio (~10{"\u00d7"}).</li>
+                <li>Juraschek R, Dulcks T, Karas M (1999). Nanoelectrospray—more than just a minimized-flow electrospray ionization source. <em>J Am Soc Mass Spectrom</em> 10:300-308.</li>
+                <li>Beverly V, Haslam C, Bouet F, Geoui T, Winter D (2017). A systematic investigation of the best buffers for use in screening by MALDI-mass spectrometry. <em>SLAS Discovery</em> 22(10):1273-1284. — MALDI screening assay tolerances.</li>
+                <li>Cohen SL, Chait BT (1996). Influence of matrix solution conditions on the MALDI-MS analysis of peptides and proteins. <em>Anal Chem</em> 68:31-37.</li>
+                <li>Annesley TM (2003). Ion suppression in mass spectrometry. <em>Clin Chem</em> 49:1041-1044. — foundational reference on ion suppression.</li>
+                <li>Konermann L (2017). Addressing a common misconception: ammonium acetate as neutral pH "buffer" for native ESI-MS. <em>J Am Soc Mass Spectrom</em> 28:1827-1835.</li>
+                <li>Laganowsky A, Reading E, Hopper JTS, Robinson CV (2013). Mass spectrometry of intact membrane protein complexes. <em>Nat Protoc</em> 8:639-651. — MS-compatible detergent list (DDM, OG, etc.) for native MS of membrane proteins.</li>
+                <li>Konermann L, Ahadi E, Rodriguez AD, Vahidi S (2013). Unraveling the mechanism of electrospray ionization. <em>Anal Chem</em> 85:2-9. — Mechanism of why detergents suppress ESI.</li>
+                <li>Metwally H, McAllister RG, Konermann L (2015). Exploring the mechanism of salt-induced signal suppression in protein electrospray mass spectrometry using experiments and molecular dynamics simulations. <em>Anal Chem</em> 87:2434-2442.</li>
+                <li>Whitelegge JP, Gundersen CB, Faull KF (1998). Electrospray-ionization mass spectrometry of intact intrinsic membrane proteins. <em>Protein Sci</em> 7:1423-1430.</li>
+                <li>Wessel D, Fl{"\u00fc"}gge UI (1984). A method for the quantitative recovery of protein in dilute solution in the presence of detergents and lipids. <em>Anal Biochem</em> 138:141-143. — chloroform/methanol/water precipitation for removing detergents before MS.</li>
+                <li>Harvard Center for Mass Spectrometry, salt/buffer tolerance table. <a href="https://massspec.fas.harvard.edu/sites/g/files/omnuum7301/files/smms/files/saltbuffer.pdf" target="_blank" rel="noopener noreferrer" style={{color:"#139cb6"}}>saltbuffer.pdf</a> — aggregated MALDI + ESI tolerances with MW data and primary refs.</li>
+                <li>Univ. of New Mexico MS Facility, Sample Preparation Guide. <a href="https://massspec.unm.edu/pdfs/SAMPLE%20PREPARATION%20GUIDE.pdf" target="_blank" rel="noopener noreferrer" style={{color:"#139cb6"}}>PDF</a> — categorical "avoid these" guide.</li>
+                <li>Kallweit U, et al. (1996). <em>Rapid Commun Mass Spectrom</em> 10:845-849. — buffer effects on MALDI (cited by Harvard table).</li>
+                <li>Yao J, et al. (1998). <em>J Am Soc Mass Spectrom</em> 9:805-813. — buffer/MALDI tolerance (cited by Harvard table).</li>
+                <li>Ogorzalek Loo RR, et al. (1994). <em>Protein Sci</em> 3:1975-1983. — detergent compatibility data for ESI/MALDI (cited by Harvard table).</li>
+                <li>Kay I, Mallet AI (1993). <em>Rapid Commun Mass Spectrom</em> 7:744-746. — surfactant effects on MS.</li>
+                <li>Gevaert K, et al. (1998). ABRF web publication on MALDI sample preparation.</li>
+              </ul>
+              <div style={{marginTop:14,fontStyle:"italic",fontSize:10,color:"#8e9bb5"}}>Data accessed June 2026. SC50 values from Donnelly et al. measured under direct-infusion microflow ESI (~1 {"\u00b5"}L/min); your specific instrument may differ. The 38 {"\u00b5"}M urea SC50 reported in Donnelly Fig. 1c is surprisingly low; verify on your instrument as urea is generally tolerated up to several hundred mM on many platforms. Verify all borderline results against the published source.</div>
             </div>
           )}
           {infoTab === "limits" && (
             <div style={{padding:"12px 18px",fontSize:11,color:"#5a6984",lineHeight:1.6}}>
               <ul style={{margin:0,paddingLeft:18}}>
-                <li>Data is from vendor publications (currently Thermo Pierce and Bio-Rad). Equivalents from other vendors may behave differently.</li>
-                <li>Synergistic interactions between two interferents are <strong>not</strong> modeled. A buffer that passes individually for each component may still fail in combination.</li>
+                <li><strong>Vendor coverage:</strong> Protein-assay data is taken directly from vendor publications — Thermo Pierce TR0068 (7 assays, ~95 substances), Bio-Rad Quick Start Bradford (#500-0201), Bio-Rad DC (#500-0111), and Sigma B9643 BCA bulletin. For substances measured by multiple sources, the "Cross-source" tab surfaces disagreements (e.g., Sigma reports cobalt chloride compatibility at 0.8 M for BCA while Pierce reports 0.8 mM — a 1000{"\u00d7"} discrepancy that's almost certainly a typo in one source). Other vendor reagents (Macherey-Nagel, AAT Bioquest, etc.) are not yet covered.</li>
+                <li><strong>Bio-Rad DC has a published "compatible-list" rather than a full interference table.</strong> Where Bio-Rad has not validated a substance, that cell shows "no published value" (treat as unverified, not as "safe"). The one important exception: Bio-Rad explicitly notes BME (2-mercaptoethanol) is incompatible with DC — captured as a hard fail.</li>
+                <li><strong>MS data — ESI:</strong> 12 substances have direct experimental SC50 values from Donnelly et al. (Nat Methods 2019, Fig. 1c): NaCl, MgCl₂, guanidinium-HCl, urea, Triton X-100, Tween 20, ammonium sulfate, SDS, Tris, HEPES, PBS-equivalent, and antibody (L-histidine) formulation. Detergent SC50s have been mathematically converted from µM to % using known MW (Triton X-100 MW 647, Tween 20 MW 1228, SDS MW 288) so they're comparable to user inputs in %. Other ESI values are estimates from general literature (Annesley 2003, MS core facility tolerance charts).</li>
+                <li><strong>The 38 µM urea SC50 reported in Donnelly Fig. 1c is surprisingly low</strong> compared to general experience — urea is typically tolerated up to several hundred mM on most MS platforms. The Compatibility tool uses the published value, but flag this case for verification on your specific instrument.</li>
+                <li><strong>MS data — nano-ESI:</strong> Values are estimated as ~10× more salt-tolerant than standard ESI per Karas et al. 2000. Treat as approximate scaling, not vendor-validated numbers.</li>
+                <li><strong>MS data — MALDI:</strong> Values are primarily from the KU SCB Core Facility published tolerance table, with extrapolations to substances they don't list. Individual matrices (CHCA, sinapinic acid, DHB, super-DHB) may differ. MALDI-screening values are ~half of standard MALDI tolerances per Beverly et al. 2017.</li>
+                <li><strong>Synergistic interactions between two interferents are not modeled.</strong> A buffer that passes individually for each component may still fail in combination. The Pierce TR0068 explicitly warns: "When two or more interfering substances are present in the sample (e.g., DTT and SDS), the buffer ionic strength must be ≤ 20 mM" — this cumulative effect is not enforced here.</li>
+                <li><strong>For MS, your analyte's specific behavior matters more than the vendor numbers</strong> — peptide vs intact protein vs small molecule will have different sensitivity profiles. Use this as a screening guide; verify with a test injection.</li>
                 <li>Protein-specific effects (e.g., a particular antibody binding to a detergent) are not modeled.</li>
-                <li>Unit conversion between % w/v and mM requires molecular weight and is not done. Match units to what the vendor publishes (mostly mM or %).</li>
-                <li>This is a <strong>screening guide</strong> to narrow your choices; verify with small-scale spike-recovery for novel matrices.</li>
+                <li>Unit conversion between % w/v and molar concentration requires molecular weight — done explicitly for the major detergents (Triton X-100, Tween 20, SDS) but not generally. If a value displays "no comparable unit", that's why.</li>
+                <li>This is a <strong>screening guide</strong> to narrow your choices; verify with small-scale runs before committing.</li>
               </ul>
             </div>
           )}
