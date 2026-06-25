@@ -36,7 +36,7 @@ var sdc = function(a) { if (a.length<2) return 0; var m=avg(a); return Math.sqrt
 var cvc = function(a) { var m=avg(a); return m ? sdc(a)/Math.abs(m) : Infinity; };
 var med = function(a) { var s=a.slice().sort(function(x,y){return x-y;}); var m=Math.floor(s.length/2); return s.length%2 ? s[m] : (s[m-1]+s[m])/2; };
 var APP_NAME = "eSSF Bench";
-var APP_VERSION = "v5d3";
+var APP_VERSION = "v5d5";
 
 // ── Chart export utility ─────────────────────────────────────────────────
 // Exports an SVG chart as a PNG, either as a downloaded file or to the
@@ -936,7 +936,24 @@ function StdChart(props) {
     var allPts = seriesPts.reduce(function(a,b){return a.concat(b);},[]);
     if(!allPts.length) return;
     var xM=Math.max.apply(null,allPts.map(function(p){return p.conc;}))*1.15;
-    var yM=Math.max.apply(null,allPts.map(function(p){return p.avg+(p.sd||0);}))*1.25;
+    var yMdata = Math.max.apply(null,allPts.map(function(p){return p.avg+(p.sd||0);}))*1.25;
+    // For non-linear fits (4PL, 5PL, log-log), the curve may extend above the data
+    // points (the upper asymptote can be much higher than the max measured response).
+    // Sample the active series' fn across the visible x range and include that in yM
+    // so the curve doesn't disappear off the top of the chart.
+    var yMcurve = 0;
+    var activeForY = isFinite(activeIdx) && activeIdx >= 0 && activeIdx < seriesAll.length ? seriesAll[activeIdx] : (seriesAll[0] || null);
+    if (activeForY && activeForY.fn) {
+      for (var sx_i = 0; sx_i <= 100; sx_i++) {
+        var xSamp = xM * sx_i / 100;
+        try {
+          var ySamp = activeForY.fn(xSamp / convFactor);
+          if (ySamp != null && isFinite(ySamp) && ySamp > yMcurve) yMcurve = ySamp;
+        } catch(e) {}
+      }
+    }
+    // Use the larger of the two so all the data AND the line fit in the chart.
+    var yM = Math.max(yMdata, yMcurve * 1.05);
     var sx=function(v){return pd.left+(v/xM)*cw2;};
     var sy=function(v){return pd.top+ch-(v/yM)*ch;};
     ctx.clearRect(0,0,w,h);
@@ -14758,10 +14775,14 @@ function App() {
       // If the analyst has set an alternative source for this plate, swap stdG
       // to point at that sample group instead. The chosen sample is also
       // removed from smpG to avoid back-calculating it against itself.
+      // ALSO: the ORIGINAL standard column gets promoted to a synthetic sample
+      // so the analyst can see how the default standard back-calculates against
+      // the alternative curve (essentially a spike-recovery check on the curve).
       var altSrcRaw = altStdSrc[String(pi)];
       var altSrcIdx = (altSrcRaw != null && altSrcRaw !== "default" && altSrcRaw !== "") ? parseInt(altSrcRaw) : null;
       if (altSrcIdx != null && !isNaN(altSrcIdx) && altSrcIdx >= 0 && altSrcIdx < smpG.length) {
         var pickedAsStd = smpG[altSrcIdx];
+        var originalStdG = stdG;  // capture before we overwrite
         // Build a synthetic stdG that mirrors the structure but pulls cells from the picked sample
         stdG = {
           type: "std",
@@ -14775,8 +14796,24 @@ function App() {
           _origSampleIdx: altSrcIdx,
           _origSampleName: pickedAsStd.name,
         };
-        // Remove this sample from the analyzed sample list — it's now the curve, not a sample
+        // Remove the picked sample from smpG (it's now the curve, can't be analyzed against itself)
         smpG = smpG.filter(function(_, idx){ return idx !== altSrcIdx; });
+        // Promote the ORIGINAL standard column INTO smpG as a synthetic sample so
+        // the analyst can see it back-calculated against the new curve. Stored at
+        // the top of smpG for visibility — it's the most diagnostic data point
+        // when an alt curve is in use.
+        if (originalStdG) {
+          var originalStdAsSample = {
+            type: "smp",
+            name: "Original standard (analyzed as unknown)",
+            dilutions: originalStdG.dilutions,
+            startCol: originalStdG.startCol,
+            cols: originalStdG.cols,
+            axis: originalStdG.axis,
+            _isOriginalStd: true,  // UI flag for badge + tint + expected-vs-actual display
+          };
+          smpG = [originalStdAsSample].concat(smpG);
+        }
       }
       // ─── end alternative standard source ───────────────────────────────
 
@@ -14946,7 +14983,27 @@ function App() {
             if(!here.lbaOK)here.lbaNote="No neighboring in-range dilution agrees within 80–120%; review for hook effect or matrix interference";
           }
         }
-        samps.push({name:nm,dils:dils,aS:selAll(dils,midA,assayKind),dbD:dbD});
+        // If this sample group is actually the original standard column promoted
+        // to a synthetic sample (because alt-standard is active), enrich each
+        // dilution row with the EXPECTED concentration from the standard config.
+        // The UI can then show expected vs. back-calculated for each dilution.
+        var isOriginalStdAsSample = !!smpG[si]._isOriginalStd;
+        if (isOriginalStdAsSample) {
+          for (var di2=0; di2<dils.length; di2++) {
+            var row = dils[di2];
+            // concs[] is the per-dilution-level standard concentration array, built
+            // earlier in analyze from cfg.sc, cfg.df1, cfg.ds. Same indexing as the
+            // standard table rows.
+            if (concs[row.di] != null) {
+              row.expectedConc = concs[row.di];
+              // Recovery: how close did the curve back-calculate to the known value?
+              if (row.cW != null && concs[row.di] !== 0) {
+                row.recovery = (row.cW / concs[row.di]) * 100;
+              }
+            }
+          }
+        }
+        samps.push({name:nm,dils:dils,aS:selAll(dils,midA,assayKind),dbD:dbD,_isOriginalStd:isOriginalStdAsSample});
       }
       all.push({sc:{slope:lf.slope,intercept:lf.intercept,r2:lf.r2,pts:sP,model:lf.model,params:lf.params,fallback:lf.fallback},fFn:fFn,iFn:iFn,fL:lf.model==="linear"?"Linear":(lf.model==="loglog"?"Log-log":(lf.model==="5pl"?"5PL":"4PL")),samps:samps,dbS:dbS,bA:bA,mxA:mxA,mnA:mnA, altStdInfo: stdG._isAlt ? {origSampleIdx: stdG._origSampleIdx, origSampleName: stdG._origSampleName} : null});
     }
@@ -17560,7 +17617,7 @@ function App() {
                   return <option key={si} value={String(si)}>{g.name || ("Sample "+(si+1))} — use as standard</option>;
                 })}
               </select>
-              {currentAltInfo && <span style={{fontSize:11,color:"#7a5a00",fontStyle:"italic"}}>Plate {vp+1}'s curve was built from <strong>{currentAltInfo.origSampleName}</strong> instead of the default standard. {currentAltInfo.origSampleName} is excluded from sample results for this plate.</span>}
+              {currentAltInfo && <span style={{fontSize:11,color:"#7a5a00",fontStyle:"italic"}}>Plate {vp+1}'s curve was built from <strong>{currentAltInfo.origSampleName}</strong> instead of the default standard. {currentAltInfo.origSampleName} is excluded from sample results; the original standard column appears as <strong>"Original standard (analyzed as unknown)"</strong> for sanity-check.</span>}
             </div>
             <div style={{display:"flex",gap:6}}>
               {pendingChange && <button onClick={function(){analyze();}} style={{background:"#0b2a6f",color:"#fff",border:"none",padding:"5px 12px",borderRadius:6,fontSize:11,fontWeight:700,cursor:"pointer"}}>Refit with new source</button>}
@@ -17743,6 +17800,7 @@ function App() {
               <span style={{fontSize:14,fontWeight:700,color:gc.tx,transition:"transform 0.2s",transform:isOpen?"rotate(90deg)":"rotate(0deg)"}}>&#9654;</span>
               <span style={{fontSize:11,fontWeight:700,color:gc.tx,textTransform:"uppercase",letterSpacing:1}}>Sample</span>
               <span style={{fontSize:15,fontWeight:800,color:gc.tx}}>{s.name}</span>
+              {s._isOriginalStd && <span title="The original standard column from this plate, analyzed against the alternative curve. Known standard concentrations should recover to roughly themselves — use this row to validate the alternative curve choice." style={{fontSize:9,fontWeight:700,padding:"3px 8px",borderRadius:10,background:"#e1f5ee",color:"#0a4d3c",border:"1px solid #b8e0cd",letterSpacing:0.5,cursor:"help"}}>ORIGINAL STANDARD</span>}
               <span style={{marginLeft:"auto",fontSize:12,color:gc.tx,fontWeight:700,opacity:0.95}}>{sel&&sel.conc!=null?"Selected by "+SM.find(function(m){return m.id===sm;}).short+": "+sig3(sel.conc)+" "+unit:"No qualified concentration selected"}</span>
             </div>
             {isOpen&&(<div style={{padding:"1rem 1.25rem",overflowX:"auto"}}>
@@ -17754,6 +17812,8 @@ function App() {
                 <th style={{...thS,textAlign:"center",lineHeight:1.3}}><div>[{targetP}]</div><div style={{fontWeight:500,fontSize:10,color:"#8e9bb5",textAlign:"center"}}>in well (<UnitPill unit={displayUnitChart} onChange={setDisplayUnitChart} size={10} color="#8e9bb5" hoverColor="#0b2a6f" weight={500} />)</div></th>
                 <th style={{...thS,textAlign:"center",lineHeight:1.3}}><div>[{targetP}]</div><div style={{fontWeight:500,fontSize:10,color:"#8e9bb5",textAlign:"center"}}>in sample (<UnitPill unit={displayUnitChart} onChange={setDisplayUnitChart} size={10} color="#8e9bb5" hoverColor="#0b2a6f" weight={500} />)</div></th>
                 <th style={{...thS,textAlign:"center"}}>In range?</th>
+                {s._isOriginalStd && <th style={{...thS,textAlign:"center",background:"#fafdfb",color:"#0a4d3c"}} title="Known concentration for this dilution from the standard config. Shown for the original standard row so you can sanity-check the alternative curve.">Expected</th>}
+                {s._isOriginalStd && <th style={{...thS,textAlign:"center",background:"#fafdfb",color:"#0a4d3c"}} title="Back-calculated value as a percentage of the expected value. 100% = perfect recovery; 80–120% is typical acceptance for spike-recovery; values outside that range suggest the alternative curve disagrees with the original standard at this level.">% Recovery</th>}
               </tr></thead><tbody>{s.dils.map(function(d,di){
                 var isRec=sel&&sel.dil===d.di&&!picks[ek];
                 var isPk=picks[ek]===d.di;
@@ -17774,6 +17834,11 @@ function App() {
                 } else if (!d.ir && instructor) {
                   rowTitle = "Out of curve range — the back-calculated value shown is for teaching only. Don't report it (it's extrapolated outside what the standards covered).";
                 }
+                // For original-standard-as-sample rows, build expected + recovery cells
+                var expectedDisp = d.expectedConc != null ? convertConc(d.expectedConc, unit, displayUnitChart) : null;
+                var recoveryGood = d.recovery != null && d.recovery >= 80 && d.recovery <= 120;
+                var recoveryColor = d.recovery == null ? "#aeaeb2" : (recoveryGood ? "#1b7f6a" : "#b4332e");
+                var nCols = 6 + (s._isOriginalStd ? 2 : 0);
                 return [
                   <tr key={di} style={{background:bg,cursor:instructor?"pointer":"default"}} onClick={function(){if(!instructor)return;if(isMO)setMathRow(null);else setMathRow({pi:vp,si:si,di:d.di});}} title={rowTitle}>
                     <td style={{...tdS,fontWeight:isRec||isPk?700:400}}>{d.di}{isRec?" *":""}</td>
@@ -17782,8 +17847,10 @@ function App() {
                     <td style={{...tdS,textAlign:"center",color:!d.ir&&instructor?"#a05a00":"inherit",fontStyle:!d.ir&&instructor?"italic":"normal"}}>{d.cW!=null?(d.ir?sig3(convertConc(d.cW, unit, displayUnitChart)):(instructor?sig3(convertConc(d.cW, unit, displayUnitChart)):"---")):"---"}</td>
                     <td style={{...tdS,textAlign:"center",fontWeight:isRec||isPk?700:400,color:!d.ir&&instructor?"#a05a00":"inherit",fontStyle:!d.ir&&instructor?"italic":"normal"}}>{d.cS!=null?(d.ir?sig3(convertConc(d.cS, unit, displayUnitChart)):(instructor?sig3(convertConc(d.cS, unit, displayUnitChart)):"---")):"---"}</td>
                     <td style={{...tdS,textAlign:"center"}}>{isBQL?<span style={{color:"#d70015",fontWeight:700,cursor:"help"}} title="Reading is in range, but the curve here is too flat to reliably convert it to a concentration. Try a different dilution.">BQL</span>:(d.ir?<span style={{color:"#1b7f6a",fontWeight:700,cursor:"help"}} title="In range — reading falls within the calibrated standard curve, can be reported.">IR</span>:<span style={{color:"#d70015",cursor:"help"}} title="Out of range — reading is outside the calibrated standard curve. Don't report this value; pick a different dilution that falls within the curve.">OOR</span>)}</td>
+                    {s._isOriginalStd && <td style={{...tdS,textAlign:"center",background:"#fafdfb",color:"#0a4d3c"}}>{expectedDisp != null ? sig3(expectedDisp) : "—"}</td>}
+                    {s._isOriginalStd && <td style={{...tdS,textAlign:"center",background:"#fafdfb",color:recoveryColor,fontWeight:700,fontFamily:"monospace"}}>{d.recovery != null ? d.recovery.toFixed(0) + "%" : "—"}</td>}
                   </tr>,
-                  isMO&&dbD2?<tr key={di+"m"}><td colSpan={6} style={{padding:0,border:"none"}}><MathWalk d={dbD2} slope={p.sc.slope} intercept={p.sc.intercept} params={p.sc.params} curveModel={p.sc.model} sn={cfg.sn} target={targetP} unit={unit} displayUnit={displayUnitChart} instructor={instructor} /></td></tr>:null
+                  isMO&&dbD2?<tr key={di+"m"}><td colSpan={nCols} style={{padding:0,border:"none"}}><MathWalk d={dbD2} slope={p.sc.slope} intercept={p.sc.intercept} params={p.sc.params} curveModel={p.sc.model} sn={cfg.sn} target={targetP} unit={unit} displayUnit={displayUnitChart} instructor={instructor} /></td></tr>:null
                 ];})}</tbody></table>
             </div>)}
           </div>
@@ -17874,7 +17941,7 @@ function App() {
 
               // Alt standard source disclosure
               if (pp.altStdInfo) {
-                lines.push(esc("⚠ Curve source override") + "," + esc("Curve was built from " + pp.altStdInfo.origSampleName + " instead of the default standard column. That sample is excluded from sample results for this plate."));
+                lines.push(esc("⚠ Curve source override") + "," + esc("Curve was built from " + pp.altStdInfo.origSampleName + " instead of the default standard column. That sample is excluded from sample results for this plate. The original standard column has been promoted to a synthetic sample row labeled 'Original standard (analyzed as unknown)' with expected concentrations and % recovery columns — use it to sanity-check the alternative curve."));
                 lines.push("");
               }
 
@@ -17920,6 +17987,7 @@ function App() {
               lines.push(esc("— Sample dilutions (all rows shown) —"));
               lines.push([
                 esc("Sample"),
+                esc("Marker"),
                 esc("Dilution #"),
                 esc("Avg corrected signal"),
                 esc("CV (%)"),
@@ -17927,11 +17995,14 @@ function App() {
                 esc("Back-calc conc on plate (" + (displayUnitChart || unit) + ")"),
                 esc("Dilution factor"),
                 esc("Concentration in sample (" + (displayUnitChart || unit) + ")"),
+                esc("Expected conc (" + (displayUnitChart || unit) + ")"),
+                esc("% Recovery"),
                 esc("Status"),
                 esc("Picked?")
               ].join(","));
               (pp.samps || []).forEach(function(s, si){
                 var apk = pi + "-" + si;
+                var sampleMarker = s._isOriginalStd ? "ORIGINAL STANDARD (analyzed as unknown)" : "";
                 (s.dils || []).forEach(function(d){
                   var isBQL = d.ir && d.cW == null;
                   var status = isBQL ? "BQL (in range but curve too flat)" : (d.ir ? "In range" : "Out of range");
@@ -17940,8 +18011,10 @@ function App() {
                   var isPicked = pickedDi === d.di;
                   var concPlate = d.cW != null ? convertConc(d.cW, unit, displayUnitChart || unit) : null;
                   var concSample = d.cS != null ? convertConc(d.cS, unit, displayUnitChart || unit) : null;
+                  var expectedDisp = d.expectedConc != null ? convertConc(d.expectedConc, unit, displayUnitChart || unit) : null;
                   lines.push([
                     esc(s.name || ("Sample " + (si+1))),
+                    esc(sampleMarker),
                     esc(d.di),
                     esc(fmtResponse(d.avgA)),
                     esc(d.cv != null ? (d.cv*100).toFixed(1) : "—"),
@@ -17949,6 +18022,8 @@ function App() {
                     esc(concPlate != null ? sig3(concPlate) : "—"),
                     esc(d.df != null ? d.df : "—"),
                     esc(concSample != null ? sig3(concSample) : "—"),
+                    esc(expectedDisp != null ? sig3(expectedDisp) : "—"),
+                    esc(d.recovery != null ? d.recovery.toFixed(1) + "%" : "—"),
                     esc(status),
                     esc(isPicked ? "✓" : "")
                   ].join(","));
@@ -18122,6 +18197,7 @@ function App() {
               <span style={{fontSize:14,fontWeight:700,color:gc.tx,transition:"transform 0.2s",transform:open?"rotate(90deg)":"rotate(0deg)"}}>&#9654;</span>
               <span style={{fontSize:11,fontWeight:700,color:gc.tx,textTransform:"uppercase",letterSpacing:1}}>Plate {pi+1}</span>
               <span style={{fontSize:14,fontWeight:800,color:gc.tx}}>{s.name}</span>
+              {s._isOriginalStd && <span title="The original standard column from this plate, analyzed against the alternative curve. Use this row as a sanity check — known standard concentrations should recover to roughly themselves." style={{fontSize:9,fontWeight:700,padding:"3px 8px",borderRadius:10,background:"#e1f5ee",color:"#0a4d3c",border:"1px solid #b8e0cd",letterSpacing:0.5,marginLeft:4,cursor:"help"}}>ORIGINAL STANDARD</span>}
               <span style={{marginLeft:"auto",fontSize:12,color:gc.tx,fontWeight:800,opacity:0.95}}>{chosen&&chosen.conc!=null?"Picked: "+sig3(convertConc(chosen.conc, unit, displayUnitResults))+" "+displayUnitResults:"No qualified concentration"}</span>
               {mySpikeRows.length>0 && mySpikeRows[0].recovery!=null && <span style={{fontSize:11,fontWeight:700,padding:"3px 10px",borderRadius:20,background:mySpikeRows[0].recovery>=80&&mySpikeRows[0].recovery<=120?"#e8f5ea":"#ffeaed",color:mySpikeRows[0].recovery>=80&&mySpikeRows[0].recovery<=120?"#1b7f6a":"#b4332e"}}>Recovery {mySpikeRows[0].recovery.toFixed(0)}%</span>}
             </div>
