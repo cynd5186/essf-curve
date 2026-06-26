@@ -40,7 +40,7 @@ var sdc = function(a) { if (a.length<2) return 0; var m=avg(a); return Math.sqrt
 var cvc = function(a) { var m=avg(a); return m ? sdc(a)/Math.abs(m) : Infinity; };
 var med = function(a) { var s=a.slice().sort(function(x,y){return x-y;}); var m=Math.floor(s.length/2); return s.length%2 ? s[m] : (s[m-1]+s[m])/2; };
 var APP_NAME = "eSSF Bench";
-var APP_VERSION = "v5d19";
+var APP_VERSION = "v5d20";
 
 // ── Chart export utility ─────────────────────────────────────────────────
 // Exports an SVG chart as a PNG, either as a downloaded file or to the
@@ -16815,7 +16815,16 @@ var SCRIBE_TEMPLATES = {
         fields: [
           { id: "r2",                label: "R\u00b2 of std curve",   placeholder: "0.998",       default: "" },
           { id: "cvThreshold",       label: "CV threshold",           placeholder: "10",  suffix: "%", default: "10" },
-          { id: "dilutionSelection", label: "Dilution selected from", placeholder: "upper portion of dilution series", default: "upper portion of the dilution series" },
+          // Wording aligned to ICH M10 / lab practice — selection rule should
+          // capture (a) in-range, (b) mid-curve preference, (c) CV-driven,
+          // (d) dilution-scheme-aware.
+          { id: "dilutionSelection", label: "Dilution selection rule",
+            placeholder: "in-range, closest to mid-curve, lowest CV",
+            default: "in-range, closest to mid-curve, lowest CV across the dilution scheme" },
+          // SST detail fields — only used in paragraph if "SST used" is checked.
+          { id: "sstName",       label: "SST identity",        placeholder: "(if SST used)" },
+          { id: "sstExpected",   label: "SST expected value",  placeholder: "(if SST used)" },
+          { id: "sstAcceptance", label: "SST acceptance",      placeholder: "e.g. \u00b115% of expected" },
         ],
       },
     ],
@@ -16915,9 +16924,26 @@ var SCRIBE_TEMPLATES = {
         );
       }
       if (c.sstUsed) {
-        p.push(
-          "A system suitability standard was processed alongside the submitted samples using the same dilution scheme."
-        );
+        // Build SST sentence richer when detail fields are filled.
+        var sstName = (v.sstName || "").trim();
+        var sstExp  = (v.sstExpected || "").trim();
+        var sstAcc  = (v.sstAcceptance || "").trim();
+        var sstSentence;
+        if (sstName || sstExp || sstAcc) {
+          var paren = [];
+          if (sstName) paren.push(sstName);
+          if (sstExp)  paren.push("expected value " + sstExp);
+          var parenStr = paren.length > 0 ? (" (" + paren.join("; ") + ")") : "";
+          sstSentence = "A system suitability standard" + parenStr +
+                        " was processed alongside the submitted samples using the same dilution scheme";
+          if (sstAcc) {
+            sstSentence += ", and met its acceptance criterion of " + sstAcc;
+          }
+          sstSentence += ".";
+        } else {
+          sstSentence = "A system suitability standard was processed alongside the submitted samples using the same dilution scheme.";
+        }
+        p.push(sstSentence);
       }
 
       return p.join(" ");
@@ -16983,7 +17009,12 @@ var SCRIBE_TEMPLATES = {
         fields: [
           { id: "r2",                label: "R\u00b2 of std curve",   placeholder: "0.998",       default: "" },
           { id: "cvThreshold",       label: "CV threshold",           placeholder: "10",  suffix: "%", default: "10" },
-          { id: "dilutionSelection", label: "Dilution selected from", placeholder: "upper portion of dilution series", default: "upper portion of the dilution series" },
+          { id: "dilutionSelection", label: "Dilution selection rule",
+            placeholder: "in-range, closest to mid-curve, lowest CV",
+            default: "in-range, closest to mid-curve, lowest CV across the dilution scheme" },
+          { id: "sstName",       label: "SST identity",        placeholder: "(if SST used)" },
+          { id: "sstExpected",   label: "SST expected value",  placeholder: "(if SST used)" },
+          { id: "sstAcceptance", label: "SST acceptance",      placeholder: "e.g. \u00b115% of expected" },
         ],
       },
     ],
@@ -17082,7 +17113,25 @@ var SCRIBE_TEMPLATES = {
         p.push("Samples yielding absorbance values outside the calibrated range of the standard curve were re-assayed at an adjusted dilution.");
       }
       if (c.sstUsed) {
-        p.push("A system suitability standard was processed alongside the submitted samples using the same dilution scheme.");
+        var sstName = (v.sstName || "").trim();
+        var sstExp  = (v.sstExpected || "").trim();
+        var sstAcc  = (v.sstAcceptance || "").trim();
+        var sstSentence;
+        if (sstName || sstExp || sstAcc) {
+          var paren = [];
+          if (sstName) paren.push(sstName);
+          if (sstExp)  paren.push("expected value " + sstExp);
+          var parenStr = paren.length > 0 ? (" (" + paren.join("; ") + ")") : "";
+          sstSentence = "A system suitability standard" + parenStr +
+                        " was processed alongside the submitted samples using the same dilution scheme";
+          if (sstAcc) {
+            sstSentence += ", and met its acceptance criterion of " + sstAcc;
+          }
+          sstSentence += ".";
+        } else {
+          sstSentence = "A system suitability standard was processed alongside the submitted samples using the same dilution scheme.";
+        }
+        p.push(sstSentence);
       }
 
       return p.join(" ");
@@ -17145,7 +17194,12 @@ var SCRIBE_TEMPLATES = {
         fields: [
           { id: "r2",                label: "R\u00b2 of std curve",   placeholder: "0.998",       default: "" },
           { id: "cvThreshold",       label: "CV threshold",           placeholder: "10",  suffix: "%", default: "10" },
-          { id: "dilutionSelection", label: "Dilution selected from", placeholder: "less-dilute portion of dilution series", default: "less-dilute portion of the dilution series" },
+          { id: "dilutionSelection", label: "Dilution selection rule",
+            placeholder: "in-range, closest to mid-curve, lowest CV",
+            default: "in-range, closest to mid-curve, lowest CV across the dilution scheme" },
+          { id: "sstName",       label: "SST identity",        placeholder: "(if SST used)" },
+          { id: "sstExpected",   label: "SST expected value",  placeholder: "(if SST used)" },
+          { id: "sstAcceptance", label: "SST acceptance",      placeholder: "e.g. \u00b115% of expected" },
         ],
       },
     ],
@@ -17253,7 +17307,25 @@ var SCRIBE_TEMPLATES = {
         p.push("Samples yielding fluorescence values outside the calibrated range of the standard curve were re-assayed at an adjusted dilution.");
       }
       if (c.sstUsed) {
-        p.push("A system suitability standard was processed alongside the submitted samples using the same dilution scheme.");
+        var sstName = (v.sstName || "").trim();
+        var sstExp  = (v.sstExpected || "").trim();
+        var sstAcc  = (v.sstAcceptance || "").trim();
+        var sstSentence;
+        if (sstName || sstExp || sstAcc) {
+          var paren = [];
+          if (sstName) paren.push(sstName);
+          if (sstExp)  paren.push("expected value " + sstExp);
+          var parenStr = paren.length > 0 ? (" (" + paren.join("; ") + ")") : "";
+          sstSentence = "A system suitability standard" + parenStr +
+                        " was processed alongside the submitted samples using the same dilution scheme";
+          if (sstAcc) {
+            sstSentence += ", and met its acceptance criterion of " + sstAcc;
+          }
+          sstSentence += ".";
+        } else {
+          sstSentence = "A system suitability standard was processed alongside the submitted samples using the same dilution scheme.";
+        }
+        p.push(sstSentence);
       }
 
       return p.join(" ");
@@ -17428,41 +17500,34 @@ function ScribeTool(props) {
       {!embedded && <PageHeader instructor={props.instructor} setInstructor={props.setInstructor} onBack={props.onBack} large={true} workspaceLabel="Scribe" />}
       <div style={embedded ? {padding:"0"} : {padding:"1.25rem 16px 0"}}>
 
-        {/* Hero card */}
-        <div style={{background:"linear-gradient(180deg,#ffffff,#fbfdff)",borderRadius:24,border:"1px solid #dfe7f2",padding:"1.25rem 1.5rem",boxShadow:"0 18px 44px rgba(11,42,111,0.08)",marginBottom:"1.25rem"}}>
-          <div style={{display:"flex",alignItems:"center",gap:14,marginBottom:10}}>
-            <div style={{width:48,height:48,borderRadius:12,background:"#F1EAFB",display:"flex",alignItems:"center",justifyContent:"center"}}>
-              <svg width="28" height="28" viewBox="0 0 28 28" aria-hidden="true">
-                {/* Quill / pen icon */}
-                <path d="M 6 22 L 18 10 L 22 14 L 10 26" fill="none" stroke="#4a2d8f" strokeWidth="1.4" strokeLinejoin="round" transform="translate(0,-4)" />
-                <path d="M 18 6 Q 22 6 22 10 L 18 10 Z" fill="#9b6dc7" stroke="#4a2d8f" strokeWidth="1.2" />
-                <line x1="6" y1="22" x2="3" y2="25" stroke="#4a2d8f" strokeWidth="1.4" strokeLinecap="round" />
-              </svg>
+        {/* Compact action bar: template dropdown + short tagline.
+            The sticky header above already shows "eSSF Bench → Scribe", so
+            there's no need for a hero card with another big Scribe icon and
+            heading. This bar is intentionally lightweight.
+            Embedded context shows nothing — the host page provides its own
+            tab header. */}
+        {!embedded && (
+          <div style={{display:"flex",alignItems:"center",gap:14,marginBottom:14,padding:"10px 14px",background:"#fff",border:"1px solid #dfe7f2",borderRadius:10}}>
+            <div style={{display:"flex",alignItems:"center",gap:8,flex:1}}>
+              <label htmlFor="scribe-template-select" style={{fontSize:11,color:"#5a6984",fontWeight:600,textTransform:"uppercase",letterSpacing:0.5}}>
+                Template
+              </label>
+              <select id="scribe-template-select"
+                      value={activeTemplate}
+                      onChange={function(e){ setActiveTemplate(e.target.value); }}
+                      style={{padding:"6px 10px",fontSize:12.5,fontWeight:600,color:"#0b2a6f",
+                              background:"#fff",border:"1px solid #9b6dc7",borderRadius:6,
+                              cursor:"pointer",fontFamily:"inherit",outline:"none",minWidth:200}}>
+                {Object.keys(SCRIBE_TEMPLATES).map(function(tid) {
+                  return <option key={tid} value={tid}>{SCRIBE_TEMPLATES[tid].label}</option>;
+                })}
+              </select>
             </div>
-            <div>
-              <div style={{fontSize:21,fontWeight:800,color:"#0b2a6f"}}>Scribe</div>
-              <div style={{fontSize:13,color:"#5a6984"}}>Generate consistent method-section paragraphs for LIMS, reports, and SOPs.</div>
+            <div style={{fontSize:11.5,color:"#8e9bb5",fontStyle:"italic",lineHeight:1.4}}>
+              {tmpl.description}
             </div>
           </div>
-
-          {/* Template picker */}
-          <div style={{display:"flex",flexWrap:"wrap",gap:8,marginTop:14}}>
-            {Object.keys(SCRIBE_TEMPLATES).map(function(tid) {
-              var t = SCRIBE_TEMPLATES[tid];
-              var active = activeTemplate === tid;
-              return (
-                <button key={tid} onClick={function(){ setActiveTemplate(tid); }}
-                        style={{padding:"7px 14px",fontSize:12,fontWeight:600,
-                                color:active?"#fff":"#5a6984",
-                                background:active?"#9b6dc7":"#f4f6fb",
-                                border:"1px solid "+(active?"#9b6dc7":"#dfe7f2"),
-                                borderRadius:18,cursor:"pointer",fontFamily:"inherit"}}>
-                  {t.label}
-                </button>
-              );
-            })}
-          </div>
-        </div>
+        )}
 
         {/* Two-column layout: form left, paragraph right */}
         <div style={{display:"grid",gridTemplateColumns:"minmax(0, 1fr) minmax(0, 1fr)",gap:"1.25rem",alignItems:"start"}}>
@@ -17560,7 +17625,7 @@ function ScribeTool(props) {
                 )}
               </div>
               <div style={{fontSize:13,color:"#0b2a6f",lineHeight:1.75,padding:"12px 14px",background:"#fafbfd",border:"1px solid #eef3f8",borderRadius:8,fontFamily:'"Georgia", "Times New Roman", serif'}}>
-                {renderParagraphWithSlots(paragraph)}
+                {renderParagraphWithSlots(paragraph, values)}
               </div>
               <div style={{display:"flex",gap:8,marginTop:12,flexWrap:"wrap"}}>
                 <button onClick={copyParagraph}
@@ -17584,29 +17649,111 @@ function ScribeTool(props) {
   );
 }
 
-// Render paragraph with bracketed slots highlighted as amber pills
-function renderParagraphWithSlots(text) {
-  var parts = [];
-  var re = /\[([^\]]+)\]/g;
+// Render paragraph with:
+//   - Unfilled bracketed slots like [vendor name]  → amber pill (the analyst
+//     still needs to fill this in)
+//   - Filled values that came from form fields     → purple dotted underline
+//     (MadLib-style — analyst can SEE which words in the paragraph were
+//     parameterized from their inputs)
+//
+// `values` is the field-id → value map. We extract a deduped list of
+// non-trivial values and look for them in the rendered text. Short tokens
+// (< 3 chars) and very common words are skipped to avoid over-highlighting.
+// Values are matched as whole-word boundaries to avoid mid-word highlights.
+function renderParagraphWithSlots(text, values) {
+  // ───── Build the set of "interesting" filled values to highlight ─────
+  var FILL_STOPLIST = new Set([
+    "in", "the", "of", "and", "or", "to", "at", "as", "is", "by", "on",
+    "with", "PBS", "BSA",  // PBS/BSA are common, avoid over-highlight
+    "100", "50", "10", "20", "5", "25", "200",  // bare numbers — too common
+    "true", "false",
+  ]);
+  var filledValues = [];
+  if (values && typeof values === "object") {
+    Object.keys(values).forEach(function(k) {
+      var v = values[k];
+      if (typeof v !== "string") v = String(v == null ? "" : v);
+      v = v.trim();
+      if (v.length < 3) return;
+      if (FILL_STOPLIST.has(v)) return;
+      if (FILL_STOPLIST.has(v.toLowerCase())) return;
+      filledValues.push(v);
+    });
+  }
+  // Dedupe + sort by length descending so longer matches take precedence
+  // (e.g. "BioTek Synergy 4" matches before "Synergy").
+  filledValues = Array.from(new Set(filledValues)).sort(function(a,b){return b.length - a.length;});
+
+  // ───── First pass: split on unfilled [bracket] slots ─────
+  // Produces an array of {kind:"text"|"slot", str:"..."} segments.
+  var primary = [];
+  var bracketRe = /\[([^\]]+)\]/g;
   var lastIdx = 0;
   var m;
-  var key = 0;
-  while ((m = re.exec(text)) !== null) {
+  while ((m = bracketRe.exec(text)) !== null) {
     if (m.index > lastIdx) {
-      parts.push(<span key={"t"+(key++)}>{text.substring(lastIdx, m.index)}</span>);
+      primary.push({ kind: "text", str: text.substring(lastIdx, m.index) });
     }
-    parts.push(
-      <span key={"s"+(key++)} style={{display:"inline-block",padding:"1px 6px",background:"#fff3da",color:"#bf7a1a",
-                                       border:"1px dashed #f0c87a",borderRadius:4,
-                                       fontFamily:"ui-monospace, monospace",fontSize:11,fontStyle:"italic"}}>
-        {m[1]}
-      </span>
-    );
+    primary.push({ kind: "slot", str: m[1] });
     lastIdx = m.index + m[0].length;
   }
   if (lastIdx < text.length) {
-    parts.push(<span key={"t"+(key++)}>{text.substring(lastIdx)}</span>);
+    primary.push({ kind: "text", str: text.substring(lastIdx) });
   }
+
+  // ───── Second pass: within each text segment, highlight filled values ─────
+  // Walk each text segment and split it around occurrences of filledValues.
+  // To do this safely with overlapping matches, we use a single combined
+  // regex with all values, alternation in length-desc order.
+  var parts = [];
+  var key = 0;
+
+  function escapeRegex(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+
+  var valuesRegex = null;
+  if (filledValues.length > 0) {
+    valuesRegex = new RegExp("(" + filledValues.map(escapeRegex).join("|") + ")", "g");
+  }
+
+  primary.forEach(function(seg) {
+    if (seg.kind === "slot") {
+      parts.push(
+        <span key={"s"+(key++)} style={{display:"inline-block",padding:"1px 6px",background:"#fff3da",color:"#bf7a1a",
+                                         border:"1px dashed #f0c87a",borderRadius:4,
+                                         fontFamily:"ui-monospace, monospace",fontSize:11,fontStyle:"italic"}}>
+          {seg.str}
+        </span>
+      );
+      return;
+    }
+    // text segment — split around filled values if any exist
+    if (!valuesRegex) {
+      parts.push(<span key={"t"+(key++)}>{seg.str}</span>);
+      return;
+    }
+    var rem = seg.str;
+    var localRe = new RegExp(valuesRegex.source, "g");
+    var lastSubIdx = 0;
+    var subMatch;
+    while ((subMatch = localRe.exec(rem)) !== null) {
+      if (subMatch.index > lastSubIdx) {
+        parts.push(<span key={"t"+(key++)}>{rem.substring(lastSubIdx, subMatch.index)}</span>);
+      }
+      parts.push(
+        <span key={"v"+(key++)}
+              title="Filled from form input"
+              style={{borderBottom:"1.5px dotted #9b6dc7",color:"#4a2d8f",fontWeight:600,
+                       background:"rgba(155,109,199,0.08)",padding:"0 1px",borderRadius:2}}>
+          {subMatch[0]}
+        </span>
+      );
+      lastSubIdx = subMatch.index + subMatch[0].length;
+    }
+    if (lastSubIdx < rem.length) {
+      parts.push(<span key={"t"+(key++)}>{rem.substring(lastSubIdx)}</span>);
+    }
+  });
+
   return parts;
 }
 
