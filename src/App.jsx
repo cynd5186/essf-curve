@@ -31,6 +31,8 @@ var FEATURES = {
   benchCalcs: false,
   compatibility: true,  // Buffer/reagent interference tool (Pierce protein assays). Enabled.
   scribe: true,         // Method-description template generator. Enabled.
+  bioburden: true,      // CFU bioburden assay (USP <61>/<62>-style). Enabled v1.
+  limsFormatter: true,  // LIMS-paired sample/batch formatter. Enabled v1.
 };
 
 var avg = function(a) { return a.length ? a.reduce(function(s,v){return s+v;},0)/a.length : 0; };
@@ -38,7 +40,7 @@ var sdc = function(a) { if (a.length<2) return 0; var m=avg(a); return Math.sqrt
 var cvc = function(a) { var m=avg(a); return m ? sdc(a)/Math.abs(m) : Infinity; };
 var med = function(a) { var s=a.slice().sort(function(x,y){return x-y;}); var m=Math.floor(s.length/2); return s.length%2 ? s[m] : (s[m-1]+s[m])/2; };
 var APP_NAME = "eSSF Bench";
-var APP_VERSION = "v5d14";
+var APP_VERSION = "v5d19";
 
 // ── Chart export utility ─────────────────────────────────────────────────
 // Exports an SVG chart as a PNG, either as a downloaded file or to the
@@ -13872,6 +13874,39 @@ function ChooserScreen(props){
         })}
 
         {card({
+          stripeColor: FEATURES.bioburden ? "#5a8a3a" : "#D3D1C7",
+          iconBg:      FEATURES.bioburden ? "#eef6e6" : "#F1EFE8",
+          iconColor:   FEATURES.bioburden ? "#3a6022" : "#888780",
+          iconNode: (
+            // Hand-drawn: petri dish with colonies. Simple top-down silhouette.
+            <svg width="28" height="28" viewBox="0 0 28 28" aria-hidden="true">
+              {/* Petri dish outer ring */}
+              <circle cx="14" cy="14" r="11" fill="none"
+                      stroke={FEATURES.bioburden ? "#3a6022" : "#888780"}
+                      strokeWidth="1.1" />
+              {/* Inner agar tint */}
+              <circle cx="14" cy="14" r="10" fill={FEATURES.bioburden ? "#dcecd0" : "#eee"} opacity="0.5"/>
+              {/* Scattered colonies */}
+              <g fill={FEATURES.bioburden ? "#3a6022" : "#888780"}>
+                <circle cx="9" cy="11" r="1.1"/>
+                <circle cx="13" cy="8" r="0.9"/>
+                <circle cx="17.5" cy="10.5" r="1.3"/>
+                <circle cx="11" cy="15" r="0.8"/>
+                <circle cx="15.5" cy="14" r="1.1"/>
+                <circle cx="19" cy="15.5" r="0.7"/>
+                <circle cx="10" cy="18" r="0.9"/>
+                <circle cx="14" cy="19.5" r="1.0"/>
+                <circle cx="18" cy="19" r="0.8"/>
+              </g>
+            </svg>
+          ),
+          name: "Running bioburden",
+          desc: "CFU plate counts · water-system monitoring",
+          enabled: FEATURES.bioburden,
+          onClick: function(){ onChoose("bioburden"); },
+        })}
+
+        {card({
           stripeColor: "#D3D1C7",
           iconBg: "#F1EFE8",
           iconColor: "#888780",
@@ -13993,6 +14028,45 @@ function ChooserScreen(props){
           desc: "Generate consistent method paragraphs for LIMS and reports",
           enabled: FEATURES.scribe,
           onClick: function(){ onChoose("scribe"); },
+        })}
+
+        {card({
+          stripeColor: FEATURES.limsFormatter ? "#2c5d8f" : "#D3D1C7",
+          iconBg:      FEATURES.limsFormatter ? "#e3edf7" : "#F1EFE8",
+          iconColor:   FEATURES.limsFormatter ? "#1e4470" : "#888780",
+          iconNode: (
+            // Hand-drawn: two stacked rows representing the sample/batch paired
+            // lists, with arrows showing the alignment between them. Suggests
+            // the core transformation the tool performs.
+            <svg width="28" height="28" viewBox="0 0 28 28" aria-hidden="true">
+              {/* Top row — samples */}
+              <rect x="4" y="6" width="20" height="6" rx="1.5"
+                    fill={FEATURES.limsFormatter ? "#C8DCEF" : "#D3D1C7"}
+                    stroke={FEATURES.limsFormatter ? "#1e4470" : "#888780"}
+                    strokeWidth="0.9" />
+              {/* Sample tick marks */}
+              <line x1="9"  y1="6" x2="9"  y2="12" stroke={FEATURES.limsFormatter ? "#1e4470" : "#888780"} strokeWidth="0.6" />
+              <line x1="14" y1="6" x2="14" y2="12" stroke={FEATURES.limsFormatter ? "#1e4470" : "#888780"} strokeWidth="0.6" />
+              <line x1="19" y1="6" x2="19" y2="12" stroke={FEATURES.limsFormatter ? "#1e4470" : "#888780"} strokeWidth="0.6" />
+              {/* Vertical alignment arrows between rows */}
+              <line x1="6.5"  y1="13" x2="6.5"  y2="15.5" stroke={FEATURES.limsFormatter ? "#1e4470" : "#888780"} strokeWidth="0.7" strokeLinecap="round" />
+              <line x1="11.5" y1="13" x2="11.5" y2="15.5" stroke={FEATURES.limsFormatter ? "#1e4470" : "#888780"} strokeWidth="0.7" strokeLinecap="round" />
+              <line x1="16.5" y1="13" x2="16.5" y2="15.5" stroke={FEATURES.limsFormatter ? "#1e4470" : "#888780"} strokeWidth="0.7" strokeLinecap="round" />
+              <line x1="21.5" y1="13" x2="21.5" y2="15.5" stroke={FEATURES.limsFormatter ? "#1e4470" : "#888780"} strokeWidth="0.7" strokeLinecap="round" />
+              {/* Bottom row — batches */}
+              <rect x="4" y="16" width="20" height="6" rx="1.5"
+                    fill="none"
+                    stroke={FEATURES.limsFormatter ? "#1e4470" : "#888780"}
+                    strokeWidth="0.9" />
+              <line x1="9"  y1="16" x2="9"  y2="22" stroke={FEATURES.limsFormatter ? "#1e4470" : "#888780"} strokeWidth="0.6" />
+              <line x1="14" y1="16" x2="14" y2="22" stroke={FEATURES.limsFormatter ? "#1e4470" : "#888780"} strokeWidth="0.6" />
+              <line x1="19" y1="16" x2="19" y2="22" stroke={FEATURES.limsFormatter ? "#1e4470" : "#888780"} strokeWidth="0.6" />
+            </svg>
+          ),
+          name: "LIMS Formatter",
+          desc: "Pair samples with batch IDs in the exact form LIMS expects",
+          enabled: FEATURES.limsFormatter,
+          onClick: function(){ onChoose("limsFormatter"); },
         })}
       </div>
 
@@ -14882,6 +14956,147 @@ var COMPAT_CROSS_REF = {
       { source:"Harvard_saltbuf", val:0.1, u:"pct", note:"1.6 mM per Ogorzalek 1994" },
     ],
   },
+
+  // ─── KCl ───
+  // Bio-Rad QSB explicitly lists 2 M; Pierce TR0068 covers protein-side with a
+  // null (not listed) because Pierce notes ionic-strength tolerances generically
+  // through their NaCl entry. Donnelly Fig 1c didn't titrate KCl specifically,
+  // so MS-side rows use the NaCl analogue with a note.
+  kcl: {
+    bradford: [
+      { source:"BioRad_QSB",    val:2,   u:"M" },
+    ],
+    biorad_dc: [
+      { source:"BioRad_DC",     val:1,   u:"M", note:"DC tolerance for monovalent salts" },
+    ],
+    maldi: [
+      { source:"KU_SCB",        val:50,  u:"mM", note:"treated as NaCl-equivalent monovalent salt" },
+      { source:"Harvard_saltbuf", val:50, u:"mM", note:"agrees with KU; monovalent salt category" },
+    ],
+  },
+
+  // ─── Ammonium sulfate ───  3-way: Pierce + Bio-Rad QSB + Bio-Rad DC + Donnelly
+  // KNOWN DISAGREEMENT: bcaRac/microBca/lowry list val:0 (incompatible)
+  // while plain BCA accepts up to 1.5 M.
+  ammonium_sulfate: {
+    bca: [
+      { source:"Pierce_TR0068", val:1.5, u:"M" },
+      { source:"Sigma_B9643",   val:1.5, u:"M" },
+    ],
+    bcaRac: [
+      { source:"Pierce_TR0068", val:0, u:"M", note:"explicitly incompatible per Pierce TR0068 \u2014 RAC chemistry intolerant" },
+    ],
+    bradford: [
+      { source:"Pierce_TR0068", val:1, u:"M" },
+      { source:"BioRad_QSB",    val:1, u:"M" },
+    ],
+    biorad_dc: [
+      { source:"BioRad_DC",     val:500, u:"mM" },
+    ],
+    esi: [
+      { source:"Donnelly_2019", val:4.2, u:"uM", note:"direct SC50 titration" },
+    ],
+  },
+
+  // ─── Imidazole ───  KNOWN DISAGREEMENT: Pierce 50 mM BCA vs Bio-Rad QSB 200 mM Bradford
+  // (4-fold difference). Often used in IMAC elution buffers, so worth flagging.
+  imidazole: {
+    bca: [
+      { source:"Pierce_TR0068", val:50, u:"mM" },
+      { source:"Sigma_B9643",   val:50, u:"mM" },
+    ],
+    bradford: [
+      { source:"Pierce_TR0068", val:200, u:"mM" },
+      { source:"BioRad_QSB",    val:200, u:"mM" },
+    ],
+    p660: [
+      { source:"Pierce_TR0068", val:200, u:"mM" },
+    ],
+  },
+
+  // ─── Sodium phosphate ───  KNOWN DISAGREEMENT: Pierce 100 mM vs Bio-Rad QSB 500 mM
+  // for protein assays (5-fold spread).
+  na_phosphate: {
+    bca: [
+      { source:"Pierce_TR0068", val:100, u:"mM" },
+      { source:"Sigma_B9643",   val:100, u:"mM" },
+    ],
+    bradford: [
+      { source:"Pierce_TR0068", val:100, u:"mM" },
+      { source:"BioRad_QSB",    val:500, u:"mM" },
+    ],
+    p660: [
+      { source:"Pierce_TR0068", val:500, u:"mM" },
+    ],
+  },
+
+  // ─── PBS ───  Donnelly's "PBS-equivalent" ESI titration plus Pierce/Bio-Rad
+  // tolerances at full strength. Pierce treats PBS as tolerable undiluted ("1×").
+  pbs: {
+    bca: [
+      { source:"Pierce_TR0068", val:1, u:"undil", note:"tolerated at full PBS strength (100 mM phosphate, 150 mM NaCl)" },
+      { source:"Sigma_B9643",   val:1, u:"undil", note:"agrees with Pierce" },
+    ],
+    bradford: [
+      { source:"Pierce_TR0068", val:1, u:"undil" },
+      { source:"BioRad_QSB",    val:1, u:"undil" },
+    ],
+    esi: [
+      { source:"Donnelly_2019", val:31, u:"uM", note:"direct SC50 \u2014 PBS-equivalent at low ionic strength" },
+    ],
+  },
+
+  // ─── Tween 20 ───  Donnelly ESI value differs notably from Harvard's
+  // higher tolerance. Already documented as a flagged discrepancy.
+  tween20: {
+    bca: [
+      { source:"Pierce_TR0068", val:5, u:"pct" },
+      { source:"Sigma_B9643",   val:5, u:"pct" },
+    ],
+    bradford: [
+      { source:"Pierce_TR0068", val:0.125, u:"pct" },
+      { source:"BioRad_QSB",    val:0.125, u:"pct" },
+    ],
+    biorad_dc: [
+      { source:"BioRad_DC",     val:0.5, u:"pct" },
+    ],
+    esi: [
+      { source:"Donnelly_2019",   val:1.7,  u:"uM",  note:"direct SC50 titration \u2014 surprisingly low" },
+      { source:"Harvard_saltbuf", val:0.01, u:"pct", note:"~80 \u00b5M \u2014 ~50\u00d7 higher than Donnelly's SC50; reflects \"tolerance\" vs \"50% suppression\"" },
+    ],
+    maldi: [
+      { source:"KU_SCB",          val:0.01, u:"pct" },
+      { source:"Harvard_saltbuf", val:0.01, u:"pct", note:"agrees with KU" },
+    ],
+  },
+
+  // ─── Magnesium chloride ───
+  mgcl2: {
+    bcaRac: [
+      { source:"Pierce_TR0068", val:100, u:"mM" },
+    ],
+    bradford: [
+      { source:"BioRad_QSB",    val:1, u:"M" },
+    ],
+    p660: [
+      { source:"Pierce_TR0068", val:1, u:"M" },
+    ],
+    esi: [
+      { source:"Donnelly_2019", val:25, u:"uM", note:"direct SC50 titration; divalent salts are typically ~2 orders more disruptive than monovalent" },
+    ],
+  },
+
+  // ─── L-Histidine ───  Common in antibody/protein formulation buffers.
+  // Donnelly Fig 1c titrated this directly.
+  histidine: {
+    esi: [
+      { source:"Donnelly_2019", val:3.4, u:"uM", note:"direct SC50 titration; very poor MS tolerance" },
+    ],
+    maldi: [
+      { source:"KU_SCB",        val:25, u:"mM" },
+      { source:"Harvard_saltbuf", val:25, u:"mM", note:"agrees with KU" },
+    ],
+  },
 };
 
 var COMPAT_SYNONYMS = {
@@ -15198,6 +15413,254 @@ function compatRollup(componentResults) {
   return { status: "ok", reason: "all components within limits" };
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+//  COMPAT_SYNERGY_RULES — combined-interference rules across substances
+//
+//  Single-substance limits in COMPAT_DATA cover "is X at concentration Y
+//  acceptable for assay Z?" — but published vendor documentation also
+//  includes COMBINED-interference rules: "X at half-limit + Y at half-limit
+//  is worse than either alone." These rules encode those.
+//
+//  Each rule is a JS object:
+//    id          — stable identifier
+//    label       — short display name
+//    appliesTo   — array of assay IDs the rule covers (matches COMPAT_DATA keys)
+//    condition   — function(components, getEffective) => boolean
+//                  components = array of parsed components in the buffer
+//                  getEffective(key, unit) returns effective concentration of
+//                  the named substance (after dilution) in the requested unit,
+//                  or null if not present.
+//    severity    — "warn" | "fail"   (synergy never overrides a fail to ok)
+//    message     — string shown to the analyst when triggered
+//    cite        — short source label (matches COMPAT_SOURCE_LABELS where possible)
+//
+//  Categories of substances used across rules:
+var COMPAT_CATEGORY = {
+  reducingAgent:  ["dtt", "bme", "tcep", "cysteine", "glutathione_red", "dte"],
+  ionicDetergent: ["sds", "doc", "ctab", "dtab", "cetylpyridinium"],
+  nonionicDet:    ["tween20", "tween60", "tween80", "triton_x100", "triton_x114", "triton_x305", "triton_x405", "np40", "brij35", "brij56", "brij58", "thesit", "octyl_glucoside", "octyl_thiogluco", "ddm", "c12e8", "span20"],
+  zwittDetergent: ["chaps", "chapso", "zwittergent314", "asb14", "sb310"],
+  chelator:       ["edta", "egta"],
+  chaotrope:      ["urea", "guanidine", "thiourea"],
+};
+
+// Helper: does the buffer contain ANY substance from a category?
+function compatHasCategory(components, category) {
+  var keys = COMPAT_CATEGORY[category] || [];
+  for (var i = 0; i < components.length; i++) {
+    if (keys.indexOf(components[i].key) !== -1) return components[i];
+  }
+  return null;
+}
+
+// Helper: count how many distinct substances from a category are present
+function compatCountCategory(components, category) {
+  var keys = COMPAT_CATEGORY[category] || [];
+  var found = [];
+  for (var i = 0; i < components.length; i++) {
+    if (keys.indexOf(components[i].key) !== -1) found.push(components[i]);
+  }
+  return found;
+}
+
+// Helper: effective concentration of a substance in target units, post-dilution
+function compatGetEffective(components, key, dilution, targetUnit) {
+  for (var i = 0; i < components.length; i++) {
+    var c = components[i];
+    if (c.key === key) {
+      var eff = c.val / (dilution || 1);
+      return compatConvert(eff, c.unit, targetUnit);
+    }
+  }
+  return null;
+}
+
+var COMPAT_SYNERGY_RULES = [
+  // ─── Rule 1: Pierce — two reducing agents present ─────────────────────
+  {
+    id: "rule_two_reducing",
+    label: "Two reducing agents present",
+    appliesTo: ["bca", "bcaRac", "microBca", "p660"],
+    condition: function(components, dilution) {
+      var reducers = compatCountCategory(components, "reducingAgent");
+      return reducers.length >= 2;
+    },
+    severity: "warn",
+    message: "Two reducing agents detected. Pierce documentation notes that combined reducing agents compound interference: reduce each to \u2264 half its single-agent limit, or dilute the buffer enough that BOTH fall well below limit. Verify by spike recovery before reporting.",
+    cite: "Pierce_TR0068",
+  },
+
+  // ─── Rule 2: Pierce — reducing agent + chelator + low ionic strength ──
+  {
+    id: "rule_reducer_chelator_low_ionic",
+    label: "Reducing agent + chelator in low-ionic buffer",
+    appliesTo: ["bca", "bcaRac", "microBca"],
+    condition: function(components, dilution) {
+      var hasReducer = compatHasCategory(components, "reducingAgent");
+      var hasChelator = compatHasCategory(components, "chelator");
+      if (!hasReducer || !hasChelator) return false;
+      // Check that NaCl/KCl ionic strength is low (<20 mM) — proxy for "no buffering ionic strength"
+      // If no salt is specified, assume low-ionic
+      var nacl = compatGetEffective(components, "nacl", dilution, "mM");
+      var kcl  = compatGetEffective(components, "kcl",  dilution, "mM");
+      var totalIonic = (nacl || 0) + (kcl || 0);
+      return totalIonic < 20;
+    },
+    severity: "warn",
+    message: "Reducing agent + chelator (EDTA/EGTA) in a low-ionic buffer (<20 mM NaCl/KCl). This combination is known to amplify copper-reduction interference in BCA-based chemistries. Pierce recommends adding NaCl to \u226550 mM total ionic strength OR running the Reducing-Agent-Compatible (RAC) BCA variant.",
+    cite: "Pierce_TR0068",
+  },
+
+  // ─── Rule 3: Bio-Rad DC — BME + SDS combined ──────────────────────────
+  {
+    id: "rule_dc_bme_sds",
+    label: "BME + SDS combined (Bio-Rad DC)",
+    appliesTo: ["biorad_dc"],
+    condition: function(components, dilution) {
+      var hasBme = compatGetEffective(components, "bme", dilution, "pct") != null;
+      var sds = compatGetEffective(components, "sds", dilution, "pct");
+      return hasBme && sds != null && sds > 1;
+    },
+    severity: "warn",
+    message: "Bio-Rad DC tolerates BME alone up to ~5%, but when SDS is also present above 1%, the combined interference exceeds DC's tolerance window. Bio-Rad LIT448 recommends keeping SDS \u22641% when BME is in the buffer, or pre-precipitating the protein (DC + TCA protocol).",
+    cite: "BioRad_DC",
+  },
+
+  // ─── Rule 4: Bio-Rad Bradford — detergent + reducer combination ────────
+  {
+    id: "rule_bradford_detergent_reducer",
+    label: "Detergent + reducing agent (Bradford)",
+    appliesTo: ["bradford", "coomassie", "bradQSB"],
+    condition: function(components, dilution) {
+      var hasDetergent = compatHasCategory(components, "ionicDetergent") ||
+                         compatHasCategory(components, "nonionicDet");
+      var hasReducer = compatHasCategory(components, "reducingAgent");
+      return hasDetergent && hasReducer;
+    },
+    severity: "warn",
+    message: "Bradford reagent loses color development when detergents and reducing agents are present together. Bio-Rad Quick Start Bradford tolerates EITHER detergent OR reducing agent alone; their combination causes non-linear standard curves. Consider switching to BCA-RAC or Pierce 660-nm if both must be present.",
+    cite: "BioRad_QSB",
+  },
+
+  // ─── Rule 5: Two ionic detergents (additive) ───────────────────────────
+  {
+    id: "rule_two_ionic_detergents",
+    label: "Two ionic detergents present",
+    appliesTo: ["bca", "bcaRac", "microBca", "p660", "bradford", "coomassie", "bradQSB", "biorad_dc", "lowry"],
+    condition: function(components, dilution) {
+      var ionicDets = compatCountCategory(components, "ionicDetergent");
+      return ionicDets.length >= 2;
+    },
+    severity: "warn",
+    message: "Multiple ionic detergents detected (e.g., SDS + LDS, SDS + deoxycholate). Their interference is roughly additive on a percent-equivalent basis: total ionic detergent should be \u2264 the lowest single-detergent limit. Treat the combined load as a single high concentration when applying limits.",
+    cite: "general",
+  },
+
+  // ─── Rule 6: Two non-ionic detergents (mildly additive) ────────────────
+  {
+    id: "rule_two_nonionic_detergents",
+    label: "Two non-ionic detergents present",
+    appliesTo: ["bca", "bcaRac", "microBca", "p660"],
+    condition: function(components, dilution) {
+      var dets = compatCountCategory(components, "nonionicDet");
+      return dets.length >= 2;
+    },
+    severity: "warn",
+    message: "Multiple non-ionic detergents (Tween, Triton, NP-40, Brij family) detected. Pierce notes that non-ionic detergent interference is less than additive but more than negligible \u2014 expect a small downward bias on BCA absorbance. Reduce each to \u224870% of single-agent limit, or verify with spike recovery.",
+    cite: "Pierce_TR0068",
+  },
+
+  // ─── Rule 7: Chaotrope + reducing agent (denaturing buffer) ───────────
+  {
+    id: "rule_chaotrope_reducer",
+    label: "Chaotrope + reducing agent (denaturing buffer)",
+    appliesTo: ["bca", "microBca", "p660", "bradford", "coomassie", "bradQSB"],
+    condition: function(components, dilution) {
+      var hasChao = compatHasCategory(components, "chaotrope");
+      var hasReducer = compatHasCategory(components, "reducingAgent");
+      return hasChao && hasReducer;
+    },
+    severity: "warn",
+    message: "Denaturing buffer detected (urea or guanidine + reducing agent). Most protein assays struggle here. Pierce BCA-RAC is the standard recommendation; alternately, perform TCA precipitation first to remove interferents before assay. Bradford performs especially poorly with denaturing buffers because the dye binding mechanism depends on folded structure.",
+    cite: "Pierce_TR0068",
+  },
+
+  // ─── Rule 8: SDS-PAGE sample buffer (Laemmli-style) ───────────────────
+  {
+    id: "rule_laemmli_pattern",
+    label: "Laemmli-style sample buffer pattern",
+    appliesTo: ["bca", "microBca", "bradford", "coomassie", "bradQSB"],
+    condition: function(components, dilution) {
+      // Trigger if SDS + BME + Tris all present — classic Laemmli signature
+      var sds = compatGetEffective(components, "sds", dilution, "pct");
+      var hasBme = compatGetEffective(components, "bme", dilution, "pct") != null ||
+                   compatGetEffective(components, "dtt", dilution, "mM") != null;
+      var tris = compatGetEffective(components, "tris", dilution, "mM");
+      return sds != null && sds > 0.5 && hasBme && tris != null && tris > 10;
+    },
+    severity: "warn",
+    message: "Buffer composition matches Laemmli SDS-PAGE sample buffer (SDS + BME/DTT + Tris). Standard protein assays will not give accurate results. Bio-Rad DC with TCA precipitation, Pierce BCA-RAC, or the Pierce 660-nm IDCR (Ionic Detergent Compatibility Reagent) workflow are the established options.",
+    cite: "general",
+  },
+
+  // ─── Rule 9: High-ionic-strength buffer (Pierce 660 boundary) ──────────
+  {
+    id: "rule_high_ionic_660",
+    label: "High ionic strength (Pierce 660-nm)",
+    appliesTo: ["p660"],
+    condition: function(components, dilution) {
+      var nacl = compatGetEffective(components, "nacl", dilution, "mM") || 0;
+      var kcl  = compatGetEffective(components, "kcl",  dilution, "mM") || 0;
+      var amSulfate = compatGetEffective(components, "ammonium_sulfate", dilution, "mM") || 0;
+      var totalIonic = nacl + kcl + amSulfate;
+      return totalIonic > 500;
+    },
+    severity: "warn",
+    message: "Total ionic strength exceeds 500 mM. Pierce 660-nm is tolerant of many salts but high ionic strength can shift the dye equilibrium and bias standard curves. Run buffer-matched standards (standards diluted into the same salt concentration) or dilute the sample further.",
+    cite: "Pierce_TR0068",
+  },
+
+  // ─── Rule 10: Reducing agent in standard BCA (not RAC) ────────────────
+  {
+    id: "rule_reducer_in_standard_bca",
+    label: "Reducing agent in standard BCA (use RAC)",
+    appliesTo: ["bca", "microBca"],
+    condition: function(components, dilution) {
+      var hasReducer = compatHasCategory(components, "reducingAgent");
+      return !!hasReducer;
+    },
+    severity: "warn",
+    message: "Reducing agent detected. Standard BCA chemistry is incompatible with reducing agents above trace levels because Cu\u00b2\u207a is reduced non-specifically (giving high background). Use BCA-RAC (Reducing-Agent-Compatible, Pierce 23250) or remove the reducing agent by buffer exchange first.",
+    cite: "Pierce_TR0068",
+  },
+];
+
+// ─── Engine: evaluate all rules against the parsed buffer for one assay ──
+function compatEvaluateSynergies(components, assayId, dilution) {
+  var triggered = [];
+  for (var i = 0; i < COMPAT_SYNERGY_RULES.length; i++) {
+    var rule = COMPAT_SYNERGY_RULES[i];
+    if (rule.appliesTo.indexOf(assayId) === -1) continue;
+    var fired = false;
+    try {
+      fired = !!rule.condition(components, dilution);
+    } catch (e) {
+      fired = false;  // a missing helper or unparseable unit shouldn't crash the panel
+    }
+    if (fired) {
+      triggered.push({
+        id: rule.id,
+        label: rule.label,
+        severity: rule.severity,
+        message: rule.message,
+        cite: rule.cite,
+      });
+    }
+  }
+  return triggered;
+}
+
+
 // ─── Cross-source disagreement detection ─────────────────────────────────
 // Looks up multiple published values for a (substance, assay) pair and
 // returns a normalized comparison + a severity flag.
@@ -15381,7 +15844,8 @@ function CompatibilityTool(props) {
       v.component = c;
       return v;
     });
-    return { assay: a, componentResults: componentResults, verdict: compatRollup(componentResults) };
+    var synergies = compatEvaluateSynergies(components, a.id, dilution);
+    return { assay: a, componentResults: componentResults, verdict: compatRollup(componentResults), synergies: synergies };
   });
 
   // Also compute verdicts at 1:1 (no dilution) to detect "shift on dilution" — useful for the linearity caveat
@@ -15524,9 +15988,16 @@ function CompatibilityTool(props) {
               <div style={{display:"grid",gridTemplateColumns:"160px repeat(" + visibleAssays.length + ", 1fr)"}}>
                 <div style={{padding:"14px",fontSize:12,fontWeight:600,color:"#2d3748",background:"#fafdff",borderRight:"1px solid #f4f6fa"}}>Verdict</div>
                 {assayResults.map(function(r,i){
-                  return <div key={r.assay.id} onClick={function(){setOpenedDrill(openedDrill===r.assay.id?null:r.assay.id);}} style={{padding:"14px",textAlign:"center",fontWeight:700,fontSize:13,cursor:components.length>0?"pointer":"default",background:verdictBg(components.length>0?r.verdict.status:"na"),color:verdictFg(components.length>0?r.verdict.status:"na"),borderRight:i<visibleAssays.length-1?"1px solid #f4f6fa":"none"}}>
+                  var hasSynergies = r.synergies && r.synergies.length > 0;
+                  return <div key={r.assay.id} onClick={function(){setOpenedDrill(openedDrill===r.assay.id?null:r.assay.id);}} style={{padding:"14px",textAlign:"center",fontWeight:700,fontSize:13,cursor:components.length>0?"pointer":"default",background:verdictBg(components.length>0?r.verdict.status:"na"),color:verdictFg(components.length>0?r.verdict.status:"na"),borderRight:i<visibleAssays.length-1?"1px solid #f4f6fa":"none",position:"relative"}}>
                     <div style={{fontSize:10,fontWeight:600,textTransform:"uppercase",letterSpacing:0.5,marginBottom:3}}>{components.length>0?verdictLabel(r.verdict.status):"\u2014"}</div>
                     <div style={{fontSize:10,fontWeight:500,opacity:0.85,lineHeight:1.4}}>{components.length>0?r.verdict.reason:"check a buffer to begin"}</div>
+                    {hasSynergies && components.length > 0 && (
+                      <div title={r.synergies.length + " combined-interference rule" + (r.synergies.length===1?"":"s") + " triggered \u2014 click to see"}
+                           style={{position:"absolute",top:6,right:6,fontSize:9,fontWeight:700,padding:"1px 6px",borderRadius:8,background:"#fff8eb",color:"#7a5a00",border:"1px solid #f0d99a"}}>
+                        {"\u26a0 +" + r.synergies.length}
+                      </div>
+                    )}
                   </div>;
                 })}
               </div>
@@ -15550,6 +16021,29 @@ function CompatibilityTool(props) {
                       <div style={{fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:0.5,padding:"2px 8px",borderRadius:10,background:statusBg,color:statusFg}}>{statusTxt}</div>
                     </div>;
                   })}
+                  {/* Synergy rules: combined-interference warnings the per-component check can't catch */}
+                  {r.synergies && r.synergies.length > 0 && (
+                    <div style={{marginTop:14,paddingTop:12,borderTop:"1px dashed #d4bce8"}}>
+                      <div style={{fontSize:11,fontWeight:700,color:"#7a5a00",textTransform:"uppercase",letterSpacing:0.5,marginBottom:8,display:"flex",alignItems:"center",gap:6}}>
+                        <span style={{fontSize:13}}>{"\u26a0"}</span>
+                        Combined-interference rules triggered ({r.synergies.length})
+                      </div>
+                      {r.synergies.map(function(s, si) {
+                        var sourceLabel = COMPAT_SOURCE_LABELS[s.cite];
+                        return (
+                          <div key={s.id} style={{background:"#fff8eb",border:"1px solid #f0d99a",borderRadius:8,padding:"10px 12px",marginBottom: si < r.synergies.length - 1 ? 8 : 0}}>
+                            <div style={{fontSize:12,fontWeight:700,color:"#7a5a00",marginBottom:4}}>{s.label}</div>
+                            <div style={{fontSize:11.5,color:"#5a4500",lineHeight:1.55}}>{s.message}</div>
+                            {sourceLabel && (
+                              <div style={{fontSize:10,color:"#a07b30",marginTop:6,fontStyle:"italic"}}>
+                                Source: {sourceLabel.short}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>;
               })()}
             </div>
@@ -16269,24 +16763,27 @@ var SCRIBE_TEMPLATES = {
     description: "Colorimetric protein quantification — Pierce/Sigma BCA chemistry.",
     sections: [
       {
-        id: "reagents",
-        title: "Reagents",
+        id: "protocol",
+        title: "Protocol citation",
         fields: [
-          { id: "kitVendor",    label: "Kit vendor",        placeholder: "Thermo Scientific Pierce",   default: "Thermo Scientific Pierce" },
-          { id: "kitPN",        label: "Kit P/N",           placeholder: "23225",                       default: "23225" },
-          { id: "lotNumber",    label: "Kit lot #",         placeholder: "(optional)" },
-          { id: "standardProt", label: "Standard protein",  placeholder: "Bovine serum albumin (BSA)",  default: "Bovine serum albumin (BSA)" },
-          { id: "wrRatio",      label: "Working reagent ratio (A:B)", placeholder: "50:1", default: "50:1" },
+          { id: "internalSOP", label: "Internal SOP",     placeholder: "BTEC AN-002", default: "BTEC AN-002" },
+          { id: "kitVendor",   label: "Kit vendor",        placeholder: "Thermo Fisher Pierce", default: "Thermo Fisher Pierce" },
+          { id: "kitName",     label: "Assay name",        placeholder: "BCA Protein Assay", default: "BCA Protein Assay" },
+          { id: "kitPN",       label: "Kit P/N",           placeholder: "23225",                default: "P/N 23225" },
+          { id: "lotNumber",   label: "Kit lot #",         placeholder: "(optional)" },
         ],
       },
       {
         id: "standards",
-        title: "Standards",
+        title: "Calibration standards",
         fields: [
-          { id: "stdRangeLow",  label: "Low end of std range", placeholder: "0.025",        suffix: "mg/mL", default: "0.025" },
-          { id: "stdRangeHigh", label: "High end of std range", placeholder: "2.0",         suffix: "mg/mL", default: "2.0" },
-          { id: "stdReplicates", label: "Replicates per std",  placeholder: "triplicate",   default: "triplicate" },
-          { id: "stdDiluent",   label: "Standard diluent",    placeholder: "PBS or assay matrix", default: "PBS" },
+          { id: "standardProt",   label: "Standard protein",   placeholder: "Bovine serum albumin (BSA)",  default: "Bovine serum albumin (BSA)" },
+          { id: "stdStockConc",   label: "Standard stock conc.", placeholder: "2.0", suffix: "mg/mL",      default: "2.0" },
+          { id: "stdLevels",      label: "Number of cal levels", placeholder: "7-point", default: "7-point" },
+          { id: "stdRangeLow",    label: "Low end of std range", placeholder: "0.025",  suffix: "mg/mL", default: "0.025" },
+          { id: "stdRangeHigh",   label: "High end of std range", placeholder: "2.0",   suffix: "mg/mL", default: "2.0" },
+          { id: "stdReplicates",  label: "Replicates per std",   placeholder: "triplicate", default: "triplicate" },
+          { id: "stdDiluent",     label: "Standard diluent",     placeholder: "PBS or assay matrix", default: "PBS" },
         ],
       },
       {
@@ -16295,10 +16792,12 @@ var SCRIBE_TEMPLATES = {
         fields: [
           { id: "sampleVol",  label: "Sample volume",  placeholder: "25",   suffix: "µL", default: "25" },
           { id: "stdVol",     label: "Standard volume", placeholder: "25",  suffix: "µL", default: "25" },
+          { id: "wrRatio",    label: "Working reagent ratio (A:B)", placeholder: "50:1", default: "50:1" },
           { id: "wrVol",      label: "Working reagent volume", placeholder: "200", suffix: "µL", default: "200" },
           { id: "incTemp",    label: "Incubation temperature", placeholder: "37", suffix: "°C", default: "37" },
           { id: "incTime",    label: "Incubation time",       placeholder: "30", suffix: "min", default: "30" },
           { id: "plateFormat", label: "Plate format",          placeholder: "96-well microplate", default: "96-well microplate" },
+          { id: "sampleReps", label: "Sample replicates",      placeholder: "duplicate" },
         ],
       },
       {
@@ -16310,57 +16809,117 @@ var SCRIBE_TEMPLATES = {
           { id: "softwareVer", label: "Acquisition software", placeholder: "(optional)" },
         ],
       },
+      {
+        id: "results",
+        title: "Results & reporting",
+        fields: [
+          { id: "r2",                label: "R\u00b2 of std curve",   placeholder: "0.998",       default: "" },
+          { id: "cvThreshold",       label: "CV threshold",           placeholder: "10",  suffix: "%", default: "10" },
+          { id: "dilutionSelection", label: "Dilution selected from", placeholder: "upper portion of dilution series", default: "upper portion of the dilution series" },
+        ],
+      },
     ],
     checklist: [
-      { id: "blankCorrected",   label: "Blank-corrected absorbance values were used",        included: true },
-      { id: "linearRegression", label: "Linear regression was used for the standard curve",  included: true },
-      { id: "sampleReplicates", label: "Samples were run in duplicate (or specify below)" },
-      { id: "dilutionalLinearity", label: "Dilutional linearity was confirmed across the dilution series" },
-      { id: "outOfRangeReject", label: "Values outside the standard curve range were re-assayed at adjusted dilution" },
+      { id: "blankCorrected",     label: "Blank-corrected absorbance values were used",                included: true },
+      { id: "linearRegression",   label: "Linear regression was used for the standard curve",          included: true },
+      { id: "dilutionalLinearity", label: "Dilutional linearity was confirmed across the dilution series", included: true },
+      { id: "outOfRangeReject",   label: "Values outside the standard curve range were re-assayed at adjusted dilution", included: true },
+      { id: "sstUsed",            label: "A system suitability standard (SST) was processed alongside samples" },
     ],
     paragraph: function(v, c) {
       var p = [];
+
+      // SENTENCE 1: What + how. Match legacy structure.
+      var assayName = slot(v.kitName, "assay name");
+      var vendor = v.kitVendor ? v.kitVendor : "";
+      var pn = v.kitPN ? (" (" + v.kitPN + ")") : "";
+      var sop = v.internalSOP ? (" following " + v.internalSOP) : "";
+      var lot = v.lotNumber ? (" (lot " + v.lotNumber + ")") : "";
       p.push(
-        "Total protein concentration was determined using the " +
-        slot(v.kitVendor, "kit vendor") + " BCA Protein Assay Kit" +
-        (v.kitPN ? " (P/N " + v.kitPN + ")" : "") +
-        (v.lotNumber ? " (lot " + v.lotNumber + ")" : "") +
-        "."
+        "Protein concentration was determined using the " +
+        (vendor ? vendor + " " : "") + assayName + pn + lot + sop + "."
       );
+
+      // SENTENCE 2: Standard prep with explicit working range.
+      var stdName = slot(v.standardProt, "standard protein");
+      var stdStock = v.stdStockConc ? (" (" + v.stdStockConc + " mg/mL)") : "";
+      var stdLvls = slot(v.stdLevels, "n-point");
+      var lo = slot(v.stdRangeLow, "low");
+      var hi = slot(v.stdRangeHigh, "high");
+      var diluent = v.stdDiluent ? (" in " + v.stdDiluent) : "";
       p.push(
-        "A standard curve was generated using " + slot(v.standardProt, "standard protein") +
-        " over a range of " + slot(v.stdRangeLow, "low") + "\u2013" + slot(v.stdRangeHigh, "high") + " mg/mL" +
-        " in " + slot(v.stdDiluent, "diluent") +
-        ", prepared in " + slot(v.stdReplicates, "replicate count") + "."
+        "Calibration standards were prepared as " + stdLvls + " serial dilutions of " +
+        stdName + stdStock + diluent + ", covering a working range of " +
+        lo + "\u2013" + hi + " mg/mL."
       );
+
+      // SENTENCE 3: Calibration analysis — replicates + R² inline.
+      var stdReps = slot(v.stdReplicates, "replicate count");
+      var r2Phrase = "";
+      if (v.r2 && String(v.r2).trim() !== "") {
+        r2Phrase = ", and linear regression produced an R\u00b2 of " + v.r2;
+      } else if (c.linearRegression) {
+        r2Phrase = ", and a linear regression was fit to the standard curve";
+      }
       p.push(
-        "Samples and standards (" + slot(v.sampleVol, "sample µL") + " \u00b5L and " +
-        slot(v.stdVol, "std µL") + " \u00b5L, respectively) were combined with working reagent " +
-        "(" + slot(v.wrVol, "WR µL") + " \u00b5L; prepared at " + slot(v.wrRatio, "A:B ratio") + ", Reagent A:Reagent B)" +
-        " in a " + slot(v.plateFormat, "plate format") +
-        ", then incubated at " + slot(v.incTemp, "temp") + "\u00b0C for " + slot(v.incTime, "time") + " min."
+        "Each calibration point was analyzed in " + stdReps + r2Phrase + "."
       );
+
+      // SENTENCE 4: Procedure detail (volumes, working reagent, incubation).
       p.push(
-        "Absorbance at " + slot(v.wavelength, "wavelength") + " nm was measured on a " +
-        slot(v.instrument, "instrument model") +
+        "Samples and standards (" + slot(v.sampleVol, "sample \u00b5L") +
+        " \u00b5L and " + slot(v.stdVol, "std \u00b5L") + " \u00b5L, respectively) were combined with working reagent (" +
+        slot(v.wrVol, "WR \u00b5L") + " \u00b5L; prepared at " + slot(v.wrRatio, "A:B ratio") +
+        ", Reagent A:Reagent B) in a " + slot(v.plateFormat, "plate format") +
+        ", then incubated at " + slot(v.incTemp, "temp") + "\u00b0C for " +
+        slot(v.incTime, "time") + " min."
+      );
+
+      // SENTENCE 5: Detection — instrument + wavelength.
+      var sampReps = v.sampleReps ? (" Samples were analyzed in " + v.sampleReps + " and ") : " ";
+      p.push(
+        "Following incubation,"+ sampReps + "absorbance at " + slot(v.wavelength, "wavelength") +
+        " nm was measured on a " + slot(v.instrument, "instrument model") +
         (v.softwareVer ? " using " + v.softwareVer : "") + " plate reader."
       );
-      // Conditional sentences based on checklist
-      var detailParts = [];
-      if (c.blankCorrected)        detailParts.push("blank-corrected");
-      if (c.linearRegression)      detailParts.push("fit to a linear regression of the standard curve");
-      if (detailParts.length > 0) {
-        p.push("Sample concentrations were back-calculated using " + detailParts.join(" and ") + ".");
+
+      // SENTENCE 6: Back-calculation method.
+      if (c.blankCorrected) {
+        p.push(
+          "Blank-corrected absorbance values were compared to the generated standard curve to back-calculate sample concentrations."
+        );
+      } else {
+        p.push(
+          "Sample concentrations were back-calculated from the generated standard curve."
+        );
       }
-      if (c.sampleReplicates) {
-        p.push("Samples were assayed in duplicate.");
-      }
+
+      // SENTENCE 7: Reporting rationale (dilution selection + CV criteria + linearity).
+      var cvThresh = slot(v.cvThreshold, "CV%") + "%";
+      var dilSel = slot(v.dilutionSelection, "selection rule");
+      p.push(
+        "Reported results corresponded to the dilution that satisfied acceptance criteria for precision (CV \u2264 " +
+        cvThresh + "), fell within the validated linear range, and was selected from the " +
+        dilSel + " to limit propagated dilution error."
+      );
+
+      // Optional conditional sentences from checklist.
       if (c.dilutionalLinearity) {
-        p.push("Dilutional linearity was confirmed across the sample dilution series; concentrations reported are the mean of in-range, qualified dilutions.");
+        p.push(
+          "Dilutional linearity was confirmed across the sample dilution series; concentrations reported are the mean of in-range, qualified dilutions."
+        );
       }
       if (c.outOfRangeReject) {
-        p.push("Samples yielding absorbance values outside the calibrated range of the standard curve were re-assayed at an adjusted dilution.");
+        p.push(
+          "Samples yielding absorbance values outside the calibrated range of the standard curve were re-assayed at an adjusted dilution."
+        );
       }
+      if (c.sstUsed) {
+        p.push(
+          "A system suitability standard was processed alongside the submitted samples using the same dilution scheme."
+        );
+      }
+
       return p.join(" ");
     },
   },
@@ -16373,36 +16932,40 @@ var SCRIBE_TEMPLATES = {
     description: "Coomassie-dye-based colorimetric protein quantification (Bradford 1976).",
     sections: [
       {
-        id: "reagents",
-        title: "Reagents",
+        id: "protocol",
+        title: "Protocol citation",
         fields: [
-          { id: "kitVendor",    label: "Reagent vendor",     placeholder: "Bio-Rad", default: "Bio-Rad" },
-          { id: "kitProduct",   label: "Product name",       placeholder: "Quick Start Bradford 1× Dye Reagent", default: "Quick Start Bradford 1\u00d7 Dye Reagent" },
-          { id: "kitPN",        label: "Catalog #",          placeholder: "500-0205", default: "500-0205" },
-          { id: "lotNumber",    label: "Reagent lot #",      placeholder: "(optional)" },
-          { id: "standardProt", label: "Standard protein",   placeholder: "Bovine serum albumin (BSA)", default: "Bovine serum albumin (BSA)" },
+          { id: "internalSOP", label: "Internal SOP",  placeholder: "BTEC AN-???", default: "" },
+          { id: "kitVendor",   label: "Reagent vendor", placeholder: "Bio-Rad", default: "Bio-Rad" },
+          { id: "kitProduct",  label: "Product name",   placeholder: "Quick Start Bradford 1\u00d7 Dye Reagent", default: "Quick Start Bradford 1\u00d7 Dye Reagent" },
+          { id: "kitPN",       label: "Catalog #",      placeholder: "500-0205", default: "500-0205" },
+          { id: "lotNumber",   label: "Reagent lot #",  placeholder: "(optional)" },
         ],
       },
       {
         id: "standards",
-        title: "Standards",
+        title: "Calibration standards",
         fields: [
-          { id: "stdRangeLow",  label: "Low end of std range",  placeholder: "0.0625", suffix: "mg/mL", default: "0.0625" },
-          { id: "stdRangeHigh", label: "High end of std range", placeholder: "2.0",    suffix: "mg/mL", default: "2.0" },
-          { id: "stdReplicates", label: "Replicates per std",   placeholder: "triplicate", default: "triplicate" },
-          { id: "stdDiluent",   label: "Standard diluent",     placeholder: "PBS or assay matrix", default: "PBS" },
+          { id: "standardProt",   label: "Standard protein",       placeholder: "Bovine serum albumin (BSA)", default: "Bovine serum albumin (BSA)" },
+          { id: "stdStockConc",   label: "Standard stock conc.",   placeholder: "2.0", suffix: "mg/mL", default: "2.0" },
+          { id: "stdLevels",      label: "Number of cal levels",   placeholder: "7-point", default: "7-point" },
+          { id: "stdRangeLow",    label: "Low end of std range",   placeholder: "0.0625", suffix: "mg/mL", default: "0.0625" },
+          { id: "stdRangeHigh",   label: "High end of std range",  placeholder: "2.0",    suffix: "mg/mL", default: "2.0" },
+          { id: "stdReplicates",  label: "Replicates per std",     placeholder: "triplicate", default: "triplicate" },
+          { id: "stdDiluent",     label: "Standard diluent",       placeholder: "PBS or assay matrix", default: "PBS" },
         ],
       },
       {
         id: "procedure",
         title: "Procedure",
         fields: [
-          { id: "sampleVol",  label: "Sample volume",      placeholder: "5",  suffix: "µL", default: "5" },
-          { id: "stdVol",     label: "Standard volume",    placeholder: "5",  suffix: "µL", default: "5" },
+          { id: "sampleVol",  label: "Sample volume",          placeholder: "5",  suffix: "µL", default: "5" },
+          { id: "stdVol",     label: "Standard volume",        placeholder: "5",  suffix: "µL", default: "5" },
           { id: "reagentVol", label: "Bradford reagent volume", placeholder: "250", suffix: "µL", default: "250" },
           { id: "incTemp",    label: "Incubation temperature",  placeholder: "room temperature", default: "room temperature" },
-          { id: "incTime",    label: "Incubation time",          placeholder: "5", suffix: "min", default: "5" },
-          { id: "plateFormat", label: "Plate format",            placeholder: "96-well microplate", default: "96-well microplate" },
+          { id: "incTime",    label: "Incubation time",         placeholder: "5", suffix: "min", default: "5" },
+          { id: "plateFormat", label: "Plate format",           placeholder: "96-well microplate", default: "96-well microplate" },
+          { id: "sampleReps", label: "Sample replicates",       placeholder: "duplicate" },
         ],
       },
       {
@@ -16414,52 +16977,103 @@ var SCRIBE_TEMPLATES = {
           { id: "softwareVer", label: "Acquisition software", placeholder: "(optional)" },
         ],
       },
+      {
+        id: "results",
+        title: "Results & reporting",
+        fields: [
+          { id: "r2",                label: "R\u00b2 of std curve",   placeholder: "0.998",       default: "" },
+          { id: "cvThreshold",       label: "CV threshold",           placeholder: "10",  suffix: "%", default: "10" },
+          { id: "dilutionSelection", label: "Dilution selected from", placeholder: "upper portion of dilution series", default: "upper portion of the dilution series" },
+        ],
+      },
     ],
     checklist: [
-      { id: "blankCorrected",      label: "Blank-corrected absorbance values were used",        included: true },
-      { id: "linearRegression",    label: "Linear regression was used for the standard curve",  included: true },
-      { id: "sampleReplicates",    label: "Samples were run in duplicate (or specify below)" },
-      { id: "dilutionalLinearity", label: "Dilutional linearity was confirmed across the dilution series" },
-      { id: "outOfRangeReject",    label: "Values outside the standard curve range were re-assayed at adjusted dilution" },
+      { id: "blankCorrected",      label: "Blank-corrected absorbance values were used",                included: true },
+      { id: "linearRegression",    label: "Linear regression was used for the standard curve",          included: true },
+      { id: "dilutionalLinearity", label: "Dilutional linearity was confirmed across the dilution series", included: true },
+      { id: "outOfRangeReject",    label: "Values outside the standard curve range were re-assayed at adjusted dilution", included: true },
       { id: "mixedThorough",       label: "Reagent and sample were mixed thoroughly prior to incubation" },
+      { id: "sstUsed",             label: "A system suitability standard (SST) was processed alongside samples" },
     ],
     paragraph: function(v, c) {
       var p = [];
+
+      // SENTENCE 1: What + how. Match legacy structure.
+      var vendor = v.kitVendor ? v.kitVendor + " " : "";
+      var prod = slot(v.kitProduct, "product name");
+      var pn = v.kitPN ? (" (cat. #" + v.kitPN + ")") : "";
+      var sop = v.internalSOP ? (" following " + v.internalSOP) : "";
+      var lot = v.lotNumber ? (" (lot " + v.lotNumber + ")") : "";
       p.push(
-        "Total protein concentration was determined by the Bradford method (Bradford 1976) using " +
-        slot(v.kitProduct, "product name") +
-        " (" + slot(v.kitVendor, "vendor") + (v.kitPN ? ", cat. #" + v.kitPN : "") +
-        (v.lotNumber ? ", lot " + v.lotNumber : "") + ")."
+        "Protein concentration was determined by the Bradford method (Bradford 1976) using " +
+        vendor + prod + pn + lot + sop + "."
       );
+
+      // SENTENCE 2: Standard prep with explicit working range.
+      var stdName = slot(v.standardProt, "standard protein");
+      var stdStock = v.stdStockConc ? (" (" + v.stdStockConc + " mg/mL)") : "";
+      var stdLvls = slot(v.stdLevels, "n-point");
+      var lo = slot(v.stdRangeLow, "low");
+      var hi = slot(v.stdRangeHigh, "high");
+      var diluent = v.stdDiluent ? (" in " + v.stdDiluent) : "";
       p.push(
-        "A standard curve was generated using " + slot(v.standardProt, "standard protein") +
-        " over a range of " + slot(v.stdRangeLow, "low") + "\u2013" + slot(v.stdRangeHigh, "high") + " mg/mL" +
-        " in " + slot(v.stdDiluent, "diluent") +
-        ", prepared in " + slot(v.stdReplicates, "replicate count") + "."
+        "Calibration standards were prepared as " + stdLvls + " serial dilutions of " +
+        stdName + stdStock + diluent + ", covering a working range of " +
+        lo + "\u2013" + hi + " mg/mL."
       );
+
+      // SENTENCE 3: Calibration analysis — replicates + R² inline.
+      var stdReps = slot(v.stdReplicates, "replicate count");
+      var r2Phrase = "";
+      if (v.r2 && String(v.r2).trim() !== "") {
+        r2Phrase = ", and linear regression produced an R\u00b2 of " + v.r2;
+      } else if (c.linearRegression) {
+        r2Phrase = ", and a linear regression was fit to the standard curve";
+      }
       p.push(
-        "Samples and standards (" + slot(v.sampleVol, "sample µL") + " \u00b5L and " +
-        slot(v.stdVol, "std µL") + " \u00b5L, respectively) were combined with " +
-        slot(v.reagentVol, "reagent µL") + " \u00b5L of Bradford dye reagent" +
-        " in a " + slot(v.plateFormat, "plate format") +
-        " and incubated at " + slot(v.incTemp, "temp") + " for " + slot(v.incTime, "time") + " min."
+        "Each calibration point was analyzed in " + stdReps + r2Phrase + "."
       );
+
+      // SENTENCE 4: Procedure detail.
       p.push(
-        "Absorbance at " + slot(v.wavelength, "wavelength") + " nm was measured on a " +
-        slot(v.instrument, "instrument model") +
+        "Samples and standards (" + slot(v.sampleVol, "sample \u00b5L") +
+        " \u00b5L and " + slot(v.stdVol, "std \u00b5L") + " \u00b5L, respectively) were combined with " +
+        slot(v.reagentVol, "reagent \u00b5L") + " \u00b5L of Bradford dye reagent in a " +
+        slot(v.plateFormat, "plate format") + " and incubated at " +
+        slot(v.incTemp, "temp") + " for " + slot(v.incTime, "time") + " min."
+      );
+
+      // SENTENCE 5: Detection.
+      var sampReps = v.sampleReps ? (" Samples were analyzed in " + v.sampleReps + " and ") : " ";
+      p.push(
+        "Following incubation," + sampReps + "absorbance at " + slot(v.wavelength, "wavelength") +
+        " nm was measured on a " + slot(v.instrument, "instrument model") +
         (v.softwareVer ? " using " + v.softwareVer : "") + " plate reader."
       );
-      var detailParts = [];
-      if (c.blankCorrected)   detailParts.push("blank-corrected");
-      if (c.linearRegression) detailParts.push("fit to a linear regression of the standard curve");
-      if (detailParts.length > 0) {
-        p.push("Sample concentrations were back-calculated using " + detailParts.join(" and ") + ".");
+
+      // SENTENCE 6: Back-calculation.
+      if (c.blankCorrected) {
+        p.push(
+          "Blank-corrected absorbance values were compared to the generated standard curve to back-calculate sample concentrations."
+        );
+      } else {
+        p.push(
+          "Sample concentrations were back-calculated from the generated standard curve."
+        );
       }
+
+      // SENTENCE 7: Reporting rationale.
+      var cvThresh = slot(v.cvThreshold, "CV%") + "%";
+      var dilSel = slot(v.dilutionSelection, "selection rule");
+      p.push(
+        "Reported results corresponded to the dilution that satisfied acceptance criteria for precision (CV \u2264 " +
+        cvThresh + "), fell within the validated linear range, and was selected from the " +
+        dilSel + " to limit propagated dilution error."
+      );
+
+      // Optional conditional sentences.
       if (c.mixedThorough) {
         p.push("Reagent and sample were mixed thoroughly prior to incubation to ensure homogeneous dye binding.");
-      }
-      if (c.sampleReplicates) {
-        p.push("Samples were assayed in duplicate.");
       }
       if (c.dilutionalLinearity) {
         p.push("Dilutional linearity was confirmed across the sample dilution series; concentrations reported are the mean of in-range, qualified dilutions.");
@@ -16467,6 +17081,10 @@ var SCRIBE_TEMPLATES = {
       if (c.outOfRangeReject) {
         p.push("Samples yielding absorbance values outside the calibrated range of the standard curve were re-assayed at an adjusted dilution.");
       }
+      if (c.sstUsed) {
+        p.push("A system suitability standard was processed alongside the submitted samples using the same dilution scheme.");
+      }
+
       return p.join(" ");
     },
   },
@@ -16479,32 +17097,35 @@ var SCRIBE_TEMPLATES = {
     description: "Direct fluorescence measurement of an intrinsically-fluorescent protein (e.g., GFP, GFPuv, mCherry).",
     sections: [
       {
-        id: "analyte",
-        title: "Analyte",
+        id: "protocol",
+        title: "Protocol citation",
         fields: [
-          { id: "proteinName",  label: "Fluorescent protein",     placeholder: "GFPuv", default: "GFPuv" },
-          { id: "standardSrc",  label: "Standard source",         placeholder: "purified recombinant standard, in-house" },
-          { id: "standardLot",  label: "Standard lot / batch",    placeholder: "(optional)" },
-          { id: "buffer",       label: "Standard/sample buffer",  placeholder: "50 mM sodium phosphate, pH 7.2", default: "50 mM sodium phosphate, pH 7.2" },
+          { id: "internalSOP",  label: "Internal SOP",        placeholder: "BTEC AN-003", default: "BTEC AN-003" },
+          { id: "proteinName",  label: "Fluorescent protein", placeholder: "GFPuv", default: "GFPuv" },
+          { id: "standardSrc",  label: "Standard source",      placeholder: "purified recombinant standard, in-house" },
+          { id: "standardLot",  label: "Standard lot / batch", placeholder: "(optional)" },
+          { id: "buffer",       label: "Standard/sample buffer", placeholder: "50 mM sodium phosphate, pH 7.2", default: "50 mM sodium phosphate, pH 7.2" },
         ],
       },
       {
         id: "standards",
-        title: "Standards",
+        title: "Calibration standards",
         fields: [
-          { id: "stdRangeLow",  label: "Low end of std range",  placeholder: "1",     suffix: "µg/mL", default: "1" },
-          { id: "stdRangeHigh", label: "High end of std range", placeholder: "1000",  suffix: "µg/mL", default: "1000" },
-          { id: "stdPoints",    label: "Number of dilution points", placeholder: "7-point serial", default: "7-point serial dilution" },
-          { id: "stdReplicates", label: "Replicates per std",   placeholder: "duplicate", default: "duplicate" },
+          { id: "stdStockConc",   label: "Standard stock conc.",   placeholder: "1000", suffix: "µg/mL", default: "1000" },
+          { id: "stdLevels",      label: "Number of cal levels",   placeholder: "7-point", default: "7-point" },
+          { id: "stdRangeLow",    label: "Low end of std range",   placeholder: "1",    suffix: "µg/mL", default: "1" },
+          { id: "stdRangeHigh",   label: "High end of std range",  placeholder: "1000", suffix: "µg/mL", default: "1000" },
+          { id: "stdReplicates",  label: "Replicates per std",     placeholder: "duplicate", default: "duplicate" },
         ],
       },
       {
         id: "procedure",
         title: "Procedure",
         fields: [
-          { id: "sampleVol",   label: "Sample/standard volume", placeholder: "100",   suffix: "µL", default: "100" },
+          { id: "sampleVol",   label: "Sample/standard volume", placeholder: "100",  suffix: "µL", default: "100" },
           { id: "plateFormat", label: "Plate format",           placeholder: "96-well black flat-bottom (Corning)", default: "96-well black flat-bottom (Corning)" },
-          { id: "settleTime",  label: "Pre-read settle time",   placeholder: "5",     suffix: "min", default: "5" },
+          { id: "settleTime",  label: "Pre-read settle time",   placeholder: "5",    suffix: "min", default: "5" },
+          { id: "sampleReps",  label: "Sample replicates",       placeholder: "duplicate" },
         ],
       },
       {
@@ -16518,54 +17139,112 @@ var SCRIBE_TEMPLATES = {
           { id: "softwareVer", label: "Acquisition software", placeholder: "(optional)" },
         ],
       },
+      {
+        id: "results",
+        title: "Results & reporting",
+        fields: [
+          { id: "r2",                label: "R\u00b2 of std curve",   placeholder: "0.998",       default: "" },
+          { id: "cvThreshold",       label: "CV threshold",           placeholder: "10",  suffix: "%", default: "10" },
+          { id: "dilutionSelection", label: "Dilution selected from", placeholder: "less-dilute portion of dilution series", default: "less-dilute portion of the dilution series" },
+        ],
+      },
     ],
     checklist: [
       { id: "blankCorrected",      label: "Buffer-blank-corrected fluorescence values were used",  included: true },
       { id: "linearRegression",    label: "Linear regression was used for the standard curve",     included: true },
-      { id: "sampleReplicates",    label: "Samples were run in duplicate (or specify below)" },
-      { id: "dilutionalLinearity", label: "Dilutional linearity was confirmed across the dilution series" },
-      { id: "outOfRangeReject",    label: "Values outside the standard curve range were re-assayed at adjusted dilution" },
-      { id: "photobleaching",      label: "Photobleaching control was performed (e.g., plate read immediately after equilibration)" },
+      { id: "activeProtein",       label: "Method measures active/folded protein only (intrinsic chromophore emission)", included: true },
+      { id: "dilutionalLinearity", label: "Dilutional linearity was confirmed across the dilution series", included: true },
+      { id: "outOfRangeReject",    label: "Values outside the standard curve range were re-assayed at adjusted dilution", included: true },
+      { id: "photobleaching",      label: "Plate was read promptly after equilibration to minimize photobleaching" },
+      { id: "sstUsed",             label: "A system suitability standard (SST) was processed alongside samples" },
     ],
     paragraph: function(v, c) {
       var p = [];
+
+      // SENTENCE 1: What + how. With SOP citation.
+      var protName = slot(v.proteinName, "protein name");
+      var sop = v.internalSOP ? (" following " + v.internalSOP) : "";
       p.push(
-        slot(v.proteinName, "protein name") +
-        " concentration was determined by direct fluorescence measurement against a calibrated standard curve."
+        protName + " concentration was determined by direct fluorescence measurement against a calibrated standard curve" + sop + "."
       );
-      var stdSrcParts = [];
-      if (v.standardSrc) stdSrcParts.push(v.standardSrc);
-      if (v.standardLot) stdSrcParts.push("lot " + v.standardLot);
+
+      // Optional: rigor note about active protein only
+      if (c.activeProtein) {
+        p.push(
+          "This method measures the active, properly folded fraction of " + protName +
+          " based on the intrinsic chromophore emission (excitation " +
+          slot(v.excitation, "ex") + " nm / emission " + slot(v.emission, "em") + " nm)."
+        );
+      }
+
+      // SENTENCE 2: Standard prep with explicit working range.
+      var stdLvls = slot(v.stdLevels, "n-point");
+      var lo = slot(v.stdRangeLow, "low");
+      var hi = slot(v.stdRangeHigh, "high");
+      var srcParts = [];
+      if (v.standardSrc) srcParts.push(v.standardSrc);
+      if (v.standardLot) srcParts.push("lot " + v.standardLot);
+      var srcDesc = srcParts.length > 0 ? srcParts.join(", ") : slot("", "standard source");
+      var stdStock = v.stdStockConc ? (" (stock " + v.stdStockConc + " \u00b5g/mL)") : "";
+      var buffer = v.buffer ? (" in " + v.buffer) : "";
       p.push(
-        "A standard curve was prepared from " +
-        (stdSrcParts.length > 0 ? stdSrcParts.join(", ") : slot("", "standard source")) +
-        " over a range of " + slot(v.stdRangeLow, "low") + "\u2013" + slot(v.stdRangeHigh, "high") +
-        " \u00b5g/mL in " + slot(v.buffer, "buffer") +
-        " using a " + slot(v.stdPoints, "dilution scheme") +
-        " (" + slot(v.stdReplicates, "replicate count") + ")."
+        "Calibration standards were prepared as " + stdLvls + " serial dilutions of " +
+        srcDesc + stdStock + buffer + ", covering a working range of " +
+        lo + "\u2013" + hi + " \u00b5g/mL."
       );
+
+      // SENTENCE 3: Calibration analysis — replicates + R² inline.
+      var stdReps = slot(v.stdReplicates, "replicate count");
+      var r2Phrase = "";
+      if (v.r2 && String(v.r2).trim() !== "") {
+        r2Phrase = ", and linear regression produced an R\u00b2 of " + v.r2;
+      } else if (c.linearRegression) {
+        r2Phrase = ", and a linear regression was fit to the standard curve";
+      }
+      p.push(
+        "Each calibration point was analyzed in " + stdReps + r2Phrase + "."
+      );
+
+      // SENTENCE 4: Procedure.
       p.push(
         slot(v.sampleVol, "volume") + " \u00b5L of each standard and sample was transferred to a " +
         slot(v.plateFormat, "plate format") + "." +
         (v.settleTime ? " The plate was allowed to equilibrate for " + v.settleTime + " min prior to reading." : "")
       );
+
+      // SENTENCE 5: Detection.
+      var sampReps = v.sampleReps ? (" Samples were analyzed in " + v.sampleReps + " and ") : " ";
       p.push(
-        "Fluorescence intensity was measured on a " + slot(v.instrument, "instrument model") +
+        "Following equilibration," + sampReps + "fluorescence intensity was measured on a " +
+        slot(v.instrument, "instrument model") +
         " at excitation " + slot(v.excitation, "ex") + " nm / emission " + slot(v.emission, "em") + " nm" +
         (v.gain ? " (gain/sensitivity = " + v.gain + ")" : "") +
         (v.softwareVer ? ", using " + v.softwareVer : "") + "."
       );
-      var detailParts = [];
-      if (c.blankCorrected)   detailParts.push("buffer-blank-corrected");
-      if (c.linearRegression) detailParts.push("fit to a linear regression of the standard curve");
-      if (detailParts.length > 0) {
-        p.push("Sample concentrations were back-calculated using " + detailParts.join(" and ") + ".");
+
+      // SENTENCE 6: Back-calculation.
+      if (c.blankCorrected) {
+        p.push(
+          "Buffer-blank-corrected fluorescence intensities were compared to the generated standard curve to back-calculate sample concentrations."
+        );
+      } else {
+        p.push(
+          "Sample concentrations were back-calculated from the generated standard curve."
+        );
       }
+
+      // SENTENCE 7: Reporting rationale.
+      var cvThresh = slot(v.cvThreshold, "CV%") + "%";
+      var dilSel = slot(v.dilutionSelection, "selection rule");
+      p.push(
+        "Reported results corresponded to the dilution that satisfied acceptance criteria for precision (CV \u2264 " +
+        cvThresh + "), fell within the validated linear range, and was selected from the " +
+        dilSel + " to limit propagated dilution error."
+      );
+
+      // Optional sentences.
       if (c.photobleaching) {
         p.push("Plates were read promptly after equilibration to minimize photobleaching effects.");
-      }
-      if (c.sampleReplicates) {
-        p.push("Samples were assayed in duplicate.");
       }
       if (c.dilutionalLinearity) {
         p.push("Dilutional linearity was confirmed across the sample dilution series; concentrations reported are the mean of in-range, qualified dilutions.");
@@ -16573,6 +17252,10 @@ var SCRIBE_TEMPLATES = {
       if (c.outOfRangeReject) {
         p.push("Samples yielding fluorescence values outside the calibrated range of the standard curve were re-assayed at an adjusted dilution.");
       }
+      if (c.sstUsed) {
+        p.push("A system suitability standard was processed alongside the submitted samples using the same dilution scheme.");
+      }
+
       return p.join(" ");
     },
   },
@@ -16593,16 +17276,20 @@ function ScribeTool(props) {
   //     across visits.
   //   - Embedded (from Plate Assay's Scribe tab): props.cfgContext provides
   //     { templateId, values, checks } pre-derived from the live assay state.
-  //     A separate storage key (-assay-vX) keeps in-assay edits from
-  //     polluting the standalone tile.
+  //
+  // Storage is UNIFIED across both contexts — if the analyst sets "Plate reader:
+  // Synergy 4" in the tile, it's remembered when they later use the in-assay
+  // tab. The cfgContext STILL provides cfg-derived auto-fills (which overlay
+  // empty fields, not stored values) so analysts see actual-assay numbers
+  // when in-assay without losing their cross-context defaults.
   //
   // props.embedded — when true, suppress PageHeader (host page already has one)
   // props.cfgContext — { templateId, values, checks } | null
   var embedded = !!props.embedded;
   var cfgCtx = props.cfgContext || null;
 
-  // Localstorage key differs by context so the two paths don't overwrite each other
-  var STORAGE_KEY = embedded ? "essf-scribe-assay-v1" : "essf-scribe-state-v1";
+  // Single storage key — both contexts share the same persisted state.
+  var STORAGE_KEY = "essf-scribe-state-v2";
   var loadState = function() {
     try {
       var raw = localStorage.getItem(STORAGE_KEY);
@@ -16922,6 +17609,1050 @@ function renderParagraphWithSlots(text) {
   }
   return parts;
 }
+
+
+// ─────────────────────────────────────────────────────────────────────────
+//  BIOBURDEN — CFU plate-count analysis for water-system monitoring
+//
+//  Math (per validated example CGS_Validated_Bioburden_Calculation_Example):
+//    Total CFU/mL on plate         = CFU_count / Culture_Plate_volume_mL
+//    Total CFU/mL in original sample = (CFU/mL on plate) × Final_dilution_factor
+//    Average CFU/mL                  = mean across replicates (typically rep pairs)
+//
+//  Water-type limits per the lab's published spec table (in the validated
+//  example sheet, "JAD method" tab). These are the standard pharmaceutical
+//  water-system spec levels:
+//
+//    Water type                Alert       Action
+//    Pre-Treatment Water       1000 cfu/mL 5000 cfu/mL
+//    Chiller Water             100 cfu/mL  1000 cfu/mL
+//    RO (Reverse Osmosis)      10 cfu/mL   100 cfu/mL
+//    PW (Purified Water)       10 cfu/mL   100 cfu/mL
+//    WFI (Water for Injection) 1 cfu/100mL 10 cfu/100mL
+//    HPW (Highly Purified)     10 cfu/mL   100 cfu/mL  (mid-tier; CGS-defined)
+//
+//  WFI is reported per 100 mL by convention; the tool normalizes everything
+//  to "CFU/mL in original sample" for storage, but the report-out re-expresses
+//  WFI in per-100 mL terms when the water type is WFI.
+// ─────────────────────────────────────────────────────────────────────────
+
+var BIOBURDEN_WATER_TYPES = {
+  pre_treatment: { label: "Pre-Treatment",       alert: 1000, action: 5000, unit: "CFU/mL" },
+  chiller:       { label: "Chiller Water",       alert: 100,  action: 1000, unit: "CFU/mL" },
+  ro:            { label: "RO",                  alert: 10,   action: 100,  unit: "CFU/mL" },
+  pw:            { label: "Purified Water (PW)", alert: 10,   action: 100,  unit: "CFU/mL" },
+  hpw:           { label: "HPW",                 alert: 10,   action: 100,  unit: "CFU/mL" },
+  wfi:           { label: "WFI",                 alert: 0.01, action: 0.10, unit: "CFU/mL", reportPer: 100 }, // 1/100mL alert, 10/100mL action
+  custom:        { label: "Custom",              alert: null, action: null, unit: "CFU/mL" },
+};
+
+// Default sample row shape — used when "+ add sample" is clicked
+function bioburdenDefaultRow(id) {
+  return {
+    id: id,
+    description: "",
+    plateVolume: "100",   // mL — what volume was plated (default per validated example)
+    dilutionFactor: "1",  // The final dilution factor (e.g. 10 = 1:10)
+    cfuCount: "",         // CFU count on plate (analyst-entered)
+    tntc: false,          // Too Numerous To Count flag (suppresses count, marks failure)
+  };
+}
+
+// Compute the result for one row.
+//   plateVolume, dilutionFactor parsed as numbers; cfuCount can be blank.
+function bioburdenComputeRow(row) {
+  var pv = parseFloat(row.plateVolume);
+  var df = parseFloat(row.dilutionFactor);
+  if (row.tntc) {
+    return { error: "TNTC", cfuPerMlPlate: null, cfuPerMlOriginal: null };
+  }
+  if (row.cfuCount === "" || row.cfuCount == null) {
+    return { error: "no count", cfuPerMlPlate: null, cfuPerMlOriginal: null };
+  }
+  var cfu = parseFloat(row.cfuCount);
+  if (isNaN(cfu) || isNaN(pv) || isNaN(df) || pv <= 0) {
+    return { error: "invalid input", cfuPerMlPlate: null, cfuPerMlOriginal: null };
+  }
+  var cfuPerMlPlate = cfu / pv;
+  var cfuPerMlOriginal = cfuPerMlPlate * df;
+  return { cfuPerMlPlate: cfuPerMlPlate, cfuPerMlOriginal: cfuPerMlOriginal, error: null };
+}
+
+// Decide alert/action verdict against a water-type spec.
+function bioburdenVerdict(cfuPerMl, waterType) {
+  var spec = BIOBURDEN_WATER_TYPES[waterType];
+  if (!spec || spec.alert == null) return { level: "noSpec", label: "no spec set" };
+  if (cfuPerMl == null) return { level: "noData", label: "—" };
+  if (cfuPerMl >= spec.action) return { level: "action", label: "ACTION", color: "#b4332e", bg: "#fbe5e3" };
+  if (cfuPerMl >= spec.alert)  return { level: "alert",  label: "ALERT",  color: "#bf7a1a", bg: "#fff5d6" };
+  return { level: "pass", label: "PASS", color: "#1a6e3a", bg: "#e9f5ee" };
+}
+
+// Format CFU value, with WFI re-expressed per 100 mL if appropriate
+function bioburdenFmtCfu(cfuPerMl, waterType) {
+  if (cfuPerMl == null) return "\u2014";
+  var spec = BIOBURDEN_WATER_TYPES[waterType];
+  if (spec && spec.reportPer === 100) {
+    var perHundred = cfuPerMl * 100;
+    if (perHundred < 0.1)  return perHundred.toFixed(3) + " CFU/100mL";
+    if (perHundred < 10)   return perHundred.toFixed(2) + " CFU/100mL";
+    return perHundred.toFixed(1) + " CFU/100mL";
+  }
+  if (cfuPerMl < 0.01) return cfuPerMl.toFixed(4) + " CFU/mL";
+  if (cfuPerMl < 1)    return cfuPerMl.toFixed(3) + " CFU/mL";
+  if (cfuPerMl < 100)  return cfuPerMl.toFixed(2) + " CFU/mL";
+  return Math.round(cfuPerMl).toLocaleString() + " CFU/mL";
+}
+
+function BioburdenTool(props) {
+  // Storage key for persistence
+  var STORAGE_KEY = "essf-bioburden-state-v1";
+  var loadState = function() {
+    try { var r = localStorage.getItem(STORAGE_KEY); return r ? JSON.parse(r) : null; }
+    catch(e) { return null; }
+  };
+  var saveState = function(s) {
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(s)); } catch(e) {}
+  };
+
+  var initial = loadState() || {};
+
+  // Setup state
+  var _wt = useState(initial.waterType || "hpw"), waterType = _wt[0], setWaterType = _wt[1];
+  var _media = useState(initial.media || "TSA"), media = _media[0], setMedia = _media[1];
+  var _mediaLot = useState(initial.mediaLot || ""), mediaLot = _mediaLot[0], setMediaLot = _mediaLot[1];
+  var _incTemp = useState(initial.incTemp || "30-35"), incTemp = _incTemp[0], setIncTemp = _incTemp[1];
+  var _incTime = useState(initial.incTime || "72"), incTime = _incTime[0], setIncTime = _incTime[1];
+  var _analyst = useState(initial.analyst || ""), analyst = _analyst[0], setAnalyst = _analyst[1];
+  var _sop = useState(initial.sop || ""), sop = _sop[0], setSop = _sop[1];
+  // Default rows mirror the validated example structure (12 samples: NC, 5 pairs, NC)
+  var defaultRows = function() {
+    return [
+      Object.assign(bioburdenDefaultRow(1),  {description: "Negative Control", dilutionFactor: "1"}),
+      Object.assign(bioburdenDefaultRow(2),  {description: "Sample 1 (rep A)"}),
+      Object.assign(bioburdenDefaultRow(3),  {description: "Sample 1 (rep B)"}),
+      Object.assign(bioburdenDefaultRow(4),  {description: "Sample 2 (rep A)"}),
+      Object.assign(bioburdenDefaultRow(5),  {description: "Sample 2 (rep B)"}),
+      Object.assign(bioburdenDefaultRow(6),  {description: "Sample 3 (rep A)"}),
+      Object.assign(bioburdenDefaultRow(7),  {description: "Sample 3 (rep B)"}),
+      Object.assign(bioburdenDefaultRow(8),  {description: "Negative Control (end)", dilutionFactor: "1"}),
+    ];
+  };
+  var _rows = useState(initial.rows || defaultRows()), rows = _rows[0], setRows = _rows[1];
+  var _copied = useState(""), copied = _copied[0], setCopied = _copied[1];
+
+  // Persist on changes
+  useEffect(function() {
+    saveState({ waterType: waterType, media: media, mediaLot: mediaLot, incTemp: incTemp,
+                incTime: incTime, analyst: analyst, sop: sop, rows: rows });
+  }, [waterType, media, mediaLot, incTemp, incTime, analyst, sop, rows]);
+
+  var updateRow = function(idx, key, val) {
+    var next = rows.map(function(r, i) { return i === idx ? Object.assign({}, r, (function(){var o={};o[key]=val;return o;})()) : r; });
+    setRows(next);
+  };
+  var addRow = function() {
+    var nextId = rows.length > 0 ? Math.max.apply(null, rows.map(function(r){return parseInt(r.id,10);})) + 1 : 1;
+    setRows(rows.concat([bioburdenDefaultRow(nextId)]));
+  };
+  var removeRow = function(idx) {
+    setRows(rows.filter(function(_, i){return i !== idx;}));
+  };
+  var resetAll = function() {
+    if (!window.confirm("Clear all sample rows and counts? (Setup info — media, water type — stays.)")) return;
+    setRows(defaultRows());
+  };
+
+  // Compute all row results
+  var rowResults = rows.map(function(r) {
+    var calc = bioburdenComputeRow(r);
+    return { row: r, calc: calc };
+  });
+
+  // Group rows by description "base" (strip rep suffix) for averaging.
+  // E.g. "Sample 1 (rep A)" and "Sample 1 (rep B)" both become "Sample 1".
+  var deriveBaseDesc = function(desc) {
+    if (!desc) return "";
+    return String(desc).replace(/\s*\((rep|replicate)?\s*[A-Za-z0-9]+\)\s*$/i, "")
+                       .replace(/\s+(rep|replicate)\s+\d+\s*$/i, "")
+                       .trim();
+  };
+  var groupedBySample = {};
+  rowResults.forEach(function(rr, i) {
+    var base = deriveBaseDesc(rr.row.description);
+    if (!base) return;
+    if (!groupedBySample[base]) groupedBySample[base] = [];
+    groupedBySample[base].push({ idx: i, row: rr.row, calc: rr.calc });
+  });
+
+  // Build per-sample averaged results
+  var sampleSummary = Object.keys(groupedBySample).map(function(base) {
+    var members = groupedBySample[base];
+    var validCfu = members.map(function(m){return m.calc.cfuPerMlOriginal;}).filter(function(v){return typeof v === "number";});
+    var anyTNTC = members.some(function(m){return m.calc.error === "TNTC";});
+    var anyMissing = members.some(function(m){return m.calc.error === "no count";});
+    var avg = validCfu.length > 0 ? validCfu.reduce(function(a,b){return a+b;},0) / validCfu.length : null;
+    return {
+      base: base,
+      memberIds: members.map(function(m){return m.row.id;}),
+      n: members.length,
+      validN: validCfu.length,
+      avg: avg,
+      anyTNTC: anyTNTC,
+      anyMissing: anyMissing,
+      isNegControl: /negative\s*control/i.test(base) || /^nc$/i.test(base) || /blank/i.test(base),
+    };
+  });
+
+  // Validation checks
+  var validationChecks = [];
+  // NC check
+  var ncResults = sampleSummary.filter(function(s){return s.isNegControl;});
+  ncResults.forEach(function(nc) {
+    if (nc.avg != null && nc.avg > 0) {
+      validationChecks.push({ severity: "fail", text: nc.base + " has growth (" + bioburdenFmtCfu(nc.avg, waterType) + ") — possible contamination; investigate before reporting." });
+    } else if (nc.avg === 0) {
+      validationChecks.push({ severity: "pass", text: nc.base + " is clean (0 CFU)." });
+    } else if (nc.anyMissing) {
+      validationChecks.push({ severity: "warn", text: nc.base + " is missing counts — fill in before finalizing." });
+    }
+  });
+  // Any TNTC
+  if (rowResults.some(function(r){return r.calc.error === "TNTC";})) {
+    validationChecks.push({ severity: "warn", text: "One or more rows flagged TNTC (too numerous to count). Re-plate at higher dilution to get a countable result." });
+  }
+  // Replicate disagreement
+  sampleSummary.forEach(function(s) {
+    if (s.isNegControl) return;
+    if (s.validN >= 2 && s.avg != null && s.avg > 0) {
+      var values = groupedBySample[s.base].map(function(m){return m.calc.cfuPerMlOriginal;}).filter(function(v){return typeof v === "number";});
+      var min = Math.min.apply(null, values);
+      var max = Math.max.apply(null, values);
+      if (min > 0 && max / min > 5) {
+        validationChecks.push({ severity: "warn", text: s.base + " replicates differ by " + (max/min).toFixed(1) + "× — investigate (e.g. plating error, non-uniform sample)." });
+      }
+    }
+  });
+
+  // Page header
+  var headerNode = <PageHeader instructor={props.instructor} setInstructor={props.setInstructor} onBack={props.onBack} large={true} workspaceLabel="Bioburden" />;
+
+  // Colors
+  var MOSS = "#5a8a3a"; var MOSS_DEEP = "#3a6022"; var MOSS_BG = "#eef6e6";
+
+  return (
+    <div style={{padding:"0 0 2.5rem",maxWidth:1320,margin:"0 auto",boxSizing:"border-box"}}>
+      {headerNode}
+      <div style={{padding:"1.25rem 16px 0"}}>
+
+        {/* Hero card */}
+        <div style={{background:"linear-gradient(180deg,#ffffff,#fbfdff)",borderRadius:24,border:"1px solid #dfe7f2",padding:"1.25rem 1.5rem",boxShadow:"0 18px 44px rgba(11,42,111,0.08)",marginBottom:"1.25rem"}}>
+          <div style={{display:"flex",alignItems:"center",gap:14,marginBottom:6}}>
+            <div style={{width:48,height:48,borderRadius:12,background:MOSS_BG,display:"flex",alignItems:"center",justifyContent:"center"}}>
+              <svg width="32" height="32" viewBox="0 0 28 28" aria-hidden="true">
+                <circle cx="14" cy="14" r="11" fill="none" stroke={MOSS_DEEP} strokeWidth="1.1" />
+                <circle cx="14" cy="14" r="10" fill="#dcecd0" opacity="0.5"/>
+                <g fill={MOSS_DEEP}>
+                  <circle cx="9" cy="11" r="1.1"/><circle cx="13" cy="8" r="0.9"/><circle cx="17.5" cy="10.5" r="1.3"/>
+                  <circle cx="11" cy="15" r="0.8"/><circle cx="15.5" cy="14" r="1.1"/><circle cx="19" cy="15.5" r="0.7"/>
+                  <circle cx="10" cy="18" r="0.9"/><circle cx="14" cy="19.5" r="1.0"/><circle cx="18" cy="19" r="0.8"/>
+                </g>
+              </svg>
+            </div>
+            <div>
+              <div style={{fontSize:21,fontWeight:800,color:"#0b2a6f"}}>Bioburden</div>
+              <div style={{fontSize:13,color:"#5a6984"}}>CFU plate counts with alert/action verdicts per water-system spec.</div>
+            </div>
+          </div>
+        </div>
+
+        {/* SETUP card */}
+        <div style={{background:"#fff",border:"1px solid #dfe7f2",borderRadius:12,padding:"16px 18px",marginBottom:14}}>
+          <div style={{fontSize:11,fontWeight:700,color:MOSS_DEEP,textTransform:"uppercase",letterSpacing:0.6,marginBottom:10}}>
+            Setup
+          </div>
+
+          {/* Water type pills */}
+          <div style={{marginBottom:14}}>
+            <div style={{fontSize:11,color:"#5a6984",marginBottom:6,fontWeight:600}}>Water type</div>
+            <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+              {Object.keys(BIOBURDEN_WATER_TYPES).map(function(k) {
+                var spec = BIOBURDEN_WATER_TYPES[k];
+                var active = waterType === k;
+                return (
+                  <button key={k} onClick={function(){ setWaterType(k); }}
+                          style={{padding:"6px 12px",fontSize:11,fontWeight:600,
+                                  color:active?"#fff":"#5a6984",
+                                  background:active?MOSS:"#f4f6fb",
+                                  border:"1px solid "+(active?MOSS:"#dfe7f2"),
+                                  borderRadius:18,cursor:"pointer",fontFamily:"inherit",
+                                  display:"inline-flex",alignItems:"center",gap:6}}>
+                    {spec.label}
+                    {spec.alert != null && (
+                      <span style={{fontSize:9,opacity:0.85,fontWeight:500}}>
+                        {spec.reportPer === 100
+                          ? (spec.alert * spec.reportPer) + "/" + (spec.action * spec.reportPer) + " per 100mL"
+                          : spec.alert + "/" + spec.action + " CFU/mL"}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+            {waterType === "custom" && (
+              <div style={{marginTop:6,fontSize:11,color:"#bf7a1a",fontStyle:"italic"}}>
+                Custom water type — no alert/action limits will be applied. Add your own limits below if needed.
+              </div>
+            )}
+          </div>
+
+          {/* Media + incubation, in a single row */}
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",gap:10}}>
+            <div>
+              <div style={{fontSize:10.5,color:"#5a6984",marginBottom:4,fontWeight:600}}>Media</div>
+              <input type="text" value={media} onChange={function(e){setMedia(e.target.value);}}
+                     placeholder="TSA / SDA / R2A"
+                     style={{width:"100%",padding:"6px 9px",fontSize:11.5,border:"1px solid #dfe7f2",borderRadius:6,fontFamily:"inherit",color:"#0b2a6f",outline:"none"}} />
+            </div>
+            <div>
+              <div style={{fontSize:10.5,color:"#5a6984",marginBottom:4,fontWeight:600}}>Media lot</div>
+              <input type="text" value={mediaLot} onChange={function(e){setMediaLot(e.target.value);}}
+                     placeholder="(optional)"
+                     style={{width:"100%",padding:"6px 9px",fontSize:11.5,border:"1px solid #dfe7f2",borderRadius:6,fontFamily:"inherit",color:"#0b2a6f",outline:"none"}} />
+            </div>
+            <div>
+              <div style={{fontSize:10.5,color:"#5a6984",marginBottom:4,fontWeight:600}}>Incubation temp (°C)</div>
+              <input type="text" value={incTemp} onChange={function(e){setIncTemp(e.target.value);}}
+                     placeholder="30-35"
+                     style={{width:"100%",padding:"6px 9px",fontSize:11.5,border:"1px solid #dfe7f2",borderRadius:6,fontFamily:"inherit",color:"#0b2a6f",outline:"none"}} />
+            </div>
+            <div>
+              <div style={{fontSize:10.5,color:"#5a6984",marginBottom:4,fontWeight:600}}>Incubation time (hr)</div>
+              <input type="text" value={incTime} onChange={function(e){setIncTime(e.target.value);}}
+                     placeholder="72"
+                     style={{width:"100%",padding:"6px 9px",fontSize:11.5,border:"1px solid #dfe7f2",borderRadius:6,fontFamily:"inherit",color:"#0b2a6f",outline:"none"}} />
+            </div>
+            <div>
+              <div style={{fontSize:10.5,color:"#5a6984",marginBottom:4,fontWeight:600}}>Analyst</div>
+              <input type="text" value={analyst} onChange={function(e){setAnalyst(e.target.value);}}
+                     placeholder="initials"
+                     style={{width:"100%",padding:"6px 9px",fontSize:11.5,border:"1px solid #dfe7f2",borderRadius:6,fontFamily:"inherit",color:"#0b2a6f",outline:"none"}} />
+            </div>
+            <div>
+              <div style={{fontSize:10.5,color:"#5a6984",marginBottom:4,fontWeight:600}}>SOP reference</div>
+              <input type="text" value={sop} onChange={function(e){setSop(e.target.value);}}
+                     placeholder="AN-010"
+                     style={{width:"100%",padding:"6px 9px",fontSize:11.5,border:"1px solid #dfe7f2",borderRadius:6,fontFamily:"inherit",color:"#0b2a6f",outline:"none"}} />
+            </div>
+          </div>
+        </div>
+
+        {/* DATA ENTRY card */}
+        <div style={{background:"#fff",border:"1px solid #dfe7f2",borderRadius:12,padding:"16px 18px",marginBottom:14}}>
+          <div style={{display:"flex",alignItems:"baseline",justifyContent:"space-between",marginBottom:10}}>
+            <div style={{fontSize:11,fontWeight:700,color:MOSS_DEEP,textTransform:"uppercase",letterSpacing:0.6}}>
+              Plate counts
+            </div>
+            <div style={{display:"flex",gap:8}}>
+              <button onClick={addRow}
+                      style={{padding:"5px 11px",fontSize:11,fontWeight:600,color:"#fff",background:MOSS,border:"none",borderRadius:6,cursor:"pointer",fontFamily:"inherit"}}>
+                + add sample
+              </button>
+              <button onClick={resetAll}
+                      style={{padding:"5px 11px",fontSize:11,fontWeight:500,color:"#8e9bb5",background:"transparent",border:"1px solid #dfe7f2",borderRadius:6,cursor:"pointer",fontFamily:"inherit"}}>
+                Reset table
+              </button>
+            </div>
+          </div>
+
+          {/* Table */}
+          <div style={{overflowX:"auto"}}>
+            <table style={{width:"100%",borderCollapse:"collapse",fontSize:11.5,minWidth:780}}>
+              <thead>
+                <tr>
+                  <th style={{textAlign:"left",padding:"7px 6px",fontSize:10,fontWeight:700,color:"#5a6984",textTransform:"uppercase",letterSpacing:0.4,borderBottom:"1px solid #dfe7f2",background:"#f9fafd",width:36}}>#</th>
+                  <th style={{textAlign:"left",padding:"7px 6px",fontSize:10,fontWeight:700,color:"#5a6984",textTransform:"uppercase",letterSpacing:0.4,borderBottom:"1px solid #dfe7f2",background:"#f9fafd"}}>Sample / description</th>
+                  <th style={{textAlign:"right",padding:"7px 6px",fontSize:10,fontWeight:700,color:"#5a6984",textTransform:"uppercase",letterSpacing:0.4,borderBottom:"1px solid #dfe7f2",background:"#f9fafd",width:90}}>Plate vol (mL)</th>
+                  <th style={{textAlign:"right",padding:"7px 6px",fontSize:10,fontWeight:700,color:"#5a6984",textTransform:"uppercase",letterSpacing:0.4,borderBottom:"1px solid #dfe7f2",background:"#f9fafd",width:80}}>Dil factor</th>
+                  <th style={{textAlign:"right",padding:"7px 6px",fontSize:10,fontWeight:700,color:"#5a6984",textTransform:"uppercase",letterSpacing:0.4,borderBottom:"1px solid #dfe7f2",background:"#f9fafd",width:80}}>CFU count</th>
+                  <th style={{textAlign:"center",padding:"7px 6px",fontSize:10,fontWeight:700,color:"#5a6984",textTransform:"uppercase",letterSpacing:0.4,borderBottom:"1px solid #dfe7f2",background:"#f9fafd",width:60}}>TNTC</th>
+                  <th style={{textAlign:"right",padding:"7px 6px",fontSize:10,fontWeight:700,color:"#5a6984",textTransform:"uppercase",letterSpacing:0.4,borderBottom:"1px solid #dfe7f2",background:"#f9fafd",width:130}}>→ CFU/mL original</th>
+                  <th style={{width:32,borderBottom:"1px solid #dfe7f2",background:"#f9fafd"}}></th>
+                </tr>
+              </thead>
+              <tbody>
+                {rowResults.map(function(rr, i) {
+                  var r = rr.row;
+                  var calc = rr.calc;
+                  return (
+                    <tr key={r.id} style={{background: i%2 ? "#fafbfd" : "#fff"}}>
+                      <td style={{padding:"5px 6px",color:"#8e9bb5",fontFamily:"ui-monospace, monospace",fontSize:11}}>{i+1}</td>
+                      <td style={{padding:"4px 6px"}}>
+                        <input type="text" value={r.description} onChange={function(e){updateRow(i, "description", e.target.value);}}
+                               placeholder="e.g. HPW 1 262"
+                               style={{width:"100%",padding:"4px 7px",fontSize:11.5,border:"1px solid #e5edf7",borderRadius:4,fontFamily:"inherit",color:"#0b2a6f",outline:"none",background:"transparent"}} />
+                      </td>
+                      <td style={{padding:"4px 6px"}}>
+                        <input type="text" value={r.plateVolume} onChange={function(e){updateRow(i, "plateVolume", e.target.value);}}
+                               style={{width:"100%",padding:"4px 7px",fontSize:11.5,border:"1px solid #e5edf7",borderRadius:4,fontFamily:"ui-monospace, monospace",color:"#0b2a6f",outline:"none",textAlign:"right",background:"transparent"}} />
+                      </td>
+                      <td style={{padding:"4px 6px"}}>
+                        <input type="text" value={r.dilutionFactor} onChange={function(e){updateRow(i, "dilutionFactor", e.target.value);}}
+                               style={{width:"100%",padding:"4px 7px",fontSize:11.5,border:"1px solid #e5edf7",borderRadius:4,fontFamily:"ui-monospace, monospace",color:"#0b2a6f",outline:"none",textAlign:"right",background:"transparent"}} />
+                      </td>
+                      <td style={{padding:"4px 6px"}}>
+                        <input type="text" value={r.cfuCount} onChange={function(e){updateRow(i, "cfuCount", e.target.value);}}
+                               disabled={r.tntc}
+                               placeholder={r.tntc ? "—" : ""}
+                               style={{width:"100%",padding:"4px 7px",fontSize:11.5,border:"1px solid "+(r.tntc?"#eee":"#e5edf7"),borderRadius:4,fontFamily:"ui-monospace, monospace",color:r.tntc?"#aeaeb2":"#0b2a6f",outline:"none",textAlign:"right",background: r.tntc ? "#f4f4f4" : "transparent"}} />
+                      </td>
+                      <td style={{padding:"4px 6px",textAlign:"center"}}>
+                        <input type="checkbox" checked={!!r.tntc} onChange={function(e){updateRow(i, "tntc", e.target.checked);}}
+                               style={{accentColor:MOSS,cursor:"pointer"}} title="Too Numerous To Count" />
+                      </td>
+                      <td style={{padding:"5px 6px",textAlign:"right",fontFamily:"ui-monospace, monospace",fontSize:11.5,
+                                   color: calc.cfuPerMlOriginal != null ? "#0b2a6f" : "#8e9bb5",
+                                   fontWeight: calc.cfuPerMlOriginal != null ? 600 : 400}}>
+                        {calc.error === "TNTC"
+                          ? <span style={{color:"#b4332e",fontStyle:"italic"}}>TNTC</span>
+                          : calc.error === "no count"
+                            ? <span style={{color:"#aeaeb2"}}>—</span>
+                            : calc.error === "invalid input"
+                              ? <span style={{color:"#b4332e",fontStyle:"italic"}}>?</span>
+                              : bioburdenFmtCfu(calc.cfuPerMlOriginal, waterType)
+                        }
+                      </td>
+                      <td style={{padding:"4px 6px",textAlign:"center"}}>
+                        <button onClick={function(){removeRow(i);}} title="Remove row"
+                                style={{padding:"3px 6px",fontSize:13,color:"#8e9bb5",background:"transparent",border:"none",cursor:"pointer",fontFamily:"inherit",lineHeight:1}}>{"\u00d7"}</button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <div style={{marginTop:8,fontSize:10,color:"#8e9bb5",lineHeight:1.6}}>
+            <strong>Math:</strong> CFU/mL on plate = count ÷ plate volume; CFU/mL in original = (CFU/mL on plate) × dilution factor.
+            Group replicates by using the same base description (e.g. <em>"HPW 1 262 (rep A)"</em> and <em>"HPW 1 262 (rep B)"</em> get averaged together).
+          </div>
+        </div>
+
+        {/* VALIDATION + RESULTS */}
+        {validationChecks.length > 0 && (
+          <div style={{background:"#fff",border:"1px solid #dfe7f2",borderRadius:12,padding:"14px 16px",marginBottom:14}}>
+            <div style={{fontSize:11,fontWeight:700,color:MOSS_DEEP,textTransform:"uppercase",letterSpacing:0.6,marginBottom:8}}>
+              Validation checks
+            </div>
+            {validationChecks.map(function(v, i) {
+              var color = v.severity === "fail" ? "#b4332e" : v.severity === "warn" ? "#bf7a1a" : "#1a6e3a";
+              var symbol = v.severity === "fail" ? "\u2715" : v.severity === "warn" ? "\u26a0" : "\u2713";
+              return (
+                <div key={i} style={{display:"flex",alignItems:"flex-start",gap:8,marginBottom:5,fontSize:11.5,color:"#0b2a6f",lineHeight:1.5}}>
+                  <span style={{color:color,fontWeight:700,flexShrink:0,width:14}}>{symbol}</span>
+                  <span>{v.text}</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* PER-SAMPLE SUMMARY */}
+        <div style={{background:"#fff",border:"1px solid #dfe7f2",borderRadius:12,padding:"16px 18px",marginBottom:14}}>
+          <div style={{fontSize:11,fontWeight:700,color:MOSS_DEEP,textTransform:"uppercase",letterSpacing:0.6,marginBottom:10}}>
+            Per-sample verdict ({BIOBURDEN_WATER_TYPES[waterType].label})
+          </div>
+
+          {sampleSummary.filter(function(s){return !s.isNegControl;}).length === 0 ? (
+            <div style={{padding:"16px",fontSize:12,color:"#8e9bb5",fontStyle:"italic",textAlign:"center",background:"#f9fafd",borderRadius:8}}>
+              Fill in CFU counts in the table above to see per-sample verdicts here.
+            </div>
+          ) : (
+            <table style={{width:"100%",borderCollapse:"collapse",fontSize:11.5}}>
+              <thead>
+                <tr>
+                  <th style={{textAlign:"left",padding:"7px 10px",fontSize:10,fontWeight:700,color:"#5a6984",textTransform:"uppercase",letterSpacing:0.4,borderBottom:"1px solid #dfe7f2",background:"#f9fafd"}}>Sample</th>
+                  <th style={{textAlign:"center",padding:"7px 10px",fontSize:10,fontWeight:700,color:"#5a6984",textTransform:"uppercase",letterSpacing:0.4,borderBottom:"1px solid #dfe7f2",background:"#f9fafd"}}>n reps</th>
+                  <th style={{textAlign:"right",padding:"7px 10px",fontSize:10,fontWeight:700,color:"#5a6984",textTransform:"uppercase",letterSpacing:0.4,borderBottom:"1px solid #dfe7f2",background:"#f9fafd"}}>Average bioburden</th>
+                  <th style={{textAlign:"center",padding:"7px 10px",fontSize:10,fontWeight:700,color:"#5a6984",textTransform:"uppercase",letterSpacing:0.4,borderBottom:"1px solid #dfe7f2",background:"#f9fafd",width:90}}>Verdict</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sampleSummary.filter(function(s){return !s.isNegControl;}).map(function(s, i) {
+                  var verd = bioburdenVerdict(s.avg, waterType);
+                  var displayVal = s.anyTNTC ? "TNTC" : (s.avg != null ? bioburdenFmtCfu(s.avg, waterType) : "\u2014");
+                  return (
+                    <tr key={s.base} style={{background: i%2 ? "#fafbfd" : "#fff"}}>
+                      <td style={{padding:"7px 10px",fontWeight:600,color:"#0b2a6f"}}>{s.base}</td>
+                      <td style={{padding:"7px 10px",textAlign:"center",color:"#5a6984",fontFamily:"ui-monospace, monospace"}}>{s.validN}/{s.n}</td>
+                      <td style={{padding:"7px 10px",textAlign:"right",fontFamily:"ui-monospace, monospace",fontWeight:600,color:"#0b2a6f"}}>
+                        {displayVal}
+                      </td>
+                      <td style={{padding:"7px 10px",textAlign:"center"}}>
+                        {s.anyTNTC ? (
+                          <span style={{display:"inline-block",padding:"2px 8px",borderRadius:10,fontSize:10,fontWeight:700,background:"#fbe5e3",color:"#b4332e"}}>TNTC</span>
+                        ) : verd.level === "noData" ? (
+                          <span style={{color:"#aeaeb2",fontSize:10}}>—</span>
+                        ) : verd.level === "noSpec" ? (
+                          <span style={{color:"#8e9bb5",fontSize:10,fontStyle:"italic"}}>no spec</span>
+                        ) : (
+                          <span style={{display:"inline-block",padding:"2px 8px",borderRadius:10,fontSize:10,fontWeight:700,
+                                        background:verd.bg,color:verd.color}}>{verd.label}</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+
+          {/* Spec footer */}
+          {waterType !== "custom" && BIOBURDEN_WATER_TYPES[waterType].alert != null && (
+            <div style={{marginTop:10,padding:"8px 12px",background:MOSS_BG,border:"1px solid #c9dcb6",borderRadius:8,fontSize:10.5,color:"#3a6022",lineHeight:1.6}}>
+              <strong>{BIOBURDEN_WATER_TYPES[waterType].label} spec:</strong>
+              {" "}Alert level <strong>{
+                BIOBURDEN_WATER_TYPES[waterType].reportPer === 100
+                  ? (BIOBURDEN_WATER_TYPES[waterType].alert * 100) + " CFU/100mL"
+                  : BIOBURDEN_WATER_TYPES[waterType].alert + " CFU/mL"
+              }</strong>{" \u00b7 "}Action level <strong>{
+                BIOBURDEN_WATER_TYPES[waterType].reportPer === 100
+                  ? (BIOBURDEN_WATER_TYPES[waterType].action * 100) + " CFU/100mL"
+                  : BIOBURDEN_WATER_TYPES[waterType].action + " CFU/mL"
+              }</strong>
+            </div>
+          )}
+        </div>
+
+        {/* Reference: full water-type spec table */}
+        <details style={{background:"#fff",border:"1px solid #dfe7f2",borderRadius:12,marginBottom:14}}>
+          <summary style={{padding:"11px 18px",cursor:"pointer",fontSize:11,fontWeight:600,color:"#5a6984",listStyle:"none"}}>
+            <span style={{display:"inline-block",marginRight:8,fontSize:10,color:"#8e9bb5"}}>▸</span>
+            Reference: water-type alert/action limits
+          </summary>
+          <div style={{padding:"0 18px 14px"}}>
+            <table style={{width:"100%",borderCollapse:"collapse",fontSize:11.5}}>
+              <thead>
+                <tr>
+                  <th style={{textAlign:"left",padding:"6px 10px",fontSize:10,fontWeight:700,color:"#5a6984",textTransform:"uppercase",letterSpacing:0.4,borderBottom:"1px solid #eef3f8"}}>Water type</th>
+                  <th style={{textAlign:"right",padding:"6px 10px",fontSize:10,fontWeight:700,color:"#5a6984",textTransform:"uppercase",letterSpacing:0.4,borderBottom:"1px solid #eef3f8"}}>Alert</th>
+                  <th style={{textAlign:"right",padding:"6px 10px",fontSize:10,fontWeight:700,color:"#5a6984",textTransform:"uppercase",letterSpacing:0.4,borderBottom:"1px solid #eef3f8"}}>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {Object.keys(BIOBURDEN_WATER_TYPES).filter(function(k){return k !== "custom";}).map(function(k) {
+                  var spec = BIOBURDEN_WATER_TYPES[k];
+                  return (
+                    <tr key={k} style={{background: waterType === k ? MOSS_BG : "transparent"}}>
+                      <td style={{padding:"6px 10px",color:"#0b2a6f",fontWeight: waterType === k ? 700 : 500}}>{spec.label}</td>
+                      <td style={{padding:"6px 10px",textAlign:"right",fontFamily:"ui-monospace, monospace",color:"#0b2a6f"}}>
+                        {spec.reportPer === 100 ? (spec.alert * 100) + " CFU/100mL" : spec.alert + " CFU/mL"}
+                      </td>
+                      <td style={{padding:"6px 10px",textAlign:"right",fontFamily:"ui-monospace, monospace",color:"#0b2a6f"}}>
+                        {spec.reportPer === 100 ? (spec.action * 100) + " CFU/100mL" : spec.action + " CFU/mL"}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            <div style={{marginTop:8,fontSize:10,color:"#8e9bb5",fontStyle:"italic",lineHeight:1.6}}>
+              Sourced from the validated bioburden example file. WFI is reported per 100 mL by convention. Custom water types disable spec checking.
+            </div>
+          </div>
+        </details>
+
+      </div>
+    </div>
+  );
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────
+//  LIMS FORMATTER — pair samples with batch IDs in LIMS-required format
+//
+//  When an eSSF request comes in and the analyst needs to upload it to LIMS,
+//  the form requires two paired fields:
+//    Samples:  S1, S2, S3, S4, S5      (comma-separated)
+//    Batches:  B1, B2, B1, B3, B2      (same count; batches repeat as needed
+//                                       so that index i samples matches index i
+//                                       batch, even when batch IDs duplicate)
+//
+//  Real-world inputs are messy. This tool gives the analyst three ways to
+//  enter the data — table, two-box, or Excel-paste — all backed by the
+//  same paired data model. Outputs are the two comma-separated LIMS-ready
+//  strings, with a live validation panel above them.
+//
+//  Validation rules (all surfaced; analyst decides):
+//    - blank sample or blank batch  → flag row
+//    - duplicate sample IDs         → info (allowed but unusual)
+//    - count mismatch (table mode can't mismatch; the others can)
+//    - whitespace in IDs            → flag (LIMS upload rejects extra whitespace)
+//    - special characters           → info note
+// ─────────────────────────────────────────────────────────────────────────
+
+// Parse a free-text list into individual tokens. Accepts comma, newline,
+// tab, semicolon as delimiters. Trims tokens and drops empties.
+function limsParseList(raw) {
+  if (!raw) return [];
+  return String(raw)
+    .split(/[,\n\t;]+/)
+    .map(function(t){ return t.trim(); })
+    .filter(function(t){ return t.length > 0; });
+}
+
+// Parse Excel-paste mode: expects 2+ columns separated by tabs (Excel's
+// default copy format). Returns array of [sampleId, batchId] pairs.
+// Handles header row heuristically — if the first row looks like
+// "Sample ... | Batch ..." headers, skip it.
+function limsParseExcelPaste(raw) {
+  if (!raw) return [];
+  var lines = String(raw).split(/\r?\n/).map(function(l){return l.trim();}).filter(function(l){return l.length > 0;});
+  if (lines.length === 0) return [];
+  var pairs = [];
+  // Detect header row by checking if first line contains both "sample" and
+  // "batch" (case-insensitive). If so, skip it.
+  var hasHeader = lines.length > 1 &&
+                  /sample/i.test(lines[0]) &&
+                  /batch/i.test(lines[0]);
+  var start = hasHeader ? 1 : 0;
+  for (var i = start; i < lines.length; i++) {
+    var cols = lines[i].split(/\t|  +/).map(function(c){return c.trim();}).filter(function(c){return c.length > 0;});
+    if (cols.length >= 2) {
+      pairs.push({ sample: cols[0], batch: cols[1] });
+    } else if (cols.length === 1) {
+      pairs.push({ sample: cols[0], batch: "" });
+    }
+  }
+  return pairs;
+}
+
+function LIMSFormatterTool(props) {
+  var STORAGE_KEY = "essf-lims-formatter-state-v1";
+  var loadState = function() {
+    try { var r = localStorage.getItem(STORAGE_KEY); return r ? JSON.parse(r) : null; }
+    catch(e) { return null; }
+  };
+  var saveState = function(s) {
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(s)); } catch(e) {}
+  };
+  var initial = loadState() || {};
+
+  // ───── State ─────
+  // Three modes share a single canonical pairs array; switching modes
+  // re-renders the relevant inputs from the canonical state.
+  var _mode = useState(initial.mode || "table");
+  var mode = _mode[0], setMode = _mode[1];
+
+  // Canonical paired-data model: array of {sample, batch}
+  var _pairs = useState(initial.pairs || [{sample:"", batch:""}, {sample:"", batch:""}]);
+  var pairs = _pairs[0], setPairs = _pairs[1];
+
+  // Two-box mode buffers (live as analyst types, but the "Apply" button
+  // commits them to the canonical pairs)
+  var _samplesRaw = useState(initial.samplesRaw || "");
+  var samplesRaw = _samplesRaw[0], setSamplesRaw = _samplesRaw[1];
+  var _batchesRaw = useState(initial.batchesRaw || "");
+  var batchesRaw = _batchesRaw[0], setBatchesRaw = _batchesRaw[1];
+
+  // Excel-paste buffer
+  var _excelRaw = useState(initial.excelRaw || "");
+  var excelRaw = _excelRaw[0], setExcelRaw = _excelRaw[1];
+
+  // Copy feedback
+  var _copiedField = useState(null);
+  var copiedField = _copiedField[0], setCopiedField = _copiedField[1];
+
+  // Persist
+  useEffect(function() {
+    saveState({
+      mode: mode, pairs: pairs,
+      samplesRaw: samplesRaw, batchesRaw: batchesRaw, excelRaw: excelRaw,
+    });
+  }, [mode, pairs, samplesRaw, batchesRaw, excelRaw]);
+
+  // ───── Mode switching: when entering two-box or excel mode, seed
+  // the raw buffers from the canonical pairs so the user can edit them.
+  var switchMode = function(newMode) {
+    if (newMode === "twoBox" && mode !== "twoBox") {
+      setSamplesRaw(pairs.map(function(p){return p.sample;}).filter(function(s){return s.length > 0;}).join(", "));
+      setBatchesRaw(pairs.map(function(p){return p.batch;}).filter(function(b){return b.length > 0;}).join(", "));
+    } else if (newMode === "excel" && mode !== "excel") {
+      var lines = pairs.filter(function(p){return p.sample.length > 0 || p.batch.length > 0;})
+                       .map(function(p){return p.sample + "\t" + p.batch;});
+      if (lines.length > 0) {
+        setExcelRaw("Sample\tBatch\n" + lines.join("\n"));
+      }
+    }
+    setMode(newMode);
+  };
+
+  // ───── Apply parsed input to canonical pairs ─────
+  var applyTwoBox = function() {
+    var samples = limsParseList(samplesRaw);
+    var batches = limsParseList(batchesRaw);
+    var maxLen = Math.max(samples.length, batches.length);
+    var next = [];
+    for (var i = 0; i < maxLen; i++) {
+      next.push({ sample: samples[i] || "", batch: batches[i] || "" });
+    }
+    if (next.length === 0) next.push({sample:"", batch:""});
+    setPairs(next);
+  };
+
+  var applyExcel = function() {
+    var parsed = limsParseExcelPaste(excelRaw);
+    if (parsed.length === 0) parsed.push({sample:"", batch:""});
+    setPairs(parsed);
+  };
+
+  // ───── Table mode row helpers ─────
+  var updateRow = function(idx, key, val) {
+    var next = pairs.map(function(p, i){
+      if (i !== idx) return p;
+      var o = Object.assign({}, p);
+      o[key] = val;
+      return o;
+    });
+    setPairs(next);
+  };
+  var addRow = function() {
+    setPairs(pairs.concat([{sample:"", batch:""}]));
+  };
+  var removeRow = function(idx) {
+    if (pairs.length === 1) {
+      // Don't drop the last row — clear it instead
+      setPairs([{sample:"", batch:""}]);
+    } else {
+      setPairs(pairs.filter(function(_, i){return i !== idx;}));
+    }
+  };
+  var clearAll = function() {
+    if (!window.confirm("Clear all sample / batch pairs? This cannot be undone.")) return;
+    setPairs([{sample:"", batch:""}, {sample:"", batch:""}]);
+    setSamplesRaw("");
+    setBatchesRaw("");
+    setExcelRaw("");
+  };
+
+  // ───── Derived: output strings + validation ─────
+  var nonEmptyPairs = pairs.filter(function(p){return p.sample.length > 0 || p.batch.length > 0;});
+  var sampleOut = nonEmptyPairs.map(function(p){return p.sample;}).join(", ");
+  var batchOut  = nonEmptyPairs.map(function(p){return p.batch;}).join(", ");
+
+  // Validation checks
+  var checks = [];
+  // Blank rows
+  var blankSampleRows = nonEmptyPairs.filter(function(p){return p.sample.length === 0;}).length;
+  var blankBatchRows  = nonEmptyPairs.filter(function(p){return p.batch.length === 0;}).length;
+  if (blankSampleRows > 0) {
+    checks.push({ severity: "fail", text: blankSampleRows + " row" + (blankSampleRows===1?"":"s") + " missing a Sample ID. LIMS will reject this." });
+  }
+  if (blankBatchRows > 0) {
+    checks.push({ severity: "fail", text: blankBatchRows + " row" + (blankBatchRows===1?"":"s") + " missing a Batch ID. LIMS will reject this." });
+  }
+  // Whitespace check
+  var hasInternalWS = nonEmptyPairs.some(function(p){
+    return /\s/.test(p.sample) || /\s/.test(p.batch);
+  });
+  if (hasInternalWS) {
+    checks.push({ severity: "warn", text: "One or more IDs contain internal whitespace. LIMS upload may reject these." });
+  }
+  // Duplicate samples
+  var sampleCounts = {};
+  nonEmptyPairs.forEach(function(p){
+    if (p.sample) sampleCounts[p.sample] = (sampleCounts[p.sample] || 0) + 1;
+  });
+  var dupSamples = Object.keys(sampleCounts).filter(function(k){return sampleCounts[k] > 1;});
+  if (dupSamples.length > 0) {
+    checks.push({ severity: "info", text: "Duplicate Sample ID" + (dupSamples.length===1?"":"s") + ": " + dupSamples.join(", ") + ". Allowed but unusual — confirm if intentional." });
+  }
+  // Pass-through if all rows complete
+  if (nonEmptyPairs.length > 0 && blankSampleRows === 0 && blankBatchRows === 0 && !hasInternalWS) {
+    checks.push({ severity: "pass", text: "All " + nonEmptyPairs.length + " row" + (nonEmptyPairs.length===1?"":"s") + " complete and well-formed. Ready to paste into LIMS." });
+  }
+
+  // Two-box mode count mismatch (a separate check, only shown in twoBox mode
+  // before "Apply" is clicked — actually shown using the raw buffers).
+  var twoBoxSampleCount = limsParseList(samplesRaw).length;
+  var twoBoxBatchCount  = limsParseList(batchesRaw).length;
+  var twoBoxMismatch = (mode === "twoBox" && twoBoxSampleCount > 0 && twoBoxBatchCount > 0 && twoBoxSampleCount !== twoBoxBatchCount);
+
+  // ───── Copy to clipboard helper ─────
+  var copyToClipboard = function(text, fieldName) {
+    if (!text) return;
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text);
+      } else {
+        // Fallback for older browsers
+        var ta = document.createElement("textarea");
+        ta.value = text;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+      }
+      setCopiedField(fieldName);
+      setTimeout(function(){ setCopiedField(null); }, 1800);
+    } catch (e) {
+      // Silent fail
+    }
+  };
+
+  // ───── Colors ─────
+  var SLATE = "#2c5d8f";
+  var SLATE_DEEP = "#1e4470";
+  var SLATE_BG = "#e3edf7";
+
+  var headerNode = <PageHeader instructor={props.instructor} setInstructor={props.setInstructor} onBack={props.onBack} large={true} workspaceLabel="LIMS Formatter" />;
+
+  return (
+    <div style={{padding:"0 0 2.5rem",maxWidth:1100,margin:"0 auto",boxSizing:"border-box"}}>
+      {headerNode}
+      <div style={{padding:"1.25rem 16px 0"}}>
+
+        {/* Hero card */}
+        <div style={{background:"linear-gradient(180deg,#ffffff,#fbfdff)",borderRadius:24,border:"1px solid #dfe7f2",padding:"1.25rem 1.5rem",boxShadow:"0 18px 44px rgba(11,42,111,0.08)",marginBottom:"1.25rem"}}>
+          <div style={{display:"flex",alignItems:"center",gap:14,marginBottom:6}}>
+            <div style={{width:48,height:48,borderRadius:12,background:SLATE_BG,display:"flex",alignItems:"center",justifyContent:"center"}}>
+              <svg width="32" height="32" viewBox="0 0 28 28" aria-hidden="true">
+                <rect x="4" y="6" width="20" height="6" rx="1.5" fill="#C8DCEF" stroke={SLATE_DEEP} strokeWidth="0.9" />
+                <line x1="9"  y1="6" x2="9"  y2="12" stroke={SLATE_DEEP} strokeWidth="0.6" />
+                <line x1="14" y1="6" x2="14" y2="12" stroke={SLATE_DEEP} strokeWidth="0.6" />
+                <line x1="19" y1="6" x2="19" y2="12" stroke={SLATE_DEEP} strokeWidth="0.6" />
+                <line x1="6.5"  y1="13" x2="6.5"  y2="15.5" stroke={SLATE_DEEP} strokeWidth="0.7" strokeLinecap="round" />
+                <line x1="11.5" y1="13" x2="11.5" y2="15.5" stroke={SLATE_DEEP} strokeWidth="0.7" strokeLinecap="round" />
+                <line x1="16.5" y1="13" x2="16.5" y2="15.5" stroke={SLATE_DEEP} strokeWidth="0.7" strokeLinecap="round" />
+                <line x1="21.5" y1="13" x2="21.5" y2="15.5" stroke={SLATE_DEEP} strokeWidth="0.7" strokeLinecap="round" />
+                <rect x="4" y="16" width="20" height="6" rx="1.5" fill="none" stroke={SLATE_DEEP} strokeWidth="0.9" />
+                <line x1="9"  y1="16" x2="9"  y2="22" stroke={SLATE_DEEP} strokeWidth="0.6" />
+                <line x1="14" y1="16" x2="14" y2="22" stroke={SLATE_DEEP} strokeWidth="0.6" />
+                <line x1="19" y1="16" x2="19" y2="22" stroke={SLATE_DEEP} strokeWidth="0.6" />
+              </svg>
+            </div>
+            <div>
+              <div style={{fontSize:21,fontWeight:800,color:"#0b2a6f"}}>LIMS Formatter</div>
+              <div style={{fontSize:13,color:"#5a6984"}}>Pair samples with batch IDs in the exact form LIMS expects. Output is two comma-separated lists ready to paste.</div>
+            </div>
+          </div>
+        </div>
+
+        {/* Input mode tabs */}
+        <div style={{background:"#fff",border:"1px solid #dfe7f2",borderRadius:12,padding:"14px 18px",marginBottom:14}}>
+          <div style={{fontSize:11,fontWeight:700,color:SLATE_DEEP,textTransform:"uppercase",letterSpacing:0.6,marginBottom:10}}>
+            Input mode
+          </div>
+          <div style={{display:"flex",gap:6,marginBottom:14}}>
+            {[
+              {id:"table",  label:"Table",        desc:"One row per sample"},
+              {id:"twoBox", label:"Two boxes",    desc:"Paste samples + batches separately"},
+              {id:"excel",  label:"Excel paste",  desc:"Tab-separated columns"},
+            ].map(function(m) {
+              var active = mode === m.id;
+              return (
+                <button key={m.id} onClick={function(){switchMode(m.id);}}
+                        style={{padding:"8px 14px",fontSize:12,fontWeight:600,
+                                color:active?"#fff":"#5a6984",
+                                background:active?SLATE:"#f4f6fb",
+                                border:"1px solid "+(active?SLATE:"#dfe7f2"),
+                                borderRadius:8,cursor:"pointer",fontFamily:"inherit",
+                                display:"flex",flexDirection:"column",alignItems:"flex-start",
+                                minWidth:140,textAlign:"left"}}>
+                  <span style={{fontSize:13,fontWeight:700}}>{m.label}</span>
+                  <span style={{fontSize:10,fontWeight:500,opacity:0.8,marginTop:2}}>{m.desc}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* ── TABLE MODE ── */}
+          {mode === "table" && (
+            <div>
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
+                <div style={{fontSize:11.5,color:"#5a6984"}}>One row per sample. Each sample needs a batch ID, even if batches repeat.</div>
+                <div style={{display:"flex",gap:8}}>
+                  <button onClick={addRow}
+                          style={{padding:"5px 11px",fontSize:11,fontWeight:600,color:"#fff",background:SLATE,border:"none",borderRadius:6,cursor:"pointer",fontFamily:"inherit"}}>
+                    + add row
+                  </button>
+                  <button onClick={clearAll}
+                          style={{padding:"5px 11px",fontSize:11,fontWeight:500,color:"#8e9bb5",background:"transparent",border:"1px solid #dfe7f2",borderRadius:6,cursor:"pointer",fontFamily:"inherit"}}>
+                    Clear
+                  </button>
+                </div>
+              </div>
+              <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                <thead>
+                  <tr>
+                    <th style={{textAlign:"left",padding:"6px 8px",fontSize:10,fontWeight:700,color:"#5a6984",textTransform:"uppercase",letterSpacing:0.4,borderBottom:"1px solid #dfe7f2",background:"#f9fafd",width:36}}>#</th>
+                    <th style={{textAlign:"left",padding:"6px 8px",fontSize:10,fontWeight:700,color:"#5a6984",textTransform:"uppercase",letterSpacing:0.4,borderBottom:"1px solid #dfe7f2",background:"#f9fafd"}}>Sample ID</th>
+                    <th style={{textAlign:"left",padding:"6px 8px",fontSize:10,fontWeight:700,color:"#5a6984",textTransform:"uppercase",letterSpacing:0.4,borderBottom:"1px solid #dfe7f2",background:"#f9fafd"}}>Batch ID</th>
+                    <th style={{width:32,borderBottom:"1px solid #dfe7f2",background:"#f9fafd"}}></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pairs.map(function(p, i){
+                    return (
+                      <tr key={i} style={{background: i%2 ? "#fafbfd" : "#fff"}}>
+                        <td style={{padding:"4px 8px",color:"#8e9bb5",fontFamily:"ui-monospace, monospace",fontSize:11}}>{i+1}</td>
+                        <td style={{padding:"3px 8px"}}>
+                          <input type="text" value={p.sample} onChange={function(e){updateRow(i, "sample", e.target.value);}}
+                                 placeholder="e.g. P22-001"
+                                 style={{width:"100%",padding:"5px 8px",fontSize:12,border:"1px solid #e5edf7",borderRadius:4,fontFamily:"ui-monospace, monospace",color:"#0b2a6f",outline:"none",background:"transparent"}} />
+                        </td>
+                        <td style={{padding:"3px 8px"}}>
+                          <input type="text" value={p.batch} onChange={function(e){updateRow(i, "batch", e.target.value);}}
+                                 placeholder="e.g. BTC-2026-15"
+                                 style={{width:"100%",padding:"5px 8px",fontSize:12,border:"1px solid #e5edf7",borderRadius:4,fontFamily:"ui-monospace, monospace",color:"#0b2a6f",outline:"none",background:"transparent"}} />
+                        </td>
+                        <td style={{padding:"3px 8px",textAlign:"center"}}>
+                          <button onClick={function(){removeRow(i);}} title="Remove row"
+                                  style={{padding:"3px 6px",fontSize:13,color:"#8e9bb5",background:"transparent",border:"none",cursor:"pointer",fontFamily:"inherit",lineHeight:1}}>{"\u00d7"}</button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {/* ── TWO-BOX MODE ── */}
+          {mode === "twoBox" && (
+            <div>
+              <div style={{fontSize:11.5,color:"#5a6984",marginBottom:8}}>
+                Paste samples in the left box and batch IDs in the right box. Either can be comma, newline, tab, or semicolon-separated. The tool aligns them positionally — sample at position N pairs with batch at position N.
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:10}}>
+                <div>
+                  <div style={{fontSize:10.5,color:"#5a6984",marginBottom:4,fontWeight:600}}>Sample IDs</div>
+                  <textarea value={samplesRaw} onChange={function(e){setSamplesRaw(e.target.value);}}
+                            placeholder="P22-001, P22-002, P22-003&#10;or one per line"
+                            style={{width:"100%",minHeight:140,padding:"8px 10px",fontSize:12,border:"1px solid "+(twoBoxMismatch?"#bf7a1a":"#dfe7f2"),borderRadius:6,fontFamily:"ui-monospace, monospace",color:"#0b2a6f",outline:"none",resize:"vertical",lineHeight:1.5}} />
+                  <div style={{fontSize:10,color:twoBoxMismatch?"#bf7a1a":"#8e9bb5",marginTop:4,fontFamily:"ui-monospace, monospace"}}>
+                    {twoBoxSampleCount} sample{twoBoxSampleCount===1?"":"s"} detected
+                  </div>
+                </div>
+                <div>
+                  <div style={{fontSize:10.5,color:"#5a6984",marginBottom:4,fontWeight:600}}>Batch IDs</div>
+                  <textarea value={batchesRaw} onChange={function(e){setBatchesRaw(e.target.value);}}
+                            placeholder="BTC-2026-15, BTC-2026-15, BTC-2026-16&#10;(repeat each batch as needed)"
+                            style={{width:"100%",minHeight:140,padding:"8px 10px",fontSize:12,border:"1px solid "+(twoBoxMismatch?"#bf7a1a":"#dfe7f2"),borderRadius:6,fontFamily:"ui-monospace, monospace",color:"#0b2a6f",outline:"none",resize:"vertical",lineHeight:1.5}} />
+                  <div style={{fontSize:10,color:twoBoxMismatch?"#bf7a1a":"#8e9bb5",marginTop:4,fontFamily:"ui-monospace, monospace"}}>
+                    {twoBoxBatchCount} batch{twoBoxBatchCount===1?"":"es"} detected
+                  </div>
+                </div>
+              </div>
+              {twoBoxMismatch && (
+                <div style={{padding:"8px 12px",background:"#fff5d6",border:"1px solid #f0c87a",borderRadius:8,fontSize:11.5,color:"#7a5a00",marginBottom:10,lineHeight:1.5}}>
+                  <strong>Count mismatch:</strong> {twoBoxSampleCount} samples vs {twoBoxBatchCount} batches. LIMS requires equal counts. Add the missing IDs, or use the table mode for precise control. The tool will pair what it can on "Apply" but blank entries will be flagged.
+                </div>
+              )}
+              <button onClick={applyTwoBox}
+                      style={{padding:"8px 16px",fontSize:12,fontWeight:600,color:"#fff",background:SLATE,border:"none",borderRadius:6,cursor:"pointer",fontFamily:"inherit"}}>
+                Apply to outputs
+              </button>
+            </div>
+          )}
+
+          {/* ── EXCEL-PASTE MODE ── */}
+          {mode === "excel" && (
+            <div>
+              <div style={{fontSize:11.5,color:"#5a6984",marginBottom:8}}>
+                Paste a two-column range from Excel — Sample ID in the first column, Batch ID in the second. The tool auto-detects and skips a header row if one is present. Tab characters or 2+ spaces serve as column separators.
+              </div>
+              <textarea value={excelRaw} onChange={function(e){setExcelRaw(e.target.value);}}
+                        placeholder={"Sample\tBatch\nP22-001\tBTC-2026-15\nP22-002\tBTC-2026-15\nP22-003\tBTC-2026-16"}
+                        style={{width:"100%",minHeight:200,padding:"10px 12px",fontSize:12,border:"1px solid #dfe7f2",borderRadius:6,fontFamily:"ui-monospace, monospace",color:"#0b2a6f",outline:"none",resize:"vertical",lineHeight:1.55,marginBottom:10}} />
+              <button onClick={applyExcel}
+                      style={{padding:"8px 16px",fontSize:12,fontWeight:600,color:"#fff",background:SLATE,border:"none",borderRadius:6,cursor:"pointer",fontFamily:"inherit"}}>
+                Parse and apply
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* Validation panel */}
+        {checks.length > 0 && nonEmptyPairs.length > 0 && (
+          <div style={{background:"#fff",border:"1px solid #dfe7f2",borderRadius:12,padding:"14px 16px",marginBottom:14}}>
+            <div style={{fontSize:11,fontWeight:700,color:SLATE_DEEP,textTransform:"uppercase",letterSpacing:0.6,marginBottom:8}}>
+              Validation
+            </div>
+            {checks.map(function(c, i){
+              var col = c.severity === "fail" ? "#b4332e"
+                      : c.severity === "warn" ? "#bf7a1a"
+                      : c.severity === "pass" ? "#1a6e3a"
+                      : "#5a6984";
+              var sym = c.severity === "fail" ? "\u2715"
+                      : c.severity === "warn" ? "\u26a0"
+                      : c.severity === "pass" ? "\u2713"
+                      : "\u2139";
+              return (
+                <div key={i} style={{display:"flex",alignItems:"flex-start",gap:8,marginBottom:5,fontSize:11.5,color:"#0b2a6f",lineHeight:1.5}}>
+                  <span style={{color:col,fontWeight:700,flexShrink:0,width:14}}>{sym}</span>
+                  <span>{c.text}</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* Output panel */}
+        <div style={{background:"#fff",border:"1px solid #dfe7f2",borderRadius:12,padding:"16px 18px",marginBottom:14}}>
+          <div style={{fontSize:11,fontWeight:700,color:SLATE_DEEP,textTransform:"uppercase",letterSpacing:0.6,marginBottom:10}}>
+            LIMS-ready output
+          </div>
+
+          {/* Samples output */}
+          <div style={{marginBottom:14}}>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6}}>
+              <div style={{fontSize:11.5,color:"#5a6984",fontWeight:600}}>Samples field</div>
+              <button onClick={function(){copyToClipboard(sampleOut, "samples");}}
+                      disabled={!sampleOut}
+                      style={{padding:"4px 10px",fontSize:11,fontWeight:600,
+                              color:sampleOut?"#fff":"#aeaeb2",
+                              background:sampleOut?(copiedField==="samples"?"#1a6e3a":SLATE):"#f4f6fb",
+                              border:"none",borderRadius:5,cursor:sampleOut?"pointer":"default",fontFamily:"inherit",
+                              transition:"background 0.2s"}}>
+                {copiedField === "samples" ? "\u2713 Copied" : "Copy"}
+              </button>
+            </div>
+            <div style={{padding:"10px 12px",background:"#f9fafd",border:"1px solid #dfe7f2",borderRadius:6,fontSize:13,fontFamily:"ui-monospace, monospace",color:"#0b2a6f",minHeight:42,lineHeight:1.6,wordBreak:"break-all"}}>
+              {sampleOut || <span style={{color:"#aeaeb2",fontStyle:"italic"}}>(samples will appear here)</span>}
+            </div>
+          </div>
+
+          {/* Batches output */}
+          <div>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6}}>
+              <div style={{fontSize:11.5,color:"#5a6984",fontWeight:600}}>Batch IDs field</div>
+              <button onClick={function(){copyToClipboard(batchOut, "batches");}}
+                      disabled={!batchOut}
+                      style={{padding:"4px 10px",fontSize:11,fontWeight:600,
+                              color:batchOut?"#fff":"#aeaeb2",
+                              background:batchOut?(copiedField==="batches"?"#1a6e3a":SLATE):"#f4f6fb",
+                              border:"none",borderRadius:5,cursor:batchOut?"pointer":"default",fontFamily:"inherit",
+                              transition:"background 0.2s"}}>
+                {copiedField === "batches" ? "\u2713 Copied" : "Copy"}
+              </button>
+            </div>
+            <div style={{padding:"10px 12px",background:"#f9fafd",border:"1px solid #dfe7f2",borderRadius:6,fontSize:13,fontFamily:"ui-monospace, monospace",color:"#0b2a6f",minHeight:42,lineHeight:1.6,wordBreak:"break-all"}}>
+              {batchOut || <span style={{color:"#aeaeb2",fontStyle:"italic"}}>(batch IDs will appear here)</span>}
+            </div>
+          </div>
+
+          <div style={{marginTop:10,fontSize:10,color:"#8e9bb5",lineHeight:1.6}}>
+            Both fields have the same number of entries — one batch ID per sample, in matching positions, even when batch IDs repeat. Paste each field into its corresponding LIMS form input.
+          </div>
+        </div>
+
+      </div>
+    </div>
+  );
+}
+
+
 
 
 
@@ -18649,6 +20380,16 @@ function App() {
   // Scribe tool — method-description paragraph generator for LIMS.
   if (chosenView === "scribe") {
     return <ScribeTool onBack={function(){ setChosenView(null); }} instructor={instructor} setInstructor={setInstructor} />;
+  }
+
+  // Bioburden assay — CFU plate counts for water-system monitoring.
+  if (chosenView === "bioburden") {
+    return <BioburdenTool onBack={function(){ setChosenView(null); }} instructor={instructor} setInstructor={setInstructor} />;
+  }
+
+  // LIMS Formatter — pair samples with batch IDs for LIMS upload.
+  if (chosenView === "limsFormatter") {
+    return <LIMSFormatterTool onBack={function(){ setChosenView(null); }} instructor={instructor} setInstructor={setInstructor} />;
   }
 
   if(!on) return (
@@ -22447,9 +24188,19 @@ function App() {
           if (activeProtocol) {
             put("kitVendor", activeProtocol.vendorName);
             put("kitPN",     activeProtocol.vendorPN);
+            put("kitName",   activeProtocol.vendorName); // for BCA template's kitName field
+            put("internalSOP", activeProtocol.internalId); // BTEC AN-### citation
             // For Bradford, push vendor PN into kitPN; product name handled separately
             if (tid === "bradford" && activeProtocol.vendorName) {
               put("kitProduct", activeProtocol.vendorName);
+            }
+            // CV threshold and dilution selection from protocol
+            if (activeProtocol.cvThreshold) {
+              // Strip the "%" suffix since template suffix re-adds it
+              put("cvThreshold", String(activeProtocol.cvThreshold).replace(/%$/, ""));
+            }
+            if (activeProtocol.dilutionSelection) {
+              put("dilutionSelection", activeProtocol.dilutionSelection + " of the dilution series");
             }
             // Detection wavelength
             if (tid === "fluor") {
@@ -22478,6 +24229,11 @@ function App() {
             }
           }
 
+          // Standard stock concentration (cfg.stdConc)
+          if (cfg.stdConc) {
+            put("stdStockConc", cfg.stdConc);
+          }
+
           // Standard concentration range — pull lowest and highest cal points
           // actually used. Walk res[0].cal if available.
           if (res && res[0] && res[0].cal && res[0].cal.length > 0) {
@@ -22485,11 +24241,23 @@ function App() {
             if (calConcs.length > 0) {
               var lo = Math.min.apply(null, calConcs);
               var hi = Math.max.apply(null, calConcs);
-              // Concentration unit comes from cfg.unit (e.g. "mg/mL"). If it's
-              // µg/mL and tid is "fluor" the template wants µg/mL — match.
               put("stdRangeLow",  lo);
               put("stdRangeHigh", hi);
+              // Levels count
+              put("stdLevels", calConcs.length + "-point");
             }
+          }
+
+          // R² from analysis — use first plate's slope.r2 if available
+          if (res && res[0] && res[0].slope && typeof res[0].slope.r2 === "number") {
+            // Round to 4 sig digits to match legacy fmtNum convention
+            var r2v = res[0].slope.r2;
+            var r2str = r2v.toPrecision(4);
+            // Strip trailing zeros for cleanliness: "0.9980" -> "0.998"
+            if (r2str.indexOf(".") !== -1) {
+              r2str = r2str.replace(/0+$/, "").replace(/\.$/, "");
+            }
+            put("r2", r2str);
           }
 
           // Standard volume — not in cfg directly; assayVolume in limsReport
@@ -22509,6 +24277,16 @@ function App() {
                           stdReps === 4 ? "quadruplicate" :
                           stdReps + "-replicate";
             put("stdReplicates", repWord);
+          }
+
+          // Sample replicates from cfg.xdf
+          var smpReps = cfg.xdf ? parseInt(cfg.xdf, 10) : null;
+          if (smpReps && smpReps > 1) {
+            var smpRepWord = smpReps === 2 ? "duplicate" :
+                             smpReps === 3 ? "triplicate" :
+                             smpReps === 4 ? "quadruplicate" :
+                             smpReps + "-replicate";
+            put("sampleReps", smpRepWord);
           }
 
           // Pull any slot-fill values the analyst already typed in the legacy UI
@@ -22541,13 +24319,16 @@ function App() {
 
           // Checks — turn on by default in the in-assay context the ones the
           // analyst clearly did (blank correction always; linear regression
-          // because we display the linear fit; sample replicates if xdf > 1).
+          // because we display the linear fit; dilutional linearity because
+          // Bench enforces ICH M10 selection; out-of-range rejection per the
+          // dilution-selection logic). SST and activeProtein left off — analyst
+          // toggles based on what they actually did.
           var ch = {
             blankCorrected: true,
             linearRegression: true,
-            sampleReplicates: (cfg.xdf && parseInt(cfg.xdf, 10) > 1) ? true : false,
-            dilutionalLinearity: true, // analyst is using Bench, which enforces this
+            dilutionalLinearity: true,
             outOfRangeReject: true,
+            activeProtein: tid === "fluor",  // default-on only for direct fluorescence
           };
 
           return { templateId: tid, values: vals, checks: ch };
