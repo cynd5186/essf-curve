@@ -30,6 +30,7 @@ var FEATURES = {
   hplcQuant: false,
   benchCalcs: false,
   compatibility: true,  // Buffer/reagent interference tool (Pierce protein assays). Enabled.
+  scribe: true,         // Method-description template generator. Enabled.
 };
 
 var avg = function(a) { return a.length ? a.reduce(function(s,v){return s+v;},0)/a.length : 0; };
@@ -37,7 +38,7 @@ var sdc = function(a) { if (a.length<2) return 0; var m=avg(a); return Math.sqrt
 var cvc = function(a) { var m=avg(a); return m ? sdc(a)/Math.abs(m) : Infinity; };
 var med = function(a) { var s=a.slice().sort(function(x,y){return x-y;}); var m=Math.floor(s.length/2); return s.length%2 ? s[m] : (s[m-1]+s[m])/2; };
 var APP_NAME = "eSSF Bench";
-var APP_VERSION = "v5d12";
+var APP_VERSION = "v5d14";
 
 // ── Chart export utility ─────────────────────────────────────────────────
 // Exports an SVG chart as a PNG, either as a downloaded file or to the
@@ -1249,8 +1250,8 @@ var tdS={padding:"8px 10px",borderBottom:"1px solid #f0f0f3",fontSize:12,whiteSp
 var SHOW_METHOD_REVIEW = false;
 var SHOW_TOOLS_TAB = false;
 var SHOW_INSTRUCTOR_MODE = false;  // Instructor mode hidden for analyst-facing build; re-enable when role-gated
-var SHOW_LIMS_REPORT = true;       // Methods tab — helps fill the Methods tab of an existing LIMS eSSF draft
-var ALL_TABS = ["Data Entry","Analysis","Results","Method Review","Tools","Methods"];
+var SHOW_LIMS_REPORT = true;       // Scribe tab — helps fill the Methods tab of an existing LIMS eSSF draft
+var ALL_TABS = ["Data Entry","Analysis","Results","Method Review","Tools","Scribe"];
 var TABS = ALL_TABS.map(function(label, idx){
   if (idx === 3 && !SHOW_METHOD_REVIEW) return null;
   if (idx === 4 && !SHOW_TOOLS_TAB) return null;
@@ -13967,6 +13968,32 @@ function ChooserScreen(props){
           enabled: FEATURES.compatibility,
           onClick: function(){ onChoose("compatibility"); },
         })}
+
+        {card({
+          stripeColor: FEATURES.scribe ? "#9b6dc7" : "#D3D1C7",
+          iconBg:      FEATURES.scribe ? "#F1EAFB" : "#F1EFE8",
+          iconColor:   FEATURES.scribe ? "#4a2d8f" : "#888780",
+          iconNode: (
+            // Hand-drawn quill: writes method paragraphs. Reuses the eSSF
+            // visual hand (single-stroke lines, no fills except accents).
+            <svg width="28" height="28" viewBox="0 0 28 28" aria-hidden="true">
+              {/* Quill feather body */}
+              <path d="M 20 4 Q 25 8 22 14 Q 19 18 14 19 L 12 21 L 11 20 L 13 18 Q 17 14 18 9 Q 19 6 20 4 Z"
+                    fill={FEATURES.scribe ? "#D4BCE8" : "#D3D1C7"}
+                    stroke={FEATURES.scribe ? "#4a2d8f" : "#888780"}
+                    strokeWidth="0.9" strokeLinejoin="round" />
+              {/* Quill shaft + ink trail */}
+              <path d="M 12 21 L 5 26 M 8 22 Q 10 22 11 24"
+                    fill="none"
+                    stroke={FEATURES.scribe ? "#4a2d8f" : "#888780"}
+                    strokeWidth="1.1" strokeLinecap="round" />
+            </svg>
+          ),
+          name: "Scribe",
+          desc: "Generate consistent method paragraphs for LIMS and reports",
+          enabled: FEATURES.scribe,
+          onClick: function(){ onChoose("scribe"); },
+        })}
       </div>
 
       {/* Sign-out badge — lets the analyst sign out from the chooser
@@ -16208,6 +16235,696 @@ function CompatibilityTool(props) {
 }
 
 
+// ─────────────────────────────────────────────────────────────────────────
+//  SCRIBE — method-description template tool
+//
+//  An analyst picks an assay template (BCA / Bradford / direct fluorescence),
+//  fills in structured fields (instrument, incubation time/temp, wavelength,
+//  vendor info, etc.) plus a checklist of yes/no procedural confirmations
+//  (e.g. "Did you blank-correct?"). A method-section paragraph is generated
+//  live on the right side using template verbiage with the analyst's values
+//  substituted. The analyst copies the paragraph into LIMS.
+//
+//  Why checklist + fields together: fields capture WHAT VALUE (e.g. "37°C"),
+//  checklist captures DID THE STEP HAPPEN (boilerplate that's either included
+//  in the paragraph or omitted). If an analyst didn't run a duplicate cal
+//  series, the sentence about duplicate cal series shouldn't appear.
+//
+//  Design pattern follows the eSSF design system:
+//    - Stripe color: purple #9b6dc7 (matches Scribe identity established
+//      in Relay's chooser mockup)
+//    - Form on the left, generated paragraph on the right (two-column)
+//    - Empty/missing fields render as [bracketed slots] in the paragraph
+//      so the analyst can see exactly what's still needed
+//    - Localstorage persistence keyed per-template so analyst can switch
+//      between templates without losing in-progress work
+// ─────────────────────────────────────────────────────────────────────────
+
+var SCRIBE_TEMPLATES = {
+  bca: {
+    label: "BCA Protein Assay",
+    color: "#9b6dc7",
+    bg: "#F1EAFB",
+    deep: "#4a2d8f",
+    description: "Colorimetric protein quantification — Pierce/Sigma BCA chemistry.",
+    sections: [
+      {
+        id: "reagents",
+        title: "Reagents",
+        fields: [
+          { id: "kitVendor",    label: "Kit vendor",        placeholder: "Thermo Scientific Pierce",   default: "Thermo Scientific Pierce" },
+          { id: "kitPN",        label: "Kit P/N",           placeholder: "23225",                       default: "23225" },
+          { id: "lotNumber",    label: "Kit lot #",         placeholder: "(optional)" },
+          { id: "standardProt", label: "Standard protein",  placeholder: "Bovine serum albumin (BSA)",  default: "Bovine serum albumin (BSA)" },
+          { id: "wrRatio",      label: "Working reagent ratio (A:B)", placeholder: "50:1", default: "50:1" },
+        ],
+      },
+      {
+        id: "standards",
+        title: "Standards",
+        fields: [
+          { id: "stdRangeLow",  label: "Low end of std range", placeholder: "0.025",        suffix: "mg/mL", default: "0.025" },
+          { id: "stdRangeHigh", label: "High end of std range", placeholder: "2.0",         suffix: "mg/mL", default: "2.0" },
+          { id: "stdReplicates", label: "Replicates per std",  placeholder: "triplicate",   default: "triplicate" },
+          { id: "stdDiluent",   label: "Standard diluent",    placeholder: "PBS or assay matrix", default: "PBS" },
+        ],
+      },
+      {
+        id: "procedure",
+        title: "Procedure",
+        fields: [
+          { id: "sampleVol",  label: "Sample volume",  placeholder: "25",   suffix: "µL", default: "25" },
+          { id: "stdVol",     label: "Standard volume", placeholder: "25",  suffix: "µL", default: "25" },
+          { id: "wrVol",      label: "Working reagent volume", placeholder: "200", suffix: "µL", default: "200" },
+          { id: "incTemp",    label: "Incubation temperature", placeholder: "37", suffix: "°C", default: "37" },
+          { id: "incTime",    label: "Incubation time",       placeholder: "30", suffix: "min", default: "30" },
+          { id: "plateFormat", label: "Plate format",          placeholder: "96-well microplate", default: "96-well microplate" },
+        ],
+      },
+      {
+        id: "detection",
+        title: "Detection",
+        fields: [
+          { id: "wavelength", label: "Detection wavelength", placeholder: "562", suffix: "nm", default: "562" },
+          { id: "instrument", label: "Plate reader",         placeholder: "BioTek Synergy 4" },
+          { id: "softwareVer", label: "Acquisition software", placeholder: "(optional)" },
+        ],
+      },
+    ],
+    checklist: [
+      { id: "blankCorrected",   label: "Blank-corrected absorbance values were used",        included: true },
+      { id: "linearRegression", label: "Linear regression was used for the standard curve",  included: true },
+      { id: "sampleReplicates", label: "Samples were run in duplicate (or specify below)" },
+      { id: "dilutionalLinearity", label: "Dilutional linearity was confirmed across the dilution series" },
+      { id: "outOfRangeReject", label: "Values outside the standard curve range were re-assayed at adjusted dilution" },
+    ],
+    paragraph: function(v, c) {
+      var p = [];
+      p.push(
+        "Total protein concentration was determined using the " +
+        slot(v.kitVendor, "kit vendor") + " BCA Protein Assay Kit" +
+        (v.kitPN ? " (P/N " + v.kitPN + ")" : "") +
+        (v.lotNumber ? " (lot " + v.lotNumber + ")" : "") +
+        "."
+      );
+      p.push(
+        "A standard curve was generated using " + slot(v.standardProt, "standard protein") +
+        " over a range of " + slot(v.stdRangeLow, "low") + "\u2013" + slot(v.stdRangeHigh, "high") + " mg/mL" +
+        " in " + slot(v.stdDiluent, "diluent") +
+        ", prepared in " + slot(v.stdReplicates, "replicate count") + "."
+      );
+      p.push(
+        "Samples and standards (" + slot(v.sampleVol, "sample µL") + " \u00b5L and " +
+        slot(v.stdVol, "std µL") + " \u00b5L, respectively) were combined with working reagent " +
+        "(" + slot(v.wrVol, "WR µL") + " \u00b5L; prepared at " + slot(v.wrRatio, "A:B ratio") + ", Reagent A:Reagent B)" +
+        " in a " + slot(v.plateFormat, "plate format") +
+        ", then incubated at " + slot(v.incTemp, "temp") + "\u00b0C for " + slot(v.incTime, "time") + " min."
+      );
+      p.push(
+        "Absorbance at " + slot(v.wavelength, "wavelength") + " nm was measured on a " +
+        slot(v.instrument, "instrument model") +
+        (v.softwareVer ? " using " + v.softwareVer : "") + " plate reader."
+      );
+      // Conditional sentences based on checklist
+      var detailParts = [];
+      if (c.blankCorrected)        detailParts.push("blank-corrected");
+      if (c.linearRegression)      detailParts.push("fit to a linear regression of the standard curve");
+      if (detailParts.length > 0) {
+        p.push("Sample concentrations were back-calculated using " + detailParts.join(" and ") + ".");
+      }
+      if (c.sampleReplicates) {
+        p.push("Samples were assayed in duplicate.");
+      }
+      if (c.dilutionalLinearity) {
+        p.push("Dilutional linearity was confirmed across the sample dilution series; concentrations reported are the mean of in-range, qualified dilutions.");
+      }
+      if (c.outOfRangeReject) {
+        p.push("Samples yielding absorbance values outside the calibrated range of the standard curve were re-assayed at an adjusted dilution.");
+      }
+      return p.join(" ");
+    },
+  },
+
+  bradford: {
+    label: "Bradford Protein Assay",
+    color: "#9b6dc7",
+    bg: "#F1EAFB",
+    deep: "#4a2d8f",
+    description: "Coomassie-dye-based colorimetric protein quantification (Bradford 1976).",
+    sections: [
+      {
+        id: "reagents",
+        title: "Reagents",
+        fields: [
+          { id: "kitVendor",    label: "Reagent vendor",     placeholder: "Bio-Rad", default: "Bio-Rad" },
+          { id: "kitProduct",   label: "Product name",       placeholder: "Quick Start Bradford 1× Dye Reagent", default: "Quick Start Bradford 1\u00d7 Dye Reagent" },
+          { id: "kitPN",        label: "Catalog #",          placeholder: "500-0205", default: "500-0205" },
+          { id: "lotNumber",    label: "Reagent lot #",      placeholder: "(optional)" },
+          { id: "standardProt", label: "Standard protein",   placeholder: "Bovine serum albumin (BSA)", default: "Bovine serum albumin (BSA)" },
+        ],
+      },
+      {
+        id: "standards",
+        title: "Standards",
+        fields: [
+          { id: "stdRangeLow",  label: "Low end of std range",  placeholder: "0.0625", suffix: "mg/mL", default: "0.0625" },
+          { id: "stdRangeHigh", label: "High end of std range", placeholder: "2.0",    suffix: "mg/mL", default: "2.0" },
+          { id: "stdReplicates", label: "Replicates per std",   placeholder: "triplicate", default: "triplicate" },
+          { id: "stdDiluent",   label: "Standard diluent",     placeholder: "PBS or assay matrix", default: "PBS" },
+        ],
+      },
+      {
+        id: "procedure",
+        title: "Procedure",
+        fields: [
+          { id: "sampleVol",  label: "Sample volume",      placeholder: "5",  suffix: "µL", default: "5" },
+          { id: "stdVol",     label: "Standard volume",    placeholder: "5",  suffix: "µL", default: "5" },
+          { id: "reagentVol", label: "Bradford reagent volume", placeholder: "250", suffix: "µL", default: "250" },
+          { id: "incTemp",    label: "Incubation temperature",  placeholder: "room temperature", default: "room temperature" },
+          { id: "incTime",    label: "Incubation time",          placeholder: "5", suffix: "min", default: "5" },
+          { id: "plateFormat", label: "Plate format",            placeholder: "96-well microplate", default: "96-well microplate" },
+        ],
+      },
+      {
+        id: "detection",
+        title: "Detection",
+        fields: [
+          { id: "wavelength",  label: "Detection wavelength",  placeholder: "595", suffix: "nm", default: "595" },
+          { id: "instrument",  label: "Plate reader",          placeholder: "BioTek Synergy 4" },
+          { id: "softwareVer", label: "Acquisition software", placeholder: "(optional)" },
+        ],
+      },
+    ],
+    checklist: [
+      { id: "blankCorrected",      label: "Blank-corrected absorbance values were used",        included: true },
+      { id: "linearRegression",    label: "Linear regression was used for the standard curve",  included: true },
+      { id: "sampleReplicates",    label: "Samples were run in duplicate (or specify below)" },
+      { id: "dilutionalLinearity", label: "Dilutional linearity was confirmed across the dilution series" },
+      { id: "outOfRangeReject",    label: "Values outside the standard curve range were re-assayed at adjusted dilution" },
+      { id: "mixedThorough",       label: "Reagent and sample were mixed thoroughly prior to incubation" },
+    ],
+    paragraph: function(v, c) {
+      var p = [];
+      p.push(
+        "Total protein concentration was determined by the Bradford method (Bradford 1976) using " +
+        slot(v.kitProduct, "product name") +
+        " (" + slot(v.kitVendor, "vendor") + (v.kitPN ? ", cat. #" + v.kitPN : "") +
+        (v.lotNumber ? ", lot " + v.lotNumber : "") + ")."
+      );
+      p.push(
+        "A standard curve was generated using " + slot(v.standardProt, "standard protein") +
+        " over a range of " + slot(v.stdRangeLow, "low") + "\u2013" + slot(v.stdRangeHigh, "high") + " mg/mL" +
+        " in " + slot(v.stdDiluent, "diluent") +
+        ", prepared in " + slot(v.stdReplicates, "replicate count") + "."
+      );
+      p.push(
+        "Samples and standards (" + slot(v.sampleVol, "sample µL") + " \u00b5L and " +
+        slot(v.stdVol, "std µL") + " \u00b5L, respectively) were combined with " +
+        slot(v.reagentVol, "reagent µL") + " \u00b5L of Bradford dye reagent" +
+        " in a " + slot(v.plateFormat, "plate format") +
+        " and incubated at " + slot(v.incTemp, "temp") + " for " + slot(v.incTime, "time") + " min."
+      );
+      p.push(
+        "Absorbance at " + slot(v.wavelength, "wavelength") + " nm was measured on a " +
+        slot(v.instrument, "instrument model") +
+        (v.softwareVer ? " using " + v.softwareVer : "") + " plate reader."
+      );
+      var detailParts = [];
+      if (c.blankCorrected)   detailParts.push("blank-corrected");
+      if (c.linearRegression) detailParts.push("fit to a linear regression of the standard curve");
+      if (detailParts.length > 0) {
+        p.push("Sample concentrations were back-calculated using " + detailParts.join(" and ") + ".");
+      }
+      if (c.mixedThorough) {
+        p.push("Reagent and sample were mixed thoroughly prior to incubation to ensure homogeneous dye binding.");
+      }
+      if (c.sampleReplicates) {
+        p.push("Samples were assayed in duplicate.");
+      }
+      if (c.dilutionalLinearity) {
+        p.push("Dilutional linearity was confirmed across the sample dilution series; concentrations reported are the mean of in-range, qualified dilutions.");
+      }
+      if (c.outOfRangeReject) {
+        p.push("Samples yielding absorbance values outside the calibrated range of the standard curve were re-assayed at an adjusted dilution.");
+      }
+      return p.join(" ");
+    },
+  },
+
+  fluor: {
+    label: "Direct Fluorescence Quantification",
+    color: "#9b6dc7",
+    bg: "#F1EAFB",
+    deep: "#4a2d8f",
+    description: "Direct fluorescence measurement of an intrinsically-fluorescent protein (e.g., GFP, GFPuv, mCherry).",
+    sections: [
+      {
+        id: "analyte",
+        title: "Analyte",
+        fields: [
+          { id: "proteinName",  label: "Fluorescent protein",     placeholder: "GFPuv", default: "GFPuv" },
+          { id: "standardSrc",  label: "Standard source",         placeholder: "purified recombinant standard, in-house" },
+          { id: "standardLot",  label: "Standard lot / batch",    placeholder: "(optional)" },
+          { id: "buffer",       label: "Standard/sample buffer",  placeholder: "50 mM sodium phosphate, pH 7.2", default: "50 mM sodium phosphate, pH 7.2" },
+        ],
+      },
+      {
+        id: "standards",
+        title: "Standards",
+        fields: [
+          { id: "stdRangeLow",  label: "Low end of std range",  placeholder: "1",     suffix: "µg/mL", default: "1" },
+          { id: "stdRangeHigh", label: "High end of std range", placeholder: "1000",  suffix: "µg/mL", default: "1000" },
+          { id: "stdPoints",    label: "Number of dilution points", placeholder: "7-point serial", default: "7-point serial dilution" },
+          { id: "stdReplicates", label: "Replicates per std",   placeholder: "duplicate", default: "duplicate" },
+        ],
+      },
+      {
+        id: "procedure",
+        title: "Procedure",
+        fields: [
+          { id: "sampleVol",   label: "Sample/standard volume", placeholder: "100",   suffix: "µL", default: "100" },
+          { id: "plateFormat", label: "Plate format",           placeholder: "96-well black flat-bottom (Corning)", default: "96-well black flat-bottom (Corning)" },
+          { id: "settleTime",  label: "Pre-read settle time",   placeholder: "5",     suffix: "min", default: "5" },
+        ],
+      },
+      {
+        id: "detection",
+        title: "Detection",
+        fields: [
+          { id: "excitation",  label: "Excitation wavelength", placeholder: "395", suffix: "nm", default: "395" },
+          { id: "emission",    label: "Emission wavelength",   placeholder: "509", suffix: "nm", default: "509" },
+          { id: "instrument",  label: "Fluorescence reader",   placeholder: "BioTek Synergy 4" },
+          { id: "gain",        label: "Gain / sensitivity",    placeholder: "(optional, e.g. 75)" },
+          { id: "softwareVer", label: "Acquisition software", placeholder: "(optional)" },
+        ],
+      },
+    ],
+    checklist: [
+      { id: "blankCorrected",      label: "Buffer-blank-corrected fluorescence values were used",  included: true },
+      { id: "linearRegression",    label: "Linear regression was used for the standard curve",     included: true },
+      { id: "sampleReplicates",    label: "Samples were run in duplicate (or specify below)" },
+      { id: "dilutionalLinearity", label: "Dilutional linearity was confirmed across the dilution series" },
+      { id: "outOfRangeReject",    label: "Values outside the standard curve range were re-assayed at adjusted dilution" },
+      { id: "photobleaching",      label: "Photobleaching control was performed (e.g., plate read immediately after equilibration)" },
+    ],
+    paragraph: function(v, c) {
+      var p = [];
+      p.push(
+        slot(v.proteinName, "protein name") +
+        " concentration was determined by direct fluorescence measurement against a calibrated standard curve."
+      );
+      var stdSrcParts = [];
+      if (v.standardSrc) stdSrcParts.push(v.standardSrc);
+      if (v.standardLot) stdSrcParts.push("lot " + v.standardLot);
+      p.push(
+        "A standard curve was prepared from " +
+        (stdSrcParts.length > 0 ? stdSrcParts.join(", ") : slot("", "standard source")) +
+        " over a range of " + slot(v.stdRangeLow, "low") + "\u2013" + slot(v.stdRangeHigh, "high") +
+        " \u00b5g/mL in " + slot(v.buffer, "buffer") +
+        " using a " + slot(v.stdPoints, "dilution scheme") +
+        " (" + slot(v.stdReplicates, "replicate count") + ")."
+      );
+      p.push(
+        slot(v.sampleVol, "volume") + " \u00b5L of each standard and sample was transferred to a " +
+        slot(v.plateFormat, "plate format") + "." +
+        (v.settleTime ? " The plate was allowed to equilibrate for " + v.settleTime + " min prior to reading." : "")
+      );
+      p.push(
+        "Fluorescence intensity was measured on a " + slot(v.instrument, "instrument model") +
+        " at excitation " + slot(v.excitation, "ex") + " nm / emission " + slot(v.emission, "em") + " nm" +
+        (v.gain ? " (gain/sensitivity = " + v.gain + ")" : "") +
+        (v.softwareVer ? ", using " + v.softwareVer : "") + "."
+      );
+      var detailParts = [];
+      if (c.blankCorrected)   detailParts.push("buffer-blank-corrected");
+      if (c.linearRegression) detailParts.push("fit to a linear regression of the standard curve");
+      if (detailParts.length > 0) {
+        p.push("Sample concentrations were back-calculated using " + detailParts.join(" and ") + ".");
+      }
+      if (c.photobleaching) {
+        p.push("Plates were read promptly after equilibration to minimize photobleaching effects.");
+      }
+      if (c.sampleReplicates) {
+        p.push("Samples were assayed in duplicate.");
+      }
+      if (c.dilutionalLinearity) {
+        p.push("Dilutional linearity was confirmed across the sample dilution series; concentrations reported are the mean of in-range, qualified dilutions.");
+      }
+      if (c.outOfRangeReject) {
+        p.push("Samples yielding fluorescence values outside the calibrated range of the standard curve were re-assayed at an adjusted dilution.");
+      }
+      return p.join(" ");
+    },
+  },
+};
+
+// Helper: render a slot. If the user hasn't filled it, render a bracket
+// placeholder so the analyst can SEE what's missing rather than getting
+// nonsense like "incubated at °C for min".
+function slot(value, hint) {
+  if (value && String(value).trim() !== "") return String(value).trim();
+  return "[" + hint + "]";
+}
+
+function ScribeTool(props) {
+  // Two contexts:
+  //   - Standalone (from Tools tile): props.cfgContext is null/undefined.
+  //     Uses vendor defaults from SCRIBE_TEMPLATES; localstorage persists
+  //     across visits.
+  //   - Embedded (from Plate Assay's Scribe tab): props.cfgContext provides
+  //     { templateId, values, checks } pre-derived from the live assay state.
+  //     A separate storage key (-assay-vX) keeps in-assay edits from
+  //     polluting the standalone tile.
+  //
+  // props.embedded — when true, suppress PageHeader (host page already has one)
+  // props.cfgContext — { templateId, values, checks } | null
+  var embedded = !!props.embedded;
+  var cfgCtx = props.cfgContext || null;
+
+  // Localstorage key differs by context so the two paths don't overwrite each other
+  var STORAGE_KEY = embedded ? "essf-scribe-assay-v1" : "essf-scribe-state-v1";
+  var loadState = function() {
+    try {
+      var raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return null;
+      return JSON.parse(raw);
+    } catch(e) { return null; }
+  };
+  var saveState = function(s) {
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(s)); } catch(e) {}
+  };
+
+  var initial = loadState() || {};
+
+  // If we have cfgContext (embedded path), prefer its templateId on first load
+  // so the analyst doesn't land on a stale "bca" choice when running an ELISA.
+  var initialTemplate = (cfgCtx && cfgCtx.templateId) || initial.activeTemplate || "bca";
+
+  var _tmpl = useState(initialTemplate),
+      activeTemplate = _tmpl[0], setActiveTemplate = _tmpl[1];
+  // Per-template values dict: { bca: {kitVendor: "...", ...}, bradford: {...}, fluor: {...} }
+  var _vals = useState(initial.values || {}),
+      allValues = _vals[0], setAllValues = _vals[1];
+  // Per-template checklist dict: { bca: {blankCorrected: true, ...}, ... }
+  var _check = useState(initial.checks || {}),
+      allChecks = _check[0], setAllChecks = _check[1];
+  var _copied = useState(false), copied = _copied[0], setCopied = _copied[1];
+  // Track which fields were auto-filled from the assay (so we can show a teal-tint hint)
+  var _autoFilled = useState({}), autoFilledFields = _autoFilled[0], setAutoFilledFields = _autoFilled[1];
+
+  // When cfgContext is provided (embedded path), merge its values/checks into
+  // state on first render — but only overwrite empty fields so analyst edits
+  // aren't blown away when cfg updates mid-session.
+  useEffect(function() {
+    if (!cfgCtx) return;
+    var ctxTid = cfgCtx.templateId || activeTemplate;
+    var existingVals = allValues[ctxTid] || {};
+    var existingChecks = allChecks[ctxTid] || {};
+    var mergedVals = Object.assign({}, existingVals);
+    var mergedChecks = Object.assign({}, existingChecks);
+    var autoMap = {};
+    if (cfgCtx.values) {
+      Object.keys(cfgCtx.values).forEach(function(k) {
+        if (mergedVals[k] === undefined || mergedVals[k] === "") {
+          mergedVals[k] = cfgCtx.values[k];
+          autoMap[k] = true;
+        }
+      });
+    }
+    if (cfgCtx.checks) {
+      Object.keys(cfgCtx.checks).forEach(function(k) {
+        if (mergedChecks[k] === undefined) {
+          mergedChecks[k] = cfgCtx.checks[k];
+        }
+      });
+    }
+    var nextAll = Object.assign({}, allValues); nextAll[ctxTid] = mergedVals;
+    var nextChecks = Object.assign({}, allChecks); nextChecks[ctxTid] = mergedChecks;
+    setAllValues(nextAll);
+    setAllChecks(nextChecks);
+    setAutoFilledFields(autoMap);
+    // Make sure the active template reflects the assay's actual type
+    if (cfgCtx.templateId && cfgCtx.templateId !== activeTemplate) {
+      setActiveTemplate(cfgCtx.templateId);
+    }
+  }, [cfgCtx ? cfgCtx.templateId : null]);  // re-run when context's template changes
+
+  var tmpl = SCRIBE_TEMPLATES[activeTemplate];
+  var values = allValues[activeTemplate] || {};
+  var checks = allChecks[activeTemplate] || {};
+
+  // Persist on every change
+  useEffect(function() {
+    saveState({ activeTemplate: activeTemplate, values: allValues, checks: allChecks });
+  }, [activeTemplate, allValues, allChecks]);
+
+  // Initialize defaults for a template on first visit (only fills empty fields)
+  useEffect(function() {
+    var tmplObj = SCRIBE_TEMPLATES[activeTemplate];
+    var existing = allValues[activeTemplate] || {};
+    var existingChecks = allChecks[activeTemplate] || {};
+    var changed = false;
+    var changedChecks = false;
+    tmplObj.sections.forEach(function(sec) {
+      sec.fields.forEach(function(f) {
+        if (f.default && (existing[f.id] === undefined || existing[f.id] === "")) {
+          existing[f.id] = f.default;
+          changed = true;
+        }
+      });
+    });
+    tmplObj.checklist.forEach(function(item) {
+      if (item.included && existingChecks[item.id] === undefined) {
+        existingChecks[item.id] = true;
+        changedChecks = true;
+      }
+    });
+    if (changed) setAllValues(Object.assign({}, allValues, (function(){var o={};o[activeTemplate]=existing;return o;})()));
+    if (changedChecks) setAllChecks(Object.assign({}, allChecks, (function(){var o={};o[activeTemplate]=existingChecks;return o;})()));
+  }, [activeTemplate]);
+
+  var setVal = function(fieldId, v) {
+    var next = Object.assign({}, values); next[fieldId] = v;
+    var nextAll = Object.assign({}, allValues); nextAll[activeTemplate] = next;
+    setAllValues(nextAll);
+  };
+  var setCheck = function(itemId, v) {
+    var next = Object.assign({}, checks); next[itemId] = v;
+    var nextAll = Object.assign({}, allChecks); nextAll[activeTemplate] = next;
+    setAllChecks(nextAll);
+  };
+
+  var paragraph = tmpl.paragraph(values, checks);
+
+  var copyParagraph = function() {
+    if (navigator && navigator.clipboard) {
+      navigator.clipboard.writeText(paragraph).then(function() {
+        setCopied(true);
+        setTimeout(function() { setCopied(false); }, 1800);
+      });
+    }
+  };
+
+  var resetTemplate = function() {
+    if (!window.confirm("Clear all fields and checks for " + tmpl.label + "?")) return;
+    var nextAll = Object.assign({}, allValues); nextAll[activeTemplate] = {};
+    setAllValues(nextAll);
+    var nextChecks = Object.assign({}, allChecks); nextChecks[activeTemplate] = {};
+    setAllChecks(nextChecks);
+  };
+
+  // Count missing slots in the paragraph (substring count of "[")
+  var missingCount = (paragraph.match(/\[/g) || []).length;
+
+  return (
+    <div style={embedded ? {padding:"0",maxWidth:"100%",margin:"0",boxSizing:"border-box"} : {padding:"0 0 2.5rem",maxWidth:1320,margin:"0 auto",boxSizing:"border-box"}}>
+      {!embedded && <PageHeader instructor={props.instructor} setInstructor={props.setInstructor} onBack={props.onBack} large={true} workspaceLabel="Scribe" />}
+      <div style={embedded ? {padding:"0"} : {padding:"1.25rem 16px 0"}}>
+
+        {/* Hero card */}
+        <div style={{background:"linear-gradient(180deg,#ffffff,#fbfdff)",borderRadius:24,border:"1px solid #dfe7f2",padding:"1.25rem 1.5rem",boxShadow:"0 18px 44px rgba(11,42,111,0.08)",marginBottom:"1.25rem"}}>
+          <div style={{display:"flex",alignItems:"center",gap:14,marginBottom:10}}>
+            <div style={{width:48,height:48,borderRadius:12,background:"#F1EAFB",display:"flex",alignItems:"center",justifyContent:"center"}}>
+              <svg width="28" height="28" viewBox="0 0 28 28" aria-hidden="true">
+                {/* Quill / pen icon */}
+                <path d="M 6 22 L 18 10 L 22 14 L 10 26" fill="none" stroke="#4a2d8f" strokeWidth="1.4" strokeLinejoin="round" transform="translate(0,-4)" />
+                <path d="M 18 6 Q 22 6 22 10 L 18 10 Z" fill="#9b6dc7" stroke="#4a2d8f" strokeWidth="1.2" />
+                <line x1="6" y1="22" x2="3" y2="25" stroke="#4a2d8f" strokeWidth="1.4" strokeLinecap="round" />
+              </svg>
+            </div>
+            <div>
+              <div style={{fontSize:21,fontWeight:800,color:"#0b2a6f"}}>Scribe</div>
+              <div style={{fontSize:13,color:"#5a6984"}}>Generate consistent method-section paragraphs for LIMS, reports, and SOPs.</div>
+            </div>
+          </div>
+
+          {/* Template picker */}
+          <div style={{display:"flex",flexWrap:"wrap",gap:8,marginTop:14}}>
+            {Object.keys(SCRIBE_TEMPLATES).map(function(tid) {
+              var t = SCRIBE_TEMPLATES[tid];
+              var active = activeTemplate === tid;
+              return (
+                <button key={tid} onClick={function(){ setActiveTemplate(tid); }}
+                        style={{padding:"7px 14px",fontSize:12,fontWeight:600,
+                                color:active?"#fff":"#5a6984",
+                                background:active?"#9b6dc7":"#f4f6fb",
+                                border:"1px solid "+(active?"#9b6dc7":"#dfe7f2"),
+                                borderRadius:18,cursor:"pointer",fontFamily:"inherit"}}>
+                  {t.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Two-column layout: form left, paragraph right */}
+        <div style={{display:"grid",gridTemplateColumns:"minmax(0, 1fr) minmax(0, 1fr)",gap:"1.25rem",alignItems:"start"}}>
+
+          {/* LEFT: form */}
+          <div>
+            {/* Sections */}
+            {tmpl.sections.map(function(sec) {
+              return (
+                <div key={sec.id} style={{background:"#fff",border:"1px solid #dfe7f2",borderRadius:12,padding:"14px 16px",marginBottom:12}}>
+                  <div style={{fontSize:11,fontWeight:700,color:"#4a2d8f",textTransform:"uppercase",letterSpacing:0.6,marginBottom:10}}>
+                    {sec.title}
+                  </div>
+                  {sec.fields.map(function(f) {
+                    var isAutoFilled = embedded && autoFilledFields[f.id] && values[f.id];
+                    var hasUserEdit = embedded && !autoFilledFields[f.id] && values[f.id];
+                    return (
+                      <div key={f.id} style={{marginBottom:9,display:"flex",alignItems:"center",gap:10}}>
+                        <label style={{flex:"0 0 175px",fontSize:11.5,color:"#5a6984",lineHeight:1.4}}>
+                          {f.label}
+                          {isAutoFilled && <span style={{display:"inline-block",marginLeft:6,fontSize:9,color:"#0c7a7c",fontWeight:600,textTransform:"uppercase",letterSpacing:0.3}}>from assay</span>}
+                        </label>
+                        <div style={{flex:1,display:"flex",alignItems:"center",gap:6}}>
+                          <input type="text" value={values[f.id] || ""}
+                                 onChange={function(e){
+                                   setVal(f.id, e.target.value);
+                                   // Once analyst edits a from-assay field, drop the badge
+                                   if (autoFilledFields[f.id]) {
+                                     var next = Object.assign({}, autoFilledFields);
+                                     delete next[f.id];
+                                     setAutoFilledFields(next);
+                                   }
+                                 }}
+                                 placeholder={f.placeholder || ""}
+                                 style={{flex:1,padding:"6px 9px",fontSize:11.5,
+                                         border:"1px solid "+(isAutoFilled ? "#7fc4c5" : "#dfe7f2"),
+                                         background: isAutoFilled ? "#edfbfb" : "#fff",
+                                         borderRadius:6,
+                                         fontFamily:"inherit",color:"#0b2a6f",outline:"none"}} />
+                          {f.suffix && <span style={{fontSize:11,color:"#8e9bb5",fontWeight:500,minWidth:38}}>{f.suffix}</span>}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })}
+
+            {/* Checklist */}
+            <div style={{background:"#fff",border:"1px solid #dfe7f2",borderRadius:12,padding:"14px 16px",marginBottom:12}}>
+              <div style={{fontSize:11,fontWeight:700,color:"#4a2d8f",textTransform:"uppercase",letterSpacing:0.6,marginBottom:4}}>
+                What did you actually do?
+              </div>
+              <div style={{fontSize:10.5,color:"#8e9bb5",marginBottom:10,fontStyle:"italic",lineHeight:1.5}}>
+                Check only the items you actually performed. Unchecked items are omitted from the generated paragraph rather than declared false.
+              </div>
+              {tmpl.checklist.map(function(item) {
+                var checked = !!checks[item.id];
+                return (
+                  <label key={item.id} style={{display:"flex",alignItems:"flex-start",gap:9,padding:"5px 0",cursor:"pointer",fontSize:12,color:checked?"#0b2a6f":"#5a6984",lineHeight:1.5}}>
+                    <input type="checkbox" checked={checked}
+                           onChange={function(e){ setCheck(item.id, e.target.checked); }}
+                           style={{marginTop:3,accentColor:"#9b6dc7",cursor:"pointer"}} />
+                    <span>{item.label}</span>
+                  </label>
+                );
+              })}
+            </div>
+
+            {/* Reset button */}
+            <div style={{display:"flex",justifyContent:"flex-end",marginTop:4}}>
+              <button onClick={resetTemplate}
+                      style={{padding:"6px 12px",fontSize:10.5,color:"#8e9bb5",background:"transparent",border:"1px solid #dfe7f2",borderRadius:6,cursor:"pointer",fontFamily:"inherit"}}>
+                Clear all fields
+              </button>
+            </div>
+          </div>
+
+          {/* RIGHT: generated paragraph */}
+          <div style={{position:"sticky",top:90}}>
+            <div style={{background:"#fff",border:"1px solid #dfe7f2",borderRadius:12,padding:"14px 16px",marginBottom:12}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:10}}>
+                <div style={{fontSize:11,fontWeight:700,color:"#4a2d8f",textTransform:"uppercase",letterSpacing:0.6}}>
+                  Generated method paragraph
+                </div>
+                {missingCount > 0 && (
+                  <div style={{fontSize:10.5,color:"#bf7a1a",fontWeight:600}}>
+                    {missingCount} slot{missingCount===1?"":"s"} not filled
+                  </div>
+                )}
+                {missingCount === 0 && (
+                  <div style={{fontSize:10.5,color:"#1a6e3a",fontWeight:600}}>
+                    {"\u2713"} complete
+                  </div>
+                )}
+              </div>
+              <div style={{fontSize:13,color:"#0b2a6f",lineHeight:1.75,padding:"12px 14px",background:"#fafbfd",border:"1px solid #eef3f8",borderRadius:8,fontFamily:'"Georgia", "Times New Roman", serif'}}>
+                {renderParagraphWithSlots(paragraph)}
+              </div>
+              <div style={{display:"flex",gap:8,marginTop:12,flexWrap:"wrap"}}>
+                <button onClick={copyParagraph}
+                        style={{padding:"8px 14px",fontSize:12,fontWeight:600,color:"#fff",
+                                background:copied?"#1a6e3a":"#9b6dc7",
+                                border:"none",borderRadius:8,cursor:"pointer",fontFamily:"inherit",
+                                transition:"background 0.15s"}}>
+                  {copied ? "\u2713 Copied to clipboard" : "Copy paragraph"}
+                </button>
+              </div>
+            </div>
+
+            {/* Helpful note */}
+            <div style={{background:"#F1EAFB",border:"1px solid #d4bce8",borderRadius:10,padding:"10px 14px",fontSize:11,color:"#5a3a8a",lineHeight:1.6}}>
+              <strong>How to use this for LIMS:</strong> fill out the fields and check off only what you actually did. The paragraph updates live. When complete, click Copy and paste into the LIMS method-description field. Bracketed slots like [vendor] show what's still missing.
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Render paragraph with bracketed slots highlighted as amber pills
+function renderParagraphWithSlots(text) {
+  var parts = [];
+  var re = /\[([^\]]+)\]/g;
+  var lastIdx = 0;
+  var m;
+  var key = 0;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > lastIdx) {
+      parts.push(<span key={"t"+(key++)}>{text.substring(lastIdx, m.index)}</span>);
+    }
+    parts.push(
+      <span key={"s"+(key++)} style={{display:"inline-block",padding:"1px 6px",background:"#fff3da",color:"#bf7a1a",
+                                       border:"1px dashed #f0c87a",borderRadius:4,
+                                       fontFamily:"ui-monospace, monospace",fontSize:11,fontStyle:"italic"}}>
+        {m[1]}
+      </span>
+    );
+    lastIdx = m.index + m[0].length;
+  }
+  if (lastIdx < text.length) {
+    parts.push(<span key={"t"+(key++)}>{text.substring(lastIdx)}</span>);
+  }
+  return parts;
+}
+
+
+
 function App() {
   // Pulls analyst's first name from auth session (falls back to "you")
   var displayName = useDisplayName();
@@ -17927,6 +18644,11 @@ function App() {
   // Compatibility tool — standalone view, separate from the plate workflow.
   if (chosenView === "compatibility") {
     return <CompatibilityTool onBack={function(){ setChosenView(null); }} instructor={instructor} setInstructor={setInstructor} />;
+  }
+
+  // Scribe tool — method-description paragraph generator for LIMS.
+  if (chosenView === "scribe") {
+    return <ScribeTool onBack={function(){ setChosenView(null); }} instructor={instructor} setInstructor={setInstructor} />;
   }
 
   if(!on) return (
@@ -20964,15 +21686,34 @@ function App() {
         if (chosenView !== "plate") {
           return <div style={{padding:"3rem",textAlign:"center",color:"#aeaeb2"}}>
             <div style={{fontSize:32,marginBottom:12}}>📝</div>
-            <div style={{fontSize:14,fontWeight:600,color:"#5a6984"}}>Methods is available for plate assays.</div>
+            <div style={{fontSize:14,fontWeight:600,color:"#5a6984"}}>Scribe is available for plate assays.</div>
             <div style={{fontSize:12,color:"#8e9bb5",marginTop:6}}>This feature will expand to other workflows soon.</div>
           </div>;
         }
         if (!res) {
-          return <div style={{padding:"3rem",textAlign:"center",color:"#aeaeb2"}}>
-            <div style={{fontSize:32,marginBottom:12}}>📝</div>
-            <div style={{fontSize:14,fontWeight:600,color:"#5a6984"}}>Run analysis first.</div>
-            <div style={{fontSize:12,color:"#8e9bb5",marginTop:6}}>Once you have results, this tab will help you fill the Methods tab of your LIMS draft.</div>
+          // No analysis yet — but Scribe can still be useful with vendor defaults.
+          // Pre-pick the template based on cfg.tp / cfg.at if possible.
+          var preTid = "bca";
+          if (cfg.tp === "yes") preTid = "bca";
+          else if (cfg.at === "elisa") preTid = "bca";  // no ELISA template yet
+          else {
+            var sn = (cfg.sn || "").toLowerCase();
+            var tgt = (cfg.target || "").toLowerCase();
+            if (sn.indexOf("gfp") !== -1 || tgt.indexOf("gfp") !== -1) preTid = "fluor";
+          }
+          var preCtx = { templateId: preTid, values: {}, checks: {} };
+          // Also pull in standard name if available, even before analysis
+          if (cfg.sn) {
+            if (preTid === "fluor") preCtx.values.proteinName = cfg.sn;
+            else preCtx.values.standardProt = cfg.sn;
+          }
+          return <div>
+            <div style={{maxWidth:920,margin:"0 auto 14px",padding:"10px 16px",background:"#fff7e6",border:"1px solid #f0c87a",borderRadius:10,fontSize:12,color:"#7a5a1a",lineHeight:1.5}}>
+              <strong>{"\u24d8"} Run analysis to auto-fill more fields.</strong> Until you analyze, Scribe uses vendor defaults. After analysis, fields like standard range, replicates, and R² will pre-populate from your actual data.
+            </div>
+            <div style={{maxWidth: 1320, margin: "0 auto"}}>
+              <ScribeTool embedded={true} cfgContext={preCtx} instructor={instructor} setInstructor={setInstructor} />
+            </div>
           </div>;
         }
 
@@ -21681,14 +22422,161 @@ function App() {
         // ============================================================
         // RENDER
         // ============================================================
+
+        // ─── Build Scribe cfgContext from the live assay state ─────────
+        // Maps cfg + activeProtocol + computed analysis results into the
+        // shape SCRIBE_TEMPLATES expects: { templateId, values, checks }.
+        // Empty values are skipped so vendor defaults still fill in.
+        var scribeCfgContext = (function() {
+          // Decide template
+          var tid = "bca";
+          if (assayType === "direct_gfp") tid = "fluor";
+          else if (assayType === "total_protein" && limsReport.sampleAssayType === "Bradford") tid = "bradford";
+          else if (assayType === "total_protein") tid = "bca";
+          else if (assayType === "elisa") tid = "bca"; // no ELISA template yet — fall back
+          else tid = "bca";
+
+          // Build values dict — only include non-empty entries so empty fields
+          // fall back to SCRIBE_TEMPLATES vendor defaults rather than blank slots.
+          var vals = {};
+          var put = function(k, v) {
+            if (v != null && String(v).trim() !== "") vals[k] = String(v).trim();
+          };
+
+          // Vendor / kit / protocol
+          if (activeProtocol) {
+            put("kitVendor", activeProtocol.vendorName);
+            put("kitPN",     activeProtocol.vendorPN);
+            // For Bradford, push vendor PN into kitPN; product name handled separately
+            if (tid === "bradford" && activeProtocol.vendorName) {
+              put("kitProduct", activeProtocol.vendorName);
+            }
+            // Detection wavelength
+            if (tid === "fluor") {
+              // direct_gfp protocol's readWavelength is "excitation 395 nm / emission 509 nm"
+              // — try to parse into ex/em separately. Falls back to the full string.
+              var rw = activeProtocol.readWavelength || "";
+              var m = rw.match(/excitation\s+(\d+)\s*nm\s*\/\s*emission\s+(\d+)\s*nm/i);
+              if (m) {
+                put("excitation", m[1]);
+                put("emission",   m[2]);
+              }
+            } else {
+              // Strip " nm" suffix for the numeric wavelength field
+              var wl = (activeProtocol.readWavelength || "").replace(/\s*nm.*$/i, "").trim();
+              put("wavelength", wl);
+            }
+          }
+
+          // Standard protein
+          var stdName = cfg.sn || "";
+          if (stdName) {
+            if (tid === "fluor") {
+              put("proteinName", stdName);
+            } else {
+              put("standardProt", stdName);
+            }
+          }
+
+          // Standard concentration range — pull lowest and highest cal points
+          // actually used. Walk res[0].cal if available.
+          if (res && res[0] && res[0].cal && res[0].cal.length > 0) {
+            var calConcs = res[0].cal.map(function(c){return c.x;}).filter(function(v){return typeof v === "number" && v > 0;});
+            if (calConcs.length > 0) {
+              var lo = Math.min.apply(null, calConcs);
+              var hi = Math.max.apply(null, calConcs);
+              // Concentration unit comes from cfg.unit (e.g. "mg/mL"). If it's
+              // µg/mL and tid is "fluor" the template wants µg/mL — match.
+              put("stdRangeLow",  lo);
+              put("stdRangeHigh", hi);
+            }
+          }
+
+          // Standard volume — not in cfg directly; assayVolume in limsReport
+          // usually = sample volume in well. Use it for both sampleVol & stdVol
+          // since BCA/Bradford typically use equal volumes.
+          if (limsReport && limsReport.assayVolume) {
+            put("sampleVol", limsReport.assayVolume);
+            put("stdVol",    limsReport.assayVolume);
+          }
+
+          // Replicates — guess from cfg.sdf (standard duplicate factor)
+          var stdReps = cfg.sdf ? parseInt(cfg.sdf, 10) : null;
+          if (stdReps) {
+            var repWord = stdReps === 1 ? "singlicate" :
+                          stdReps === 2 ? "duplicate" :
+                          stdReps === 3 ? "triplicate" :
+                          stdReps === 4 ? "quadruplicate" :
+                          stdReps + "-replicate";
+            put("stdReplicates", repWord);
+          }
+
+          // Pull any slot-fill values the analyst already typed in the legacy UI
+          // so cross-pollination works (legacy edits show up in Scribe).
+          if (limsReport && limsReport.slots && limsReport.slots.samplePrep) {
+            var sp = limsReport.slots.samplePrep;
+            if (sp.detection) {
+              // Could be either an instrument name or wavelength. Heuristic:
+              // if it contains a number followed by "nm", use as wavelength;
+              // otherwise treat as instrument.
+              if (/\d+\s*nm/.test(sp.detection)) {
+                put("wavelength", String(sp.detection).replace(/\s*nm.*$/i, "").trim());
+              } else {
+                put("instrument", sp.detection);
+              }
+            }
+            if (sp.standardConc) {
+              // Could be "0.025–2.0 mg/mL" — try to parse a range
+              var rangeM = String(sp.standardConc).match(/([\d.]+)\s*[\u2013\-]\s*([\d.]+)/);
+              if (rangeM) {
+                put("stdRangeLow", rangeM[1]);
+                put("stdRangeHigh", rangeM[2]);
+              }
+            }
+            if (sp.standardVendor) {
+              // For Bradford, this is the dye reagent vendor
+              if (tid === "bradford") put("kitVendor", sp.standardVendor);
+            }
+          }
+
+          // Checks — turn on by default in the in-assay context the ones the
+          // analyst clearly did (blank correction always; linear regression
+          // because we display the linear fit; sample replicates if xdf > 1).
+          var ch = {
+            blankCorrected: true,
+            linearRegression: true,
+            sampleReplicates: (cfg.xdf && parseInt(cfg.xdf, 10) > 1) ? true : false,
+            dilutionalLinearity: true, // analyst is using Bench, which enforces this
+            outOfRangeReject: true,
+          };
+
+          return { templateId: tid, values: vals, checks: ch };
+        })();
+
         return (
-          <div style={{maxWidth: 920, margin: "0 auto"}}>
-            <div style={{background:"#fff",border:"1px solid #e5edf7",borderRadius:14,overflow:"hidden"}}>
+          <div>
+            {/* ─── New unified Scribe (primary UI) ─────────────────────── */}
+            <div style={{maxWidth: 1320, margin: "0 auto", marginBottom: 18}}>
+              <ScribeTool embedded={true} cfgContext={scribeCfgContext} instructor={instructor} setInstructor={setInstructor} />
+            </div>
+
+            {/* ─── Legacy slot-fill UI (kept during transition) ────────── */}
+            <details style={{maxWidth: 920, margin: "0 auto", background: "#f9fafd", border: "1px solid #e5edf7", borderRadius: 12, padding: "0", marginBottom: 24}}>
+              <summary style={{padding: "12px 18px", cursor: "pointer", fontSize: 12, fontWeight: 600, color: "#5a6984", listStyle: "none"}}>
+                <span style={{display: "inline-block", marginRight: 8, fontSize: 10, color: "#8e9bb5"}}>▸</span>
+                Legacy: original slot-fill Methods helper (kept during transition)
+                <span style={{display:"block",fontSize:10.5,fontWeight:400,color:"#8e9bb5",marginTop:3,marginLeft:18,fontStyle:"italic"}}>
+                  The new Scribe above replaces this. Kept here in case you've built habits around the slot-fill workflow.
+                </span>
+              </summary>
+              <div style={{padding: "12px 0 18px"}}>
+                <div style={{maxWidth: 920, margin: "0 auto"}}>
+                  <div style={{background:"#fff",border:"1px solid #e5edf7",borderRadius:14,overflow:"hidden"}}>
 
               {/* Intro */}
               <div style={{padding:"18px 20px 14px",borderBottom:"1px solid #eef3f8",display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:12,flexWrap:"wrap"}}>
                 <div style={{flex:1, minWidth: 220}}>
-                  <div style={{fontSize:18,fontWeight:800,color:"#0b2a6f",letterSpacing:-0.3,marginBottom:4}}>Methods</div>
+                  <div style={{fontSize:18,fontWeight:800,color:"#0b2a6f",letterSpacing:-0.3,marginBottom:4}}>Methods (legacy)</div>
                   <div style={{fontSize:12,color:"#6f7fa0",lineHeight:1.5}}>Fills the Methods tab of your LIMS draft. Tap any underlined word to change. Greyed fields are picked in LIMS.</div>
                 </div>
                 <button onClick={function(){
@@ -21997,6 +22885,9 @@ function App() {
                 <strong style={{color:"#0b2a6f"}}>Tip:</strong> Open your LIMS draft, then click <em>copy</em> next to each field and paste. Your remembered choices will pre-fill next time you run the same protocol.
               </div>
             </div>
+                </div>
+              </div>
+            </details>
           </div>
         );
       })()}
