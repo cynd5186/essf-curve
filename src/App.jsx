@@ -17366,6 +17366,9 @@ var SCRIBE_SST_DEFAULT_CONCENTRATION = {
 var SCRIBE_ICH_M10_ACCEPTANCE = "±20% of expected (80-120%; ICH M10)";
 var SCRIBE_REPLICATE_OPTS = ["duplicate", "triplicate", "singlicate (no replicates)"];
 var SCRIBE_CV_OPTS = ["10%", "15%", "20%", "25%"];
+// Row H blank options for DF assay — most common two options + customize escape hatch.
+// "customize" opens the same "Other → text input" flow as the initials dropdown.
+var SCRIBE_BLANK_OPTS = ["phosphate-buffered saline (PBS)", "50 mM Tris, pH 8.0 (no salt)", "Other"];
 // Analysis strategies — must match Plate Assay's SM array (line ~747) verbatim.
 // When analyst picks a strategy in the Plate Assay analysis and later drafts
 // Scribe, the same label should appear here.
@@ -17439,6 +17442,7 @@ var SCRIBE_ASSAY_DEFAULTS = {
     sop:           { value: "BTEC AN-003 rev 01", type: "text" },
     proteinName:   { value: "GFPuv", type: "text" },
     stdBuffer:     { value: "50 mM Na phosphate pH 7.2", type: "text" },
+    blankSubstance:{ value: "phosphate-buffered saline (PBS)", type: "select", options: SCRIBE_BLANK_OPTS },
     firstDil:      { value: "1:10", type: "text" },
     serialDil:     { value: "1:2", type: "text" },
     stdReps:       { value: "duplicate", type: "select", options: SCRIBE_REPLICATE_OPTS },
@@ -17529,6 +17533,8 @@ function scribeBuildState(prepKey, assayKey, preserved) {
     receivalInitials: (preserved && preserved.receivalInitials) || { value: "", type: "select", options: ["", "SLJ", "GKB", "CGS", "Other"] },
     notes:            (preserved && preserved.notes) || "",
     _copied:          (preserved && preserved._copied) || {},
+    _touched:         (preserved && preserved._touched) || {},  // { b1: true, b2: true } — analyst has interacted with this block
+    _limsMode:        (preserved && preserved._limsMode !== undefined) ? preserved._limsMode : true,  // ON by default; controls copy verbosity
     _checklist:       (preserved && preserved._checklist) || {},
     _focusedBlock:    (preserved && preserved._focusedBlock) || "b1",
     _showChecklistPopover: false,
@@ -17684,6 +17690,36 @@ function ScribeCard(props) {
     });
   };
 
+  // Map fields to their owning block. Used by markTouched() to figure out
+  // which block should light up yellow when a field is edited.
+  var FIELD_TO_BLOCK = {
+    // b1: Sample Receival
+    receivalDate: "b1", receivalFate: "b1", storageCondition: "b1",
+    storageUntilDate: "b1", receivalInitials: "b1",
+    // b3: Assay Volume
+    assayVolume: "b3",
+    // b4: SST
+    sstAcceptance: "b4", sstDeclineReason: "b4",
+    // b5: Std Curve Info
+    r2: "b5", cvThreshold: "b5", strategy: "b5", fitType: "b5",
+    slope: "b5", intercept: "b5",
+    // All other fields belong to b2 (Sample Processing & Assay)
+    // — handled by the default in blockForField()
+  };
+  var blockForField = function(key){
+    return FIELD_TO_BLOCK[key] || "b2";
+  };
+  // Mark a block as touched (analyst has interacted with it). Idempotent —
+  // once touched, always touched (until fresh page load / template switch).
+  var markTouched = function(next, blockId){
+    if (!blockId) return;
+    if (!next._touched) next._touched = {};
+    if (!next._touched[blockId]) {
+      next._touched = Object.assign({}, next._touched);
+      next._touched[blockId] = true;
+    }
+  };
+
   // Change prep template — preserve cross-template values
   var setPrep = function(key){
     setSt(function(prev){
@@ -17699,6 +17735,8 @@ function ScribeCard(props) {
         receivalInitials: prev.receivalInitials,
         notes: prev.notes,
         _copied: prev._copied,
+        _touched: prev._touched,
+        _limsMode: prev._limsMode,
         _checklist: prev._checklist,
         _focusedBlock: prev._focusedBlock,
       };
@@ -17719,6 +17757,8 @@ function ScribeCard(props) {
         receivalInitials: prev.receivalInitials,
         notes: prev.notes,
         _copied: prev._copied,
+        _touched: prev._touched,
+        _limsMode: prev._limsMode,
         _checklist: prev._checklist,
         _focusedBlock: prev._focusedBlock,
       };
@@ -17970,7 +18010,7 @@ function ScribeCard(props) {
         else { startEdit(e, key); }
       }}>
         {val}
-        {field.type === "select" && <span style={{position:"absolute",right:4,top:"50%",transform:"translateY(-50%)",fontSize:9,color:C.purple,pointerEvents:"none"}}>▾</span>}
+        {field.type === "select" && <span data-ui-only="true" style={{position:"absolute",right:4,top:"50%",transform:"translateY(-50%)",fontSize:9,color:C.purple,pointerEvents:"none"}}>▾</span>}
       </span>
     );
   };
@@ -17994,6 +18034,7 @@ function ScribeCard(props) {
     update(function(n){
       if (n[key]) n[key].value = finalVal;
       n._copied = {};
+      markTouched(n, blockForField(key));
     });
     setInlineEditKey(null);
   };
@@ -18036,13 +18077,15 @@ function ScribeCard(props) {
         }
       }
     }
-    // Initials "Other" escape hatch — swap dropdown selection for text input
-    // so the analyst can type custom initials instead of committing "Other" literally.
-    if (key === "receivalInitials" && finalVal === "Other") {
+    // Dropdowns with "Other" escape hatch — swap dropdown for text input so
+    // analyst can type a custom value instead of committing "Other" literally.
+    // Applies to receivalInitials (SLJ/GKB/CGS/Other) and blankSubstance (PBS/Tris/Other).
+    if ((key === "receivalInitials" || key === "blankSubstance") && finalVal === "Other") {
       var anchorRect = editing.anchorRect;
       update(function(n){
         if (n[key]) n[key].value = "";
         n._copied = {};
+        markTouched(n, blockForField(key));
       });
       setEditing({
         key: key,
@@ -18058,6 +18101,7 @@ function ScribeCard(props) {
       // any edit clears all copy markers on the theory that the analyst may have
       // touched something that flowed into any block).
       n._copied = {};
+      markTouched(n, blockForField(key));
     });
     setEditing(null);
   };
@@ -18143,15 +18187,15 @@ function ScribeCard(props) {
       // and prevent accidental edits during training.
       // Gen5 protocol file removed entirely: it's specified in the SOP.
       return <span>
-        Active protein concentration was determined by direct fluorescence following {F("sop")} using {F("proteinName")}.
-        Calibration standards were prepared from {stdTraceUI} in {F("stdBuffer")} via an initial {F("firstDil")} dilution followed by {F("serialDil")} serial dilution down the column, with Row H as the PBS blank.
+        Active protein concentration was determined by direct fluorescence following {st.sop.value} using {F("proteinName")}.
+        Calibration standards were prepared from {stdTraceUI} in {F("stdBuffer")} via an initial {F("firstDil")} dilution followed by {F("serialDil")} serial dilution down the column, with Row H as the {F("blankSubstance")} blank.
         Each calibration point was analyzed in {F("stdReps")}. Fluorescence was measured at {st.wavelength.value} in a {st.plate.value} plate on a {st.reader.value} reader, with samples analyzed in {F("sampleReps")}.
         {cvDisclaimer}
       </span>;
     }
     if (key === "bca") {
       return <span>
-        Total protein concentration was determined using the {F("kitVendor")} following {F("sop")}.
+        Total protein concentration was determined using the {F("kitVendor")} following {st.sop.value}.
         Calibration standards were prepared as a {F("numPoints")}-point 1:{F("serialRatio")} serial dilution of {stdTraceUI} in {F("stdBuffer")}, with the highest calibration point at {F("stdRangeHigh")} mg/mL and covering a working range of {F("stdRangeLow")}–{F("stdRangeHigh")} mg/mL.
         Each calibration point was analyzed in {F("stdReps")}. Absorbance at {F("wavelength")} was measured in a {F("plate")} plate on a {F("reader")} reader, with samples analyzed in {F("sampleReps")}.
         {cvDisclaimer}
@@ -18159,7 +18203,7 @@ function ScribeCard(props) {
     }
     // bradford
     return <span>
-      Total protein concentration was determined using {F("sop")}.
+      Total protein concentration was determined using {st.sop.value}.
       Calibration standards were prepared as a {F("numPoints")}-point 1:{F("serialRatio")} serial dilution of {stdTraceUI} in {F("stdBuffer")}, with the highest calibration point at {F("stdRangeHigh")} mg/mL and covering a working range of {F("stdRangeLow")}–{F("stdRangeHigh")} mg/mL.
       Each calibration point was analyzed in {F("stdReps")}. Absorbance at {F("wavelength")} was measured in a {F("plate")} plate on a {F("reader")} reader, with samples analyzed in {F("sampleReps")}.
       {cvDisclaimer}
@@ -18225,8 +18269,10 @@ function ScribeCard(props) {
           && n.sstTrace.protein === "GFP"
           && n.sstTrace.source === "in-house") {
         n.sstTrace = Object.assign({}, n.sstTrace, { sourceDetail: newDetail });
+        markTouched(n, "b4");   // SST also affected via inheritance
       }
       n._copied = {};
+      markTouched(n, stateKey === "sstTrace" ? "b4" : "b2");
     });
     setGfpWizard(null);
   };
@@ -18256,6 +18302,7 @@ function ScribeCard(props) {
       n._modalOpen = null;
       n._modalTrace = null;
       n._copied = {};
+      markTouched(n, stateKey === "sstTrace" ? "b4" : "b2");
     });
   };
 
@@ -18265,7 +18312,7 @@ function ScribeCard(props) {
     var toggleBar = <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:10,fontSize:12,userSelect:"none"}} data-ui-only="true">
       <span style={{fontWeight:700,color:C.slate}}>SST used?</span>
       <button
-        onClick={function(){update(function(n){n.sstUsed = true; n._copied = {};});}}
+        onClick={function(){update(function(n){n.sstUsed = true; n._copied = {}; markTouched(n, "b4");});}}
         style={{
           padding:"3px 12px",fontSize:11,fontWeight:700,fontFamily:"inherit",cursor:"pointer",borderRadius:4,
           border:"1px solid "+C.purple,
@@ -18274,7 +18321,7 @@ function ScribeCard(props) {
         }}
       >Yes</button>
       <button
-        onClick={function(){update(function(n){n.sstUsed = false; n._copied = {};});}}
+        onClick={function(){update(function(n){n.sstUsed = false; n._copied = {}; markTouched(n, "b4");});}}
         style={{
           padding:"3px 12px",fontSize:11,fontWeight:700,fontFamily:"inherit",cursor:"pointer",borderRadius:4,
           border:"1px solid "+(st.sstUsed ? C.divider : C.amber),
@@ -18290,7 +18337,7 @@ function ScribeCard(props) {
       return <div>
         {toggleBar}
         <div data-copy-block="true">
-          A system suitability standard was processed alongside the submitted samples using the same dilution scheme: {traceUI}. It met its acceptance criterion of {F("sstAcceptance")}.
+          A system suitability standard ({traceUI}) was processed alongside the submitted samples using the same dilution scheme and the same analysis. It met its acceptance criterion of {F("sstAcceptance")}.
         </div>
       </div>;
     }
@@ -18357,8 +18404,8 @@ function ScribeCard(props) {
   var renderCurve = function(){
     var sampleSing = /singlicate/i.test(st.sampleReps.value);
     var acceptanceClause = sampleSing
-      ? <span>The reported concentration was taken from the least-diluted qualified dilution that met the in-range acceptance criterion</span>
-      : <span>The reported concentration was taken from the least-diluted qualified dilution that met the in-range and CV ≤ {F("cvThreshold")} acceptance criteria</span>;
+      ? <span>The reported concentration was taken from the least diluted qualified dilution that met the in-range acceptance criterion</span>
+      : <span>The reported concentration was taken from the least diluted qualified dilution that met the in-range and CV ≤ {F("cvThreshold")} acceptance criteria</span>;
     var baseText = <span>{F("fitType")} across the calibration series produced an R² of {F("r2")}. {acceptanceClause} ({F("strategy")} analysis strategy).</span>;
     // Checklist static sentences (excluding curveEquation which has its own inline handling)
     var checklistSentences = SCRIBE_CHECKLIST_ITEMS
@@ -18409,6 +18456,10 @@ function ScribeCard(props) {
           var n = Object.assign({}, prev, { notes: v });
           // Invalidate copy marker for b6 (edit-after-copy)
           if (n._copied && n._copied.b6) n._copied = Object.assign({}, n._copied, { b6: null });
+          // Mark b6 as touched (analyst has typed in notes)
+          if (!n._touched || !n._touched.b6) {
+            n._touched = Object.assign({}, n._touched || {}, { b6: true });
+          }
           return n;
         });
       }}
@@ -18418,8 +18469,28 @@ function ScribeCard(props) {
   };
 
   // ─── COPY MACHINERY ───────────────────────────────────────────────────
-  var COPY_PREFIX = "▶ Double-click here to view the full text.\n\n";
-  var BLOCKS_NEEDING_PREFIX = { b2: true, b4: true, b5: true, b6: true };
+  // No copy prefix — LabWare field is 254 chars, every character counts.
+  // Analysts can double-click to expand LabWare fields via their standard workflow.
+
+  // Extract clean text from a DOM element for copy output. Clones the node,
+  // strips any descendant marked data-ui-only (dropdown ▾ arrows, ✎ chevrons,
+  // hover controls, etc.), then normalizes whitespace. Prevents visual
+  // decorations from leaking into LabWare paste.
+  var cleanCopyText = function(el){
+    if (!el) return "";
+    var clone = el.cloneNode(true);
+    var uiOnly = clone.querySelectorAll('[data-ui-only="true"]');
+    for (var i = 0; i < uiOnly.length; i++) {
+      uiOnly[i].parentNode.removeChild(uiOnly[i]);
+    }
+    // innerText collapses whitespace better than textContent, but browsers
+    // sometimes add extra spaces around block elements. Final normalize:
+    var text = (clone.innerText || clone.textContent || "").trim();
+    // Collapse runs of whitespace (incl. line breaks from inline-block styling)
+    // but preserve intentional \n\n paragraph breaks in b2's underlined layout.
+    text = text.replace(/[ \t]+/g, " ").replace(/ *\n */g, "\n");
+    return text.trim();
+  };
 
   // Get the plain-text body for a block by ID. Called by copyBlock and
   // computeContentHash. Deliberately re-computes from state instead of
@@ -18454,12 +18525,10 @@ function ScribeCard(props) {
       return "Sample was dropped off" + datePhrase + initialsPhrase + ", then " + middle + ".";
     }
     if (id === "b2") {
-      // Serialize the two paragraphs — mirror what renderPrep and renderAssay produce,
-      // stripped of JSX. Easiest: extract innerText from the rendered DOM.
       var prepEl = document.getElementById("scribe-block-prep");
       var assayEl = document.getElementById("scribe-block-assay");
-      var prep = prepEl ? prepEl.innerText.trim() : "";
-      var assay = assayEl ? assayEl.innerText.trim() : "";
+      var prep = cleanCopyText(prepEl);
+      var assay = cleanCopyText(assayEl);
       var underlinePrep = "Sample Preparation\n" + "=".repeat("Sample Preparation".length);
       var underlineAssay = "Assay Method\n" + "=".repeat("Assay Method".length);
       return underlinePrep + "\n" + prep + "\n\n" + underlineAssay + "\n" + assay;
@@ -18469,14 +18538,77 @@ function ScribeCard(props) {
       // SST paragraph only (ui-only strip is excluded via data-copy-block wrapper)
       var el = document.getElementById("scribe-block-sst");
       if (!el) return "";
-      var copyBlock = el.querySelector('[data-copy-block="true"]');
-      return copyBlock ? copyBlock.innerText.trim() : "";
+      var copyBlockEl = el.querySelector('[data-copy-block="true"]');
+      return cleanCopyText(copyBlockEl);
     }
     if (id === "b5") {
       var curveEl = document.getElementById("scribe-block-curve");
-      return curveEl ? curveEl.innerText.trim() : "";
+      return cleanCopyText(curveEl);
     }
     if (id === "b6") return (st.notes || "").trim();
+    return "";
+  };
+
+  // TERSE builders — used for LIMS mode copy. Built from state directly to
+  // avoid DOM-scraping artifacts and to guarantee sub-254-char output.
+  // Verbose (getBlockBody) stays for formal-report copy.
+  var traceTerse = function(t){
+    if (!t || !t.protein) return "";
+    var protein = t.protein === "Other" ? (t.proteinCustom || "protein") : t.protein;
+    var source = t.source || "";
+    var detail = t.sourceDetail || "";
+    var conc = t.concentration || "";
+    // Format examples:
+    //   in-house GFP (GFP-H250512-UFZ.3A, 1 mg/mL)
+    //   BSA (Thermo Fisher #23209, 2 mg/mL)
+    //   mAb (Lot A-2024-05, 5 mg/mL)
+    var head = source === "in-house" ? "in-house " + protein : protein;
+    var parts = [];
+    if (detail) parts.push(detail);
+    if (conc) parts.push(conc);
+    return head + (parts.length ? " (" + parts.join(", ") + ")" : "");
+  };
+  var getBlockBodyTerse = function(id){
+    if (id === "b1") return getBlockBody(id);  // already terse
+    if (id === "b3") return getBlockBody(id);  // just the volume
+    if (id === "b6") return getBlockBody(id);  // analyst's own words
+    if (id === "b2") {
+      // Compact prep + method summary. Drop procedural wash/spin/exchange details;
+      // include only what's essential to identify the assay run in LIMS.
+      var prepKey = st._prepKey;
+      var assayKey = st._assayKey;
+      var prepLabels = { pellet_sup: "pellet+sup", lysate_eluate: "lysate/eluate", fractions: "fractions", custom: "custom" };
+      var assayLabels = { df: "direct fluorescence", bca: "BCA", bradford: "Bradford" };
+      var prepLbl = prepLabels[prepKey] || prepKey || "sample";
+      var assayLbl = assayLabels[assayKey] || assayKey || "assay";
+      var std = traceTerse(st.standardTrace);
+      var sopVal = (st.sop && st.sop.value) || "";
+      // "Sample (pellet+sup) processed per BTEC AN-003 rev 01 and analyzed by direct fluorescence using in-house GFP (GFP-H250512-UFZ.3A, 1 mg/mL) as calibration standard."
+      return "Sample (" + prepLbl + ") processed per " + sopVal + " and analyzed by " + assayLbl + " using " + std + " as calibration standard.";
+    }
+    if (id === "b4") {
+      if (!st.sstUsed) {
+        var reason = (st.sstDeclineReason && st.sstDeclineReason.value || "").trim();
+        return "No SST processed. Reason: " + (reason || "(unstated)") + ".";
+      }
+      var sstStd = traceTerse(st.sstTrace);
+      var accVal = (st.sstAcceptance && st.sstAcceptance.value) || "±20% (ICH M10)";
+      // "SST (in-house GFP (GFP-H250512-UFZ.3A, 1 mg/mL)) processed with samples using the same dilution scheme and analysis. Met acceptance: ±20% of expected (80-120%; ICH M10)."
+      return "SST (" + sstStd + ") processed with samples using the same dilution scheme and analysis. Met acceptance: " + accVal + ".";
+    }
+    if (id === "b5") {
+      var fit = (st.fitType && st.fitType.value) || "";
+      var r2 = (st.r2 && st.r2.value) || "";
+      var strat = (st.strategy && st.strategy.value) || "";
+      var sampleSing = /singlicate/i.test((st.sampleReps && st.sampleReps.value) || "");
+      var cvPart = sampleSing ? "" : " + CV \u2264 " + ((st.cvThreshold && st.cvThreshold.value) || "10%");
+      var base = fit + " (R\u00b2 " + r2 + "). Reported from least diluted qualified dilution meeting in-range" + cvPart + "; strategy: " + strat + ".";
+      // Curve equation sentence if ticked
+      if (st._checklist && st._checklist.curveEquation && st.slope.value && st.intercept.value) {
+        base += " Slope " + st.slope.value + "; intercept " + st.intercept.value + ".";
+      }
+      return base;
+    }
     return "";
   };
 
@@ -18484,13 +18616,15 @@ function ScribeCard(props) {
   var flashState = _flashHook[0], setFlashState = _flashHook[1];
 
   var copyBlock = function(id){
-    var body = getBlockBody(id);
+    // LIMS mode ON: terse output for LabWare 254-char field
+    // LIMS mode OFF: verbose paragraphs for formal reports
+    var body = st._limsMode ? getBlockBodyTerse(id) : getBlockBody(id);
     if (!body) {
       setFlashState({ id: id, kind: "warn", label: "Nothing to copy" });
       setTimeout(function(){ setFlashState({}); }, 1500);
       return;
     }
-    var finalText = BLOCKS_NEEDING_PREFIX[id] ? (COPY_PREFIX + body) : body;
+    var finalText = body;
     var done = function(){
       setFlashState({ id: id, kind: "copied", label: "Copied ✓" });
       // Mark as copied with content hash
@@ -18498,6 +18632,7 @@ function ScribeCard(props) {
       update(function(n){
         n._copied = Object.assign({}, n._copied, {});
         n._copied[id] = hash;
+        markTouched(n, id);
       });
       setTimeout(function(){ setFlashState({}); }, 1500);
     };
@@ -18515,6 +18650,35 @@ function ScribeCard(props) {
       try { document.execCommand("copy"); done(); } catch(e){}
       document.body.removeChild(ta);
     }
+  };
+
+  // Copy button with optional character counter (LIMS mode only).
+  // Counter shows "N/254", red when N > 254. Hidden entirely when LIMS off.
+  var LIMS_LIMIT = 254;
+  var renderCopyBtn = function(id){
+    var isFlashing = flashState.id === id;
+    var btnStyle = isFlashing ? s.copyBtnFlash(flashState.kind) : s.copyBtn;
+    var label = isFlashing ? flashState.label : "Copy";
+    var counter = null;
+    if (st._limsMode) {
+      var body = getBlockBodyTerse(id);
+      var n = body.length;
+      var over = n > LIMS_LIMIT;
+      counter = <span style={{
+        marginRight: 6, fontSize: 10.5, fontWeight: 700,
+        padding: "2px 6px", borderRadius: 4,
+        color: over ? "#fff" : C.slate,
+        background: over ? C.dotRed : "#f4f6fb",
+        border: "1px solid " + (over ? C.dotRed : C.divider),
+        fontFamily: "ui-monospace, Menlo, monospace",
+      }} title={over ? "Over 254-char LabWare limit" : "Copy length / LabWare limit"}>
+        {n}/{LIMS_LIMIT}
+      </span>;
+    }
+    return <div style={{display:"flex",alignItems:"center"}}>
+      {counter}
+      <button style={btnStyle} onClick={function(){copyBlock(id);}}>{label}</button>
+    </div>;
   };
 
   // ─── VALIDATION per block ─────────────────────────────────────────────
@@ -18573,6 +18737,7 @@ function ScribeCard(props) {
       n._checklist = Object.assign({}, n._checklist);
       n._checklist[itemId] = !n._checklist[itemId];
       n._copied = {};
+      markTouched(n, "b5");
     });
   };
 
@@ -18622,22 +18787,53 @@ function ScribeCard(props) {
         {/* Two-column layout: sidebar + blocks */}
         <div style={s.layoutContainer}>
           <div style={s.sidebar}>
-            {/* Template context indicator — persistent, visible from every block.
-                Analysts see the current prep + assay picks at a glance no matter
-                which block they're focused on. */}
+            {/* Persistent context indicator — visible from every block, so analysts
+                see the current workflow + method at a glance no matter which block
+                they're focused on. */}
             {(() => {
               var prepLabels = { pellet_sup: "Pellet + Sup", lysate_eluate: "Lysate / Eluate", fractions: "Fractions", custom: "Custom" };
               var assayLabels = { df: "DF (GFP)", bca: "BCA", bradford: "Bradford" };
               var prepLabel = prepLabels[st._prepKey] || st._prepKey;
               var assayLabel = assayLabels[st._assayKey] || st._assayKey;
               return <div style={{marginBottom:10,padding:"8px 10px",background:C.purpleTint,border:"1px solid "+C.purple,borderRadius:6,fontSize:10.5,color:C.purpleDeep,lineHeight:1.5}}>
-                <div style={{fontSize:9.5,fontWeight:700,textTransform:"uppercase",letterSpacing:0.5,color:C.slate,marginBottom:4}}>Template</div>
                 <div style={{display:"flex",flexDirection:"column",gap:3}}>
-                  <div><span style={{fontWeight:600,color:C.slate}}>Prep:</span> <span style={{fontWeight:700}}>{prepLabel}</span></div>
-                  <div><span style={{fontWeight:600,color:C.slate}}>Assay:</span> <span style={{fontWeight:700}}>{assayLabel}</span></div>
+                  <div><span style={{fontWeight:600,color:C.slate}}>Workflow:</span> <span style={{fontWeight:700}}>{prepLabel}</span></div>
+                  <div><span style={{fontWeight:600,color:C.slate}}>Method:</span> <span style={{fontWeight:700}}>{assayLabel}</span></div>
                 </div>
               </div>;
             })()}
+            {/* LIMS mode toggle — when ON (default), Copy produces terse output
+                fitting LabWare's 254-char field; when OFF, verbose paragraphs
+                suitable for formal reports. Analyst sees the same on-screen
+                paragraphs either way. */}
+            <div
+              onClick={function(){ update(function(n){ n._limsMode = !n._limsMode; }); }}
+              title={st._limsMode
+                ? "LIMS mode ON — Copy produces compact text (\u2264 254 chars) for LabWare. Click to switch to verbose mode."
+                : "LIMS mode OFF — Copy produces full paragraphs for formal reports. Click to switch to LIMS mode."}
+              style={{
+                marginBottom: 10,
+                padding: "6px 10px",
+                background: st._limsMode ? C.purpleTint : "#fff",
+                border: "1px solid " + (st._limsMode ? C.purple : C.divider),
+                borderRadius: 6,
+                fontSize: 10.5,
+                cursor: "pointer",
+                userSelect: "none",
+                display: "flex", alignItems: "center", gap: 8,
+              }}
+            >
+              <span style={{
+                width: 14, height: 14, borderRadius: 3,
+                border: "1.5px solid " + (st._limsMode ? C.purple : C.slateLt),
+                background: st._limsMode ? C.purple : "#fff",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                color: "#fff", fontSize: 10, fontWeight: 700, flexShrink: 0,
+              }}>{st._limsMode ? "\u2713" : ""}</span>
+              <span style={{ flex: 1, color: st._limsMode ? C.purpleDeep : C.slate, fontWeight: 600 }}>
+                LIMS mode <span style={{ fontWeight: 500, opacity: 0.8 }}>(compact copy)</span>
+              </span>
+            </div>
             {BLOCKS.map(function(b){
               var isActive = st._focusedBlock === b.id;
               var status = blockStatus(b.id);
@@ -18663,12 +18859,7 @@ function ScribeCard(props) {
             <div id="scribe-b1" style={s.block(st._focusedBlock === "b1")}>
               <div style={s.blockHeader}>
                 <div style={s.blockLabel}><span style={s.blockNum}>1</span>Sample Receival</div>
-                <button
-                  style={flashState.id === "b1" ? s.copyBtnFlash(flashState.kind) : s.copyBtn}
-                  onClick={function(){copyBlock("b1");}}
-                >
-                  {flashState.id === "b1" ? flashState.label : "Copy"}
-                </button>
+                {renderCopyBtn("b1")}
               </div>
               <div style={s.blockBody} id="scribe-block-storage">{renderStorage()}</div>
             </div>
@@ -18677,12 +18868,7 @@ function ScribeCard(props) {
             <div id="scribe-b2" style={s.block(st._focusedBlock === "b2")}>
               <div style={s.blockHeader}>
                 <div style={s.blockLabel}><span style={s.blockNum}>2</span>Sample Processing &amp; Assay</div>
-                <button
-                  style={flashState.id === "b2" ? s.copyBtnFlash(flashState.kind) : s.copyBtn}
-                  onClick={function(){copyBlock("b2");}}
-                >
-                  {flashState.id === "b2" ? flashState.label : "Copy"}
-                </button>
+                {renderCopyBtn("b2")}
               </div>
               <div style={s.blockBody}>
                 <div style={s.subHeadingFirst}>Sample Preparation</div>
@@ -18696,7 +18882,7 @@ function ScribeCard(props) {
             <div id="scribe-b3" style={s.block(st._focusedBlock === "b3")}>
               <div style={s.blockHeader}>
                 <div style={s.blockLabel}><span style={s.blockNum}>3</span>Assay Volume</div>
-                <button style={flashState.id === "b3" ? s.copyBtnFlash(flashState.kind) : s.copyBtn} onClick={function(){copyBlock("b3");}}>{flashState.id === "b3" ? flashState.label : "Copy"}</button>
+                {renderCopyBtn("b3")}
               </div>
               <div style={s.blockBody}>{renderVolume()}</div>
             </div>
@@ -18705,7 +18891,7 @@ function ScribeCard(props) {
             <div id="scribe-b4" style={s.block(st._focusedBlock === "b4")}>
               <div style={s.blockHeader}>
                 <div style={s.blockLabel}><span style={s.blockNum}>4</span>SST Used</div>
-                <button style={flashState.id === "b4" ? s.copyBtnFlash(flashState.kind) : s.copyBtn} onClick={function(){copyBlock("b4");}}>{flashState.id === "b4" ? flashState.label : "Copy"}</button>
+                {renderCopyBtn("b4")}
               </div>
               <div style={s.blockBody} id="scribe-block-sst">{renderSST()}</div>
             </div>
@@ -18714,7 +18900,7 @@ function ScribeCard(props) {
             <div id="scribe-b5" style={s.block(st._focusedBlock === "b5")}>
               <div style={s.blockHeader}>
                 <div style={s.blockLabel}><span style={s.blockNum}>5</span>Standard Curve Info</div>
-                <button style={flashState.id === "b5" ? s.copyBtnFlash(flashState.kind) : s.copyBtn} onClick={function(){copyBlock("b5");}}>{flashState.id === "b5" ? flashState.label : "Copy"}</button>
+                {renderCopyBtn("b5")}
               </div>
               <div style={s.blockBody}>
                 <div id="scribe-block-curve">{renderCurve()}</div>
@@ -18737,7 +18923,7 @@ function ScribeCard(props) {
             <div id="scribe-b6" style={s.block(st._focusedBlock === "b6")}>
               <div style={s.blockHeader}>
                 <div style={s.blockLabel}><span style={s.blockNum}>6</span>Additional Notes</div>
-                <button style={flashState.id === "b6" ? s.copyBtnFlash(flashState.kind) : s.copyBtn} onClick={function(){copyBlock("b6");}}>{flashState.id === "b6" ? flashState.label : "Copy"}</button>
+                {renderCopyBtn("b6")}
               </div>
               <div style={s.blockBody}>{renderNotes()}</div>
             </div>
@@ -18833,6 +19019,8 @@ function ScribeFieldEditor(props) {
       <input
         ref={ref}
         type="date"
+        min="2020-01-01"
+        max="2030-12-31"
         value={scribeParseAnyDateToISO(val) || ""}
         onChange={function(e){
           // Commit immediately on pick — no need for extra blur/Enter step.
