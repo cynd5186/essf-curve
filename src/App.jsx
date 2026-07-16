@@ -17361,7 +17361,7 @@ var SCRIBE_GFP_WORKING_STOCK = {
 // that stored the full string. Still referenced by scribeTraceMissing.
 SCRIBE_GFP_WORKING_STOCK.prepId = SCRIBE_GFP_WORKING_STOCK.prefix + "." + SCRIBE_GFP_WORKING_STOCK.defaultNumber;
 var SCRIBE_SST_DEFAULT_CONCENTRATION = {
-  df: "0.7 mg/mL", bca: "2.0 mg/mL", bradford: "2.0 mg/mL",
+  df: "0.7 mg/mL", bca: "2.0 mg/mL", bradford: "2.0 mg/mL", p660: "2.0 mg/mL",
 };
 var SCRIBE_ICH_M10_ACCEPTANCE = "±20% of expected (80-120%; ICH M10)";
 var SCRIBE_REPLICATE_OPTS = ["duplicate", "triplicate", "singlicate (no replicates)"];
@@ -17412,14 +17412,24 @@ var SCRIBE_PREP_DEFAULTS = {
   pellet_sup: {
     prepType:      { value: "pellet + supernatant", type: "text" },
     washCycles:    { value: "3×", type: "text" },
-    washBuffer:    { value: "1 mL PBS (50 mM NaP, pH 7.2)", type: "text" },
-    resuspVol:     { value: "1 mL PBS", type: "text" },
+    // Buffer wording standardized: no "PBS" abbreviation (would incorrectly imply saline),
+    // no "NaP" shorthand. Volume stays inline in the field for now — analyst edits volume
+    // + buffer text together if their protocol differs.
+    washBuffer:    { value: "1 mL of 50 mM sodium phosphate buffer, pH 7.2", type: "text" },
+    resuspVol:     { value: "1 mL of 50 mM sodium phosphate buffer, pH 7.2", type: "text" },
+    // Lysis method — bead-beating is default for pellet workflow. Chemical lysis and other
+    // options available via dropdown. "Other" opens inline text for custom write-in.
+    lysisMethod:   { value: "bead-beating", type: "select", options: ["bead-beating", "chemical lysis", "sonication", "freeze-thaw", "Other"] },
     beadBeatTime:  { value: "2.5 min × 2 cycles", type: "text" },
     iceCooling:    { value: "1 min", type: "text" },
     clarifySpin:   { value: "20,817 × g", type: "text" },
     initialSpin:   { value: "10,000 × g", type: "text" },
-    mwcoFilter:    { value: "10 kDa Amicon", type: "text" },
+    // Vendor-neutral: "MWCO centrifugal filter" instead of brand-specific "Amicon".
+    mwcoFilter:    { value: "10 kDa MWCO centrifugal filter", type: "text" },
     exchangeCycles:{ value: "2", type: "text" },
+    // Exchange buffer — dropdown matrix-matched to standards buffer options.
+    // Default = same as standards (50 mM sodium phosphate). Same option list as SCRIBE_BLANK_OPTS.
+    exchangeBuffer:{ value: "50 mM sodium phosphate buffer, pH 7.2", type: "select", options: SCRIBE_BLANK_OPTS },
   },
   lysate_eluate: {
     prepType:      { value: "clarified lysate/eluate", type: "select", options: ["clarified lysate", "column eluate", "clarified lysate/eluate"] },
@@ -17525,6 +17535,36 @@ var SCRIBE_ASSAY_DEFAULTS = {
     intercept:    { value: "", type: "text" },
     standardTrace: { protein: "BSA", proteinCustom: "", source: "Thermo Fisher", sourceDetail: "", concentration: "2.0 mg/mL" },
     sstTrace:      { protein: "BSA", proteinCustom: "", source: "Thermo Fisher", sourceDetail: "", concentration: SCRIBE_SST_DEFAULT_CONCENTRATION.bradford },
+    sstAcceptance:{ value: SCRIBE_ICH_M10_ACCEPTANCE, type: "text" },
+  },
+  p660: {
+    // Thermo Fisher Pierce 660nm Protein Assay (Cat. 22662 = kit with reagent + pre-diluted BSA standards)
+    // Microplate procedure working range: 50-2000 µg/mL (0.05-2.0 mg/mL)
+    // Kit ships with pre-diluted BSA standards 125-2000 µg/mL, but analyst can also prepare from stock.
+    sop:          { value: "BTEC AN-004", type: "text" },
+    proteinName:  { value: "total protein", type: "text" },
+    kitVendor:    { value: "Thermo Fisher Pierce 660 nm Protein Assay (P/N 22662)", type: "text" },
+    stdBuffer:    { value: "50 mM sodium phosphate buffer, pH 7.2", type: "text" },
+    stdRangeHigh: { value: "2.0", type: "text" },   // Auto-computed from standardConc / firstDil
+    stdRangeLow:  { value: "0.031", type: "text" }, // Auto-computed from high × serialDil^(n-1)
+    stdRangeLowManual: false,
+    stdRangeHighManual: false,
+    firstDil:     { value: "1:1", type: "select", options: ["1:1","1:2","1:3","1:4","1:5","1:10","Other"] },
+    serialDil:    { value: "1:2", type: "select", options: SCRIBE_SERIAL_RATIO_OPTS },
+    numPoints:    { value: "7", type: "text" },
+    stdReps:      { value: "triplicate", type: "select", options: SCRIBE_REPLICATE_OPTS },
+    plate:        { value: "96-well clear flat-bottom", type: "text" },
+    wavelength:   { value: "660 nm", type: "text" },
+    reader:       { value: "BioTek Synergy 4", type: "text" },
+    sampleReps:   { value: "duplicate", type: "select", options: SCRIBE_REPLICATE_OPTS },
+    r2:           { value: "0.998", type: "text" },
+    cvThreshold:  { value: "10%", type: "select", options: SCRIBE_CV_OPTS },
+    strategy:     { value: "Literature-backed (ICH M10)", type: "select", options: SCRIBE_STRATEGY_OPTS },
+    fitType:      { value: "Linear regression", type: "select", options: SCRIBE_FIT_OPTS },
+    slope:        { value: "", type: "text" },
+    intercept:    { value: "", type: "text" },
+    standardTrace: { protein: "BSA", proteinCustom: "", source: "Thermo Fisher", sourceDetail: "", concentration: "2.0 mg/mL" },
+    sstTrace:      { protein: "BSA", proteinCustom: "", source: "Thermo Fisher", sourceDetail: "", concentration: SCRIBE_SST_DEFAULT_CONCENTRATION.p660 },
     sstAcceptance:{ value: SCRIBE_ICH_M10_ACCEPTANCE, type: "text" },
   },
 };
@@ -18190,7 +18230,7 @@ function ScribeCard(props) {
     // Dropdowns with "Other" escape hatch — swap dropdown for text input so
     // analyst can type a custom value instead of committing "Other" literally.
     // Applies to receivalInitials (SLJ/GKB/CGS/Other) and blankSubstance (PBS/Tris/Other).
-    if ((key === "receivalInitials" || key === "blankSubstance" || key === "serialDil" || key === "firstDil") && finalVal === "Other") {
+    if ((key === "receivalInitials" || key === "blankSubstance" || key === "serialDil" || key === "firstDil" || key === "exchangeBuffer" || key === "lysisMethod") && finalVal === "Other") {
       var anchorRect = editing.anchorRect;
       update(function(n){
         if (n[key]) n[key].value = "";
@@ -18256,10 +18296,17 @@ function ScribeCard(props) {
   var renderPrep = function(){
     var key = st._prepKey;
     if (key === "pellet_sup") {
+      var lysisMethodVal = (st.lysisMethod && st.lysisMethod.value) || "bead-beating";
+      var isBeadBeat = /bead[- ]?beat/i.test(lysisMethodVal);
+      // Lysis sentence adapts to method: bead-beating shows time/cooling params;
+      // other methods just name the method (analyst can add detail via notes).
+      var lysisSentence = isBeadBeat
+        ? <span>Cells were lysed by {F("lysisMethod")} ({F("beadBeatTime")}) with {F("iceCooling")} ice cooling between cycles, then clarified at {F("clarifySpin")}.</span>
+        : <span>Cells were lysed by {F("lysisMethod")}, then clarified at {F("clarifySpin")}.</span>;
       return <span>
         Samples were received as {F("prepType")} and washed {F("washCycles")} in {F("washBuffer")}, then resuspended in {F("resuspVol")}.
-        Cells were lysed by bead-beating ({F("beadBeatTime")}) with {F("iceCooling")} ice cooling between cycles, then clarified at {F("clarifySpin")}.
-        Supernatants were passed through an initial spin at {F("initialSpin")} and buffer-exchanged {F("exchangeCycles")}× using a {F("mwcoFilter")} filter.
+        {" "}{lysisSentence}
+        {" "}Supernatants were passed through an initial spin at {F("initialSpin")} and buffer-exchanged into {F("exchangeBuffer")} through {F("exchangeCycles")} cycles using a {F("mwcoFilter")}.
       </span>;
     }
     if (key === "lysate_eluate" || key === "fractions") {
@@ -18316,6 +18363,14 @@ function ScribeCard(props) {
       </span>;
     }
     if (key === "bca") {
+      return <span>
+        Total protein concentration was determined using the {F("kitVendor")} following {st.sop.value}.
+        Calibration standards were prepared by diluting {stdTraceUI} into {F("stdBuffer")}: a {F("firstDil")} initial dilution, then {F("serialDil")} serial dilution down the column across {F("numPoints")} points, covering {st.stdRangeLow.value}–{st.stdRangeHigh.value} mg/mL.
+        Each calibration point was analyzed in {F("stdReps")}. Absorbance at {st.wavelength.value} was measured in a {st.plate.value} plate on a {st.reader.value} reader, with samples analyzed in {F("sampleReps")}.
+        {cvDisclaimer}
+      </span>;
+    }
+    if (key === "p660") {
       return <span>
         Total protein concentration was determined using the {F("kitVendor")} following {st.sop.value}.
         Calibration standards were prepared by diluting {stdTraceUI} into {F("stdBuffer")}: a {F("firstDil")} initial dilution, then {F("serialDil")} serial dilution down the column across {F("numPoints")} points, covering {st.stdRangeLow.value}–{st.stdRangeHigh.value} mg/mL.
@@ -18878,12 +18933,14 @@ function ScribeCard(props) {
   };
 
   // ─── SIDEBAR BLOCK DEFINITIONS ────────────────────────────────────────
+  // Labels match LIMS field names exactly — analyst sees the same wording in
+  // Scribe as in LabWare, no translation step required.
   var BLOCKS = [
-    { id: "b1", num: "1", label: "Sample Receival" },
+    { id: "b1", num: "1", label: "Sample Receival & Storage Cond." },
     { id: "b2", num: "2", label: "Sample Processing & Assay" },
     { id: "b3", num: "3", label: "Assay Volume" },
-    { id: "b4", num: "4", label: "SST Used" },
-    { id: "b5", num: "5", label: "Std Curve Info" },
+    { id: "b4", num: "4", label: "System Suitability Std. Used" },
+    { id: "b5", num: "5", label: "Standard Curve Information" },
     { id: "b6", num: "6", label: "Additional Notes" },
   ];
 
@@ -18913,6 +18970,7 @@ function ScribeCard(props) {
               <option value="df">Direct Fluorescence (GFP)</option>
               <option value="bca">BCA</option>
               <option value="bradford">Bradford</option>
+              <option value="p660">Pierce 660 nm</option>
             </select>
           </label>
           {/* LIMS mode pill toggle — sits in the tagline slot, right-aligned.
@@ -18963,7 +19021,7 @@ function ScribeCard(props) {
                 they're focused on. */}
             {(() => {
               var prepLabels = { pellet_sup: "Pellet + Sup", lysate_eluate: "Lysate / Eluate", fractions: "Fractions", custom: "Custom" };
-              var assayLabels = { df: "DF (GFP)", bca: "BCA", bradford: "Bradford" };
+              var assayLabels = { df: "DF (GFP)", bca: "BCA", bradford: "Bradford", p660: "P660 (Pierce)" };
               var prepLabel = prepLabels[st._prepKey] || st._prepKey;
               var assayLabel = assayLabels[st._assayKey] || st._assayKey;
               return <div style={{marginBottom:10,padding:"8px 10px",background:C.purpleTint,border:"1px solid "+C.purple,borderRadius:6,fontSize:10.5,color:C.purpleDeep,lineHeight:1.5}}>
@@ -19000,7 +19058,7 @@ function ScribeCard(props) {
             {/* Block 1: Sample Receival */}
             <div id="scribe-b1" style={s.block(st._focusedBlock === "b1")}>
               <div style={s.blockHeader}>
-                <div style={s.blockLabel}><span style={s.blockNum}>1</span>Sample Receival</div>
+                <div style={s.blockLabel}><span style={s.blockNum}>1</span>Sample Receival &amp; Storage Cond.</div>
                 {renderCopyBtn("b1")}
               </div>
               <div style={s.blockBody} id="scribe-block-storage">{renderStorage()}</div>
@@ -19032,7 +19090,7 @@ function ScribeCard(props) {
             {/* Block 4: SST Used */}
             <div id="scribe-b4" style={s.block(st._focusedBlock === "b4")}>
               <div style={s.blockHeader}>
-                <div style={s.blockLabel}><span style={s.blockNum}>4</span>SST Used</div>
+                <div style={s.blockLabel}><span style={s.blockNum}>4</span>System Suitability Std. Used</div>
                 {renderCopyBtn("b4")}
               </div>
               <div style={s.blockBody} id="scribe-block-sst">{renderSST()}</div>
@@ -19041,7 +19099,7 @@ function ScribeCard(props) {
             {/* Block 5: Standard Curve Info */}
             <div id="scribe-b5" style={s.block(st._focusedBlock === "b5")}>
               <div style={s.blockHeader}>
-                <div style={s.blockLabel}><span style={s.blockNum}>5</span>Standard Curve Info</div>
+                <div style={s.blockLabel}><span style={s.blockNum}>5</span>Standard Curve Information</div>
                 {renderCopyBtn("b5")}
               </div>
               <div style={s.blockBody}>
