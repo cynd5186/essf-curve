@@ -17366,9 +17366,14 @@ var SCRIBE_SST_DEFAULT_CONCENTRATION = {
 var SCRIBE_ICH_M10_ACCEPTANCE = "±20% of expected (80-120%; ICH M10)";
 var SCRIBE_REPLICATE_OPTS = ["duplicate", "triplicate", "singlicate (no replicates)"];
 var SCRIBE_CV_OPTS = ["10%", "15%", "20%", "25%"];
-// Row H blank options for DF assay — most common two options + customize escape hatch.
-// "customize" opens the same "Other → text input" flow as the initials dropdown.
-var SCRIBE_BLANK_OPTS = ["phosphate-buffered saline (PBS)", "50 mM Tris, pH 8.0 (no salt)", "Other"];
+// Row H blank options for DF assay — matrix-matched to stdBuffer (analyst blanks
+// in the same buffer their standards are prepared in). "Other" opens the same
+// text-input escape hatch as the initials dropdown.
+var SCRIBE_BLANK_OPTS = [
+  "50 mM sodium phosphate buffer, pH 7.2",
+  "50 mM Tris buffer, pH 8.0 (no salt)",
+  "Other",
+];
 // Serial dilution ratios shown as whole ratios (analysts think "1:2 dilution",
 // not "dilution factor of 2"). "Other" opens inline text for custom write-in.
 var SCRIBE_SERIAL_RATIO_OPTS = ["1:2", "1:3", "1:4", "1:5", "1:10", "Other"];
@@ -17444,8 +17449,8 @@ var SCRIBE_ASSAY_DEFAULTS = {
   df: {
     sop:           { value: "BTEC AN-003 rev 01", type: "text" },
     proteinName:   { value: "GFPuv", type: "text" },
-    stdBuffer:     { value: "50 mM sodium phosphate, pH 7.2", type: "text" },
-    blankSubstance:{ value: "phosphate-buffered saline (PBS)", type: "select", options: SCRIBE_BLANK_OPTS },
+    stdBuffer:     { value: "50 mM sodium phosphate buffer, pH 7.2", type: "text" },
+    blankSubstance:{ value: "50 mM sodium phosphate buffer, pH 7.2", type: "select", options: SCRIBE_BLANK_OPTS },
     firstDil:      { value: "1:10", type: "select", options: ["1:2","1:3","1:4","1:5","1:10","1:20","Other"] },
     serialDil:     { value: "1:2", type: "select", options: SCRIBE_SERIAL_RATIO_OPTS },
     numPoints:     { value: "8", type: "text" },
@@ -17473,7 +17478,7 @@ var SCRIBE_ASSAY_DEFAULTS = {
     sop:          { value: "BTEC AN-002", type: "text" },
     proteinName:  { value: "total protein", type: "text" },
     kitVendor:    { value: "Thermo Fisher Pierce BCA Protein Assay (P/N 23225)", type: "text" },
-    stdBuffer:    { value: "phosphate-buffered saline (PBS)", type: "text" },
+    stdBuffer:    { value: "50 mM sodium phosphate buffer, pH 7.2", type: "text" },
     stdRangeHigh: { value: "2.0", type: "text" },   // Auto-computed from standardConc / firstDil
     stdRangeLow:  { value: "0.031", type: "text" }, // Auto-computed from high × serialDil^(n-1)
     stdRangeLowManual: false,
@@ -17499,7 +17504,7 @@ var SCRIBE_ASSAY_DEFAULTS = {
   bradford: {
     sop:          { value: "Bio-Rad Quick Start Bradford (500-0205)", type: "text" },
     proteinName:  { value: "total protein", type: "text" },
-    stdBuffer:    { value: "phosphate-buffered saline (PBS)", type: "text" },
+    stdBuffer:    { value: "50 mM sodium phosphate buffer, pH 7.2", type: "text" },
     stdRangeHigh: { value: "2.0", type: "text" },
     stdRangeLow:  { value: "0.031", type: "text" },
     stdRangeLowManual: false,
@@ -18282,9 +18287,14 @@ function ScribeCard(props) {
       // Rendered as plain text — click-to-edit removed to reduce visual noise
       // and prevent accidental edits during training.
       // Gen5 protocol file removed entirely: it's specified in the SOP.
+      var stdBufferVal = (st.stdBuffer && st.stdBuffer.value || "").trim();
+      var blankVal = (st.blankSubstance && st.blankSubstance.value || "").trim();
+      var blankClause = (stdBufferVal && blankVal && stdBufferVal === blankVal)
+        ? <span>, with Row H as a same-buffer blank</span>
+        : <span>, with Row H as the {F("blankSubstance")} blank</span>;
       return <span>
         Active protein concentration was determined by direct fluorescence following {st.sop.value} using {F("proteinName")}.
-        Calibration standards were prepared from {stdTraceUI} in {F("stdBuffer")} as a {F("numPoints")}-point series via an initial {F("firstDil")} dilution followed by {F("serialDil")} serial dilution down the column, covering a working range of {st.stdRangeLow.value}–{st.stdRangeHigh.value} mg/mL, with Row H as the {F("blankSubstance")} blank.
+        Calibration standards were prepared from {stdTraceUI} in {F("stdBuffer")} as a {F("numPoints")}-point series via an initial {F("firstDil")} dilution followed by {F("serialDil")} serial dilution down the column, covering a working range of {st.stdRangeLow.value}–{st.stdRangeHigh.value} mg/mL{blankClause}.
         Each calibration point was analyzed in {F("stdReps")}. Fluorescence was measured at {st.wavelength.value} in a {st.plate.value} plate on a {st.reader.value} reader, with samples analyzed in {F("sampleReps")}.
         {cvDisclaimer}
       </span>;
