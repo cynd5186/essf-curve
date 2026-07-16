@@ -17446,8 +17446,13 @@ var SCRIBE_ASSAY_DEFAULTS = {
     proteinName:   { value: "GFPuv", type: "text" },
     stdBuffer:     { value: "50 mM Na phosphate pH 7.2", type: "text" },
     blankSubstance:{ value: "phosphate-buffered saline (PBS)", type: "select", options: SCRIBE_BLANK_OPTS },
-    firstDil:      { value: "1:10", type: "text" },
-    serialDil:     { value: "1:2", type: "text" },
+    firstDil:      { value: "1:10", type: "select", options: ["1:2","1:3","1:4","1:5","1:10","1:20","Other"] },
+    serialDil:     { value: "1:2", type: "select", options: SCRIBE_SERIAL_RATIO_OPTS },
+    numPoints:     { value: "8", type: "text" },
+    stdRangeHigh:  { value: "0.1", type: "text" },   // Auto-computed from standard conc × firstDil
+    stdRangeLow:   { value: "0.00078", type: "text" }, // Auto-computed from stdRangeHigh × serialDil × numPoints
+    stdRangeLowManual: false,
+    stdRangeHighManual: false,
     stdReps:       { value: "duplicate", type: "select", options: SCRIBE_REPLICATE_OPTS },
     plate:         { value: "Corning 96-well black flat-bottom", type: "text" },
     wavelength:    { value: "Ex 380 / Em 508 nm", type: "text" },
@@ -17469,12 +17474,13 @@ var SCRIBE_ASSAY_DEFAULTS = {
     proteinName:  { value: "total protein", type: "text" },
     kitVendor:    { value: "Thermo Fisher Pierce BCA Protein Assay (P/N 23225)", type: "text" },
     stdBuffer:    { value: "PBS", type: "text" },
-    stdRangeHigh: { value: "1.0", type: "text" },
-    stdRangeLow:  { value: "0.016", type: "text" },
-    stdRangeLowManual: false,   // true = analyst overrode; false = auto-computed
-    serialRatio:  { value: "1:2", type: "select", options: SCRIBE_SERIAL_RATIO_OPTS },
+    stdRangeHigh: { value: "2.0", type: "text" },   // Auto-computed from standardConc / firstDil
+    stdRangeLow:  { value: "0.031", type: "text" }, // Auto-computed from high × serialDil^(n-1)
+    stdRangeLowManual: false,
+    stdRangeHighManual: false,
+    firstDil:     { value: "1:1", type: "select", options: ["1:1","1:2","1:3","1:4","1:5","1:10","Other"] },
+    serialDil:    { value: "1:2", type: "select", options: SCRIBE_SERIAL_RATIO_OPTS },
     numPoints:    { value: "7", type: "text" },
-    firstDil:     { value: "1:2", type: "text" },
     stdReps:      { value: "triplicate", type: "select", options: SCRIBE_REPLICATE_OPTS },
     plate:        { value: "96-well clear flat-bottom", type: "text" },
     wavelength:   { value: "562 nm", type: "text" },
@@ -17494,12 +17500,13 @@ var SCRIBE_ASSAY_DEFAULTS = {
     sop:          { value: "Bio-Rad Quick Start Bradford (500-0205)", type: "text" },
     proteinName:  { value: "total protein", type: "text" },
     stdBuffer:    { value: "PBS", type: "text" },
-    stdRangeHigh: { value: "1.0", type: "text" },
-    stdRangeLow:  { value: "0.016", type: "text" },
+    stdRangeHigh: { value: "2.0", type: "text" },
+    stdRangeLow:  { value: "0.031", type: "text" },
     stdRangeLowManual: false,
-    serialRatio:  { value: "1:2", type: "select", options: SCRIBE_SERIAL_RATIO_OPTS },
+    stdRangeHighManual: false,
+    firstDil:     { value: "1:1", type: "select", options: ["1:1","1:2","1:3","1:4","1:5","1:10","Other"] },
+    serialDil:    { value: "1:2", type: "select", options: SCRIBE_SERIAL_RATIO_OPTS },
     numPoints:    { value: "7", type: "text" },
-    firstDil:     { value: "1:2", type: "text" },
     stdReps:      { value: "triplicate", type: "select", options: SCRIBE_REPLICATE_OPTS },
     plate:        { value: "96-well clear flat-bottom", type: "text" },
     wavelength:   { value: "595 nm", type: "text" },
@@ -17656,28 +17663,62 @@ function scribeTraceToString(t) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Serial-dilution auto-range compute (BCA/Bradford stdRangeLow = high × (1/ratio)^(n-1))
+// Serial-dilution auto-range compute.
+//   BCA/Bradford: stdRangeLow = stdRangeHigh × (1/serialRatio)^(n-1)
+//   DF:           stdRangeHigh = standardConc × 1/firstDil
+//                 stdRangeLow  = stdRangeHigh × (1/serialDil)^(n-1)
+// "1:X" ratio format is parsed both directions; also accepts bare numeric.
 // ─────────────────────────────────────────────────────────────────────────
-function scribeUpdateComputedRange(st) {
-  if (!st.stdRangeHigh || !st.serialRatio || !st.numPoints) return;
-  // Skip auto-compute when analyst has manually overridden low
-  if (st.stdRangeLowManual) return;
-  var high  = parseFloat(st.stdRangeHigh.value);
-  // Parse "1:X" ratio format (analyst-facing) → dilution factor X
-  var ratioRaw = String(st.serialRatio.value || "").trim();
-  var ratioMatch = ratioRaw.match(/^1\s*:\s*(\d+(?:\.\d+)?)$/);
-  var ratio = ratioMatch ? parseFloat(ratioMatch[1]) : parseFloat(ratioRaw);
-  var n     = parseInt(st.numPoints.value, 10);
-  if (!isFinite(high) || !isFinite(ratio) || !isFinite(n) || ratio <= 1 || n < 2) return;
-  var low = high * Math.pow(1 / ratio, n - 1);
-  var lowStr;
-  if (low >= 1) lowStr = low.toFixed(2);
-  else if (low >= 0.01) lowStr = low.toFixed(3);
-  else lowStr = low.toExponential(2);
-  if (lowStr.indexOf(".") >= 0 && lowStr.indexOf("e") < 0) {
-    lowStr = lowStr.replace(/0+$/, "").replace(/\.$/, "");
+function scribeParseRatio(s) {
+  var raw = String(s || "").trim();
+  var m = raw.match(/^1\s*:\s*(\d+(?:\.\d+)?)$/);
+  return m ? parseFloat(m[1]) : parseFloat(raw);
+}
+function scribeParseConc(s) {
+  // Parse "1 mg/mL" or "0.5 mg/mL" or "2.0" → numeric mg/mL. Ignores units suffix.
+  var raw = String(s || "").trim();
+  var m = raw.match(/-?\d*\.?\d+/);
+  return m ? parseFloat(m[0]) : NaN;
+}
+function scribeFormatRange(v) {
+  if (!isFinite(v)) return "";
+  var s;
+  if (v >= 1)        s = v.toFixed(2);
+  else if (v >= 0.01) s = v.toFixed(3);
+  else                s = v.toExponential(2);
+  if (s.indexOf(".") >= 0 && s.indexOf("e") < 0) {
+    s = s.replace(/0+$/, "").replace(/\.$/, "");
   }
-  st.stdRangeLow.value = lowStr;
+  return s;
+}
+function scribeUpdateComputedRange(st) {
+  // BCA / Bradford branch — serialRatio field (uses whole-ratio dropdown)
+  if (st.serialRatio && st.stdRangeHigh && st.numPoints && !st.stdRangeLowManual) {
+    var high  = parseFloat(st.stdRangeHigh.value);
+    var ratio = scribeParseRatio(st.serialRatio.value);
+    var n     = parseInt(st.numPoints.value, 10);
+    if (isFinite(high) && isFinite(ratio) && ratio > 1 && isFinite(n) && n >= 2) {
+      st.stdRangeLow.value = scribeFormatRange(high * Math.pow(1 / ratio, n - 1));
+    }
+  }
+  // DF branch — firstDil + serialDil (no serialRatio field)
+  else if (st.firstDil && st.serialDil && st.numPoints && st.standardTrace) {
+    var startConc = scribeParseConc(st.standardTrace.concentration);
+    var firstR    = scribeParseRatio(st.firstDil.value);
+    var serialR   = scribeParseRatio(st.serialDil.value);
+    var nDF       = parseInt(st.numPoints.value, 10);
+    if (isFinite(startConc) && isFinite(firstR) && firstR > 0 && isFinite(serialR) && serialR > 1 && isFinite(nDF) && nDF >= 2) {
+      if (!st.stdRangeHighManual) {
+        st.stdRangeHigh.value = scribeFormatRange(startConc / firstR);
+      }
+      if (!st.stdRangeLowManual) {
+        var highVal = parseFloat(st.stdRangeHigh.value);
+        if (isFinite(highVal)) {
+          st.stdRangeLow.value = scribeFormatRange(highVal * Math.pow(1 / serialR, nDF - 1));
+        }
+      }
+    }
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -18090,7 +18131,7 @@ function ScribeCard(props) {
     // Dropdowns with "Other" escape hatch — swap dropdown for text input so
     // analyst can type a custom value instead of committing "Other" literally.
     // Applies to receivalInitials (SLJ/GKB/CGS/Other) and blankSubstance (PBS/Tris/Other).
-    if ((key === "receivalInitials" || key === "blankSubstance" || key === "serialRatio") && finalVal === "Other") {
+    if ((key === "receivalInitials" || key === "blankSubstance" || key === "serialDil" || key === "firstDil") && finalVal === "Other") {
       var anchorRect = editing.anchorRect;
       update(function(n){
         if (n[key]) n[key].value = "";
@@ -18198,7 +18239,7 @@ function ScribeCard(props) {
       // Gen5 protocol file removed entirely: it's specified in the SOP.
       return <span>
         Active protein concentration was determined by direct fluorescence following {st.sop.value} using {F("proteinName")}.
-        Calibration standards were prepared from {stdTraceUI} in {F("stdBuffer")} via an initial {F("firstDil")} dilution followed by {F("serialDil")} serial dilution down the column, with Row H as the {F("blankSubstance")} blank.
+        Calibration standards were prepared from {stdTraceUI} in {F("stdBuffer")} as a {F("numPoints")}-point series via an initial {F("firstDil")} dilution followed by {F("serialDil")} serial dilution down the column, covering a working range of {st.stdRangeLow.value}–{st.stdRangeHigh.value} mg/mL, with Row H as the {F("blankSubstance")} blank.
         Each calibration point was analyzed in {F("stdReps")}. Fluorescence was measured at {st.wavelength.value} in a {st.plate.value} plate on a {st.reader.value} reader, with samples analyzed in {F("sampleReps")}.
         {cvDisclaimer}
       </span>;
@@ -18206,7 +18247,7 @@ function ScribeCard(props) {
     if (key === "bca") {
       return <span>
         Total protein concentration was determined using the {F("kitVendor")} following {st.sop.value}.
-        Calibration standards were prepared as a {F("numPoints")}-point {F("serialRatio")} serial dilution of {stdTraceUI} in {F("stdBuffer")}, with the highest calibration point at {F("stdRangeHigh")} mg/mL and covering a working range of {st.stdRangeLow.value}–{st.stdRangeHigh.value} mg/mL.
+        Calibration standards were prepared from {stdTraceUI} in {F("stdBuffer")} as a {F("numPoints")}-point series via an initial {F("firstDil")} dilution followed by {F("serialDil")} serial dilution down the column, covering a working range of {st.stdRangeLow.value}–{st.stdRangeHigh.value} mg/mL.
         Each calibration point was analyzed in {F("stdReps")}. Absorbance at {st.wavelength.value} was measured in a {st.plate.value} plate on a {st.reader.value} reader, with samples analyzed in {F("sampleReps")}.
         {cvDisclaimer}
       </span>;
@@ -18214,7 +18255,7 @@ function ScribeCard(props) {
     // bradford
     return <span>
       Total protein concentration was determined using {st.sop.value}.
-      Calibration standards were prepared as a {F("numPoints")}-point {F("serialRatio")} serial dilution of {stdTraceUI} in {F("stdBuffer")}, with the highest calibration point at {F("stdRangeHigh")} mg/mL and covering a working range of {st.stdRangeLow.value}–{st.stdRangeHigh.value} mg/mL.
+      Calibration standards were prepared from {stdTraceUI} in {F("stdBuffer")} as a {F("numPoints")}-point series via an initial {F("firstDil")} dilution followed by {F("serialDil")} serial dilution down the column, covering a working range of {st.stdRangeLow.value}–{st.stdRangeHigh.value} mg/mL.
       Each calibration point was analyzed in {F("stdReps")}. Absorbance at {st.wavelength.value} was measured in a {st.plate.value} plate on a {st.reader.value} reader, with samples analyzed in {F("sampleReps")}.
       {cvDisclaimer}
     </span>;
@@ -18710,19 +18751,26 @@ function ScribeCard(props) {
     return [];
   };
 
-  // Sidebar status per block (warn / copied / neutral)
+  // Sidebar status per block (warn / ready / copied)
   var blockStatus = function(id){
-    // Three-state:
-    //   "warn"   = required fields missing → RED
-    //   "ready"  = all required filled but not currently copied (or copied then edited) → YELLOW
-    //   "copied" = all required filled AND currently-copied hash matches → GREEN
-    // Optional blocks (5 with no curveEquation, 6 with no notes) still return "ready"
-    // since empty is acceptable for them.
+    // NEW three-state rule (analyst training feedback):
+    //   RED    ("warn")   = untouched OR touched but required fields still missing
+    //   YELLOW ("ready")  = touched AND required fields all filled AND not currently copied
+    //                       (also covers blocks with no required fields, once touched)
+    //   GREEN  ("copied") = analyst clicked Copy AND content is unchanged since
+    //                       AND all required fields ARE filled (can't green-flag a bad copy)
+    //
+    // Validation is authoritative — missing required fields keep the block red
+    // regardless of whether copy was clicked (copy doesn't enforce validation).
     var m = validateBlock(id);
     if (m.length) return "warn";
+    // Required fields all filled — check copy state
     var body = getBlockBody(id);
     var hash = body ? (body.length + "|" + body.slice(0, 40)) : "";
     if (body && st._copied && st._copied[id] && st._copied[id] === hash) return "copied";
+    // Not copied — check touched
+    var isTouched = st._touched && st._touched[id];
+    if (!isTouched) return "warn";
     return "ready";
   };
 
@@ -18757,24 +18805,42 @@ function ScribeCard(props) {
       <PageHeader instructor={props.instructor} setInstructor={props.setInstructor} onBack={props.onBack} large={true} workspaceLabel="Scribe" />
       <div style={s.body}>
 
-        {/* Tiny LIMS-mode pill toggle — right-aligned, out of the way of the analyst's
-            normal click path. When ON (default), Copy produces terse output fitting each
-            block's LabWare limit. When OFF, verbose paragraphs for formal reports.
-            Analyst sees the same on-screen paragraphs either way. */}
-        <div style={{display:"flex",justifyContent:"flex-end",marginBottom:8,paddingRight:2}}>
+        {/* Compact template selector bar */}
+        <div style={s.selectorBar}>
+          <div style={s.selectorLabel}>Template</div>
+          <label style={{fontSize:11,color:C.slate,display:"flex",alignItems:"center",gap:4}}>
+            Prep:
+            <select style={s.selectorSelect} value={st._prepKey} onChange={function(e){setPrep(e.target.value);}}>
+              <option value="pellet_sup">Pellet + Supernatant</option>
+              <option value="lysate_eluate">Lysate / Eluate</option>
+              <option value="fractions">Chromatography Fractions</option>
+              <option value="custom">Customize</option>
+            </select>
+          </label>
+          <label style={{fontSize:11,color:C.slate,display:"flex",alignItems:"center",gap:4}}>
+            Assay:
+            <select style={s.selectorSelect} value={st._assayKey} onChange={function(e){setAssay(e.target.value);}}>
+              <option value="df">Direct Fluorescence (GFP)</option>
+              <option value="bca">BCA</option>
+              <option value="bradford">Bradford</option>
+            </select>
+          </label>
+          {/* LIMS mode pill toggle — sits in the tagline slot, right-aligned.
+              When ON (default), Copy produces terse output fitting each block's
+              LabWare limit. When OFF, verbose paragraphs for formal reports. */}
           <div
             onClick={function(){ update(function(n){ n._limsMode = !n._limsMode; }); }}
             title={st._limsMode
               ? "LIMS mode ON — Copy produces compact text for LabWare fields. Click to switch to verbose (full report) mode."
               : "LIMS mode OFF — Copy produces verbose paragraphs for formal reports. Click to switch to LIMS mode."}
             style={{
+              marginLeft: "auto",
               display: "inline-flex", alignItems: "center", gap: 6,
               cursor: "pointer", userSelect: "none",
               padding: "3px 6px 3px 8px",
               borderRadius: 12,
               background: "transparent",
               fontSize: 10.5,
-              color: C.slate,
             }}
           >
             <span style={{fontWeight:600,color:st._limsMode ? C.purpleDeep : C.slateLt}}>LIMS mode</span>
@@ -18796,31 +18862,6 @@ function ScribeCard(props) {
                 transition: "left 0.15s",
               }}></span>
             </span>
-          </div>
-        </div>
-
-        {/* Compact template selector bar */}
-        <div style={s.selectorBar}>
-          <div style={s.selectorLabel}>Template</div>
-          <label style={{fontSize:11,color:C.slate,display:"flex",alignItems:"center",gap:4}}>
-            Prep:
-            <select style={s.selectorSelect} value={st._prepKey} onChange={function(e){setPrep(e.target.value);}}>
-              <option value="pellet_sup">Pellet + Supernatant</option>
-              <option value="lysate_eluate">Lysate / Eluate</option>
-              <option value="fractions">Chromatography Fractions</option>
-              <option value="custom">Customize</option>
-            </select>
-          </label>
-          <label style={{fontSize:11,color:C.slate,display:"flex",alignItems:"center",gap:4}}>
-            Assay:
-            <select style={s.selectorSelect} value={st._assayKey} onChange={function(e){setAssay(e.target.value);}}>
-              <option value="df">Direct Fluorescence (GFP)</option>
-              <option value="bca">BCA</option>
-              <option value="bradford">Bradford</option>
-            </select>
-          </label>
-          <div style={{marginLeft:"auto",fontSize:10.5,color:C.slateLt,fontStyle:"italic"}}>
-            Fill in the blanks · Copy each block to LabWare
           </div>
         </div>
 
@@ -18848,7 +18889,7 @@ function ScribeCard(props) {
               return (
                 <div key={b.id}
                   style={s.sidebarTab(isActive, status)}
-                  onClick={function(){ update(function(n){n._focusedBlock = b.id;}); }}
+                  onClick={function(){ update(function(n){ n._focusedBlock = b.id; markTouched(n, b.id); }); }}
                 >
                   <span style={s.sidebarNum(isActive)}>{b.num}</span>
                   <span style={{flex:1}}>{b.label}</span>
