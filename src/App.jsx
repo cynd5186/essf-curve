@@ -18128,10 +18128,14 @@ function ScribeCard(props) {
       : null;
     var stdTraceUI = renderTraceInline(st.standardTrace, "Calibration standard", "standardTrace");
     if (key === "df") {
+      // Fixed fields (don't change per run): Ex/Em wavelength, plate type, reader.
+      // Rendered as plain text — click-to-edit removed to reduce visual noise
+      // and prevent accidental edits during training.
+      // Gen5 protocol file removed entirely: it's specified in the SOP.
       return <span>
         Active protein concentration was determined by direct fluorescence following {F("sop")} using {F("proteinName")}.
         Calibration standards were prepared from {stdTraceUI} in {F("stdBuffer")} via an initial {F("firstDil")} dilution followed by {F("serialDil")} serial dilution down the column, with Row H as the PBS blank.
-        Each calibration point was analyzed in {F("stdReps")}. Fluorescence was measured at {F("wavelength")} in a {F("plate")} plate on a {F("reader")} reader via the {F("gen5Protocol")} Gen5 protocol, with samples analyzed in {F("sampleReps")}.
+        Each calibration point was analyzed in {F("stdReps")}. Fluorescence was measured at {st.wavelength.value} in a {st.plate.value} plate on a {st.reader.value} reader, with samples analyzed in {F("sampleReps")}.
         {cvDisclaimer}
       </span>;
     }
@@ -18198,6 +18202,20 @@ function ScribeCard(props) {
     var newDetail = SCRIBE_GFP_WORKING_STOCK.prefix + "." + num + letter;
     update(function(n){
       n[stateKey] = Object.assign({}, n[stateKey], { sourceDetail: newDetail });
+      // Auto-inherit: when the CALIBRATION STANDARD identifier changes AND the
+      // SST uses the same protein + source (both in-house GFP), sync the SST
+      // identifier too. Analyst can still override by clicking the SST
+      // identifier separately. This eliminates the double-picking that
+      // annoyed the analysts. Not applied in reverse (SST → standard) since
+      // the standard is the primary reference.
+      if (stateKey === "standardTrace"
+          && n.sstTrace
+          && n.sstTrace.protein === n.standardTrace.protein
+          && n.sstTrace.source === n.standardTrace.source
+          && n.sstTrace.protein === "GFP"
+          && n.sstTrace.source === "in-house") {
+        n.sstTrace = Object.assign({}, n.sstTrace, { sourceDetail: newDetail });
+      }
       n._copied = {};
     });
     setGfpWizard(null);
@@ -18536,6 +18554,22 @@ function ScribeCard(props) {
         {/* Two-column layout: sidebar + blocks */}
         <div style={s.layoutContainer}>
           <div style={s.sidebar}>
+            {/* Template context indicator — persistent, visible from every block.
+                Analysts see the current prep + assay picks at a glance no matter
+                which block they're focused on. */}
+            {(() => {
+              var prepLabels = { pellet_sup: "Pellet + Sup", lysate_eluate: "Lysate / Eluate", fractions: "Fractions", custom: "Custom" };
+              var assayLabels = { df: "DF (GFP)", bca: "BCA", bradford: "Bradford" };
+              var prepLabel = prepLabels[st._prepKey] || st._prepKey;
+              var assayLabel = assayLabels[st._assayKey] || st._assayKey;
+              return <div style={{marginBottom:10,padding:"8px 10px",background:C.purpleTint,border:"1px solid "+C.purple,borderRadius:6,fontSize:10.5,color:C.purpleDeep,lineHeight:1.5}}>
+                <div style={{fontSize:9.5,fontWeight:700,textTransform:"uppercase",letterSpacing:0.5,color:C.slate,marginBottom:4}}>Template</div>
+                <div style={{display:"flex",flexDirection:"column",gap:3}}>
+                  <div><span style={{fontWeight:600,color:C.slate}}>Prep:</span> <span style={{fontWeight:700}}>{prepLabel}</span></div>
+                  <div><span style={{fontWeight:600,color:C.slate}}>Assay:</span> <span style={{fontWeight:700}}>{assayLabel}</span></div>
+                </div>
+              </div>;
+            })()}
             {BLOCKS.map(function(b){
               var isActive = st._focusedBlock === b.id;
               var status = blockStatus(b.id);
@@ -18585,28 +18619,8 @@ function ScribeCard(props) {
               <div style={s.blockBody}>
                 <div style={s.subHeadingFirst}>Sample Preparation</div>
                 <div id="scribe-block-prep">{renderPrep()}</div>
-                <div style={s.subHeading}>
-                  Assay Method
-                  <span
-                    style={{fontSize:9.5,fontWeight:700,color:C.purpleDeep,background:C.purpleTint,border:"1px solid "+C.purple,borderRadius:10,padding:"1px 8px",cursor:"pointer",marginLeft:8,textTransform:"none",letterSpacing:0}}
-                    onClick={toggleChecklistPopover}
-                    title="Optional analytical steps"
-                  >⋯ more</span>
-                </div>
+                <div style={s.subHeading}>Assay Method</div>
                 <div id="scribe-block-assay">{renderAssay()}</div>
-                {st._showChecklistPopover && (
-                  <div style={{marginTop:8,padding:"10px 12px",background:"#fff",border:"1px solid "+C.purple,borderRadius:5,boxShadow:"0 4px 12px rgba(11,42,111,0.10)",userSelect:"none",position:"relative"}}>
-                    <button onClick={toggleChecklistPopover} style={{position:"absolute",top:4,right:6,background:"none",border:"none",cursor:"pointer",color:C.slateLt,fontSize:16,fontFamily:"inherit"}} title="Close">×</button>
-                    <div style={{fontSize:10.5,fontWeight:700,color:C.purpleDeep,textTransform:"uppercase",letterSpacing:0.5,marginBottom:6,paddingRight:20}}>Optional analytical steps</div>
-                    {SCRIBE_CHECKLIST_ITEMS.map(function(item){
-                      var checked = !!st._checklist[item.id];
-                      return <div key={item.id} style={{display:"flex",gap:10,alignItems:"flex-start",padding:"6px 0"}}>
-                        <input type="checkbox" id={"scribe-cb-" + item.id} checked={checked} onChange={function(){toggleChecklistItem(item.id);}} style={{marginTop:2,width:16,height:16,cursor:"pointer",accentColor:C.purple}} />
-                        <label htmlFor={"scribe-cb-" + item.id} style={{flex:1,fontSize:12,lineHeight:1.4,color:C.ink,cursor:"pointer"}}>{item.label}</label>
-                      </div>;
-                    })}
-                  </div>
-                )}
               </div>
             </div>
 
@@ -18634,7 +18648,21 @@ function ScribeCard(props) {
                 <div style={s.blockLabel}><span style={s.blockNum}>5</span>Standard Curve Info</div>
                 <button style={flashState.id === "b5" ? s.copyBtnFlash(flashState.kind) : s.copyBtn} onClick={function(){copyBlock("b5");}}>{flashState.id === "b5" ? flashState.label : "Copy"}</button>
               </div>
-              <div style={s.blockBody} id="scribe-block-curve">{renderCurve()}</div>
+              <div style={s.blockBody}>
+                <div id="scribe-block-curve">{renderCurve()}</div>
+                {/* Optional analytical steps — checklist at bottom of block. Ticked items
+                    flow into the paragraph above so the tick→text relationship is visible. */}
+                <div style={{marginTop:14,paddingTop:12,borderTop:"1px dashed "+C.divider}}>
+                  <div style={{fontSize:10.5,fontWeight:700,color:C.slate,textTransform:"uppercase",letterSpacing:0.4,marginBottom:8}}>Optional analytical steps</div>
+                  {SCRIBE_CHECKLIST_ITEMS.map(function(item){
+                    var checked = !!st._checklist[item.id];
+                    return <div key={item.id} style={{display:"flex",gap:10,alignItems:"flex-start",padding:"5px 0"}}>
+                      <input type="checkbox" id={"scribe-cb-" + item.id} checked={checked} onChange={function(){toggleChecklistItem(item.id);}} style={{marginTop:2,width:15,height:15,cursor:"pointer",accentColor:C.purple,flexShrink:0}} />
+                      <label htmlFor={"scribe-cb-" + item.id} style={{flex:1,fontSize:12,lineHeight:1.45,color:C.ink,cursor:"pointer"}}>{item.label}</label>
+                    </div>;
+                  })}
+                </div>
+              </div>
             </div>
 
             {/* Block 6: Additional Notes */}
@@ -18997,13 +19025,34 @@ function ScribeGFPWizard(props) {
   var stepHint = { fontSize:11.5, color:C.slate, fontStyle:"italic", marginBottom:8, lineHeight:1.4 };
   var pillRow = { display:"flex", gap:6, flexWrap:"wrap", marginBottom:14 };
 
-  var promptForHigherNum = function(){
-    var v = window.prompt("Enter tube number:", "");
-    if (v && /^\d+$/.test(v.trim())) setNum(v.trim());
+  // Inline text-input mode for "+ higher" and "+ more" — when active, the
+  // pill row shows a small text input instead of the "+ higher" pill.
+  var _pNum = useState(false); var showNumInput = _pNum[0], setShowNumInput = _pNum[1];
+  var _pLet = useState(false); var showLetterInput = _pLet[0], setShowLetterInput = _pLet[1];
+  var _tNum = useState(""); var numInputVal = _tNum[0], setNumInputVal = _tNum[1];
+  var _tLet = useState(""); var letterInputVal = _tLet[0], setLetterInputVal = _tLet[1];
+  var inlineInputStyle = {
+    padding: "5px 10px",
+    fontSize: 13, fontWeight: 700,
+    color: C.purpleDeep,
+    background: "#fff",
+    border: "1.5px solid " + C.purple,
+    borderRadius: 20,
+    fontFamily: "inherit",
+    outline: "none",
+    minWidth: 60, maxWidth: 90, textAlign: "center",
   };
-  var promptForHigherLetter = function(){
-    var v = window.prompt("Enter tube letter (single letter):", "");
-    if (v && /^[A-Za-z]$/.test(v.trim())) setLetter(v.trim().toUpperCase());
+  var commitNumInput = function(){
+    var v = numInputVal.trim();
+    if (v && /^\d+$/.test(v)) setNum(v);
+    setShowNumInput(false);
+    setNumInputVal("");
+  };
+  var commitLetterInput = function(){
+    var v = letterInputVal.trim();
+    if (v && /^[A-Za-z]$/.test(v)) setLetter(v.toUpperCase());
+    setShowLetterInput(false);
+    setLetterInputVal("");
   };
 
   return <div
@@ -19028,9 +19077,23 @@ function ScribeGFPWizard(props) {
       <div style={stepHint}>This is the ~4 mg/mL stock. Pick the tube number that was pulled.</div>
       <div style={pillRow}>
         {NUM_OPTS.map(function(n){
-          return <button key={n} style={pillStyle(n === num)} onClick={function(){setNum(n);}}>{n}</button>;
+          return <button key={n} style={pillStyle(n === num)} onClick={function(){setNum(n); setShowNumInput(false);}}>{n}</button>;
         })}
-        <button style={pillPlusStyle} onClick={promptForHigherNum}>+ higher</button>
+        {showNumInput
+          ? <input
+              autoFocus
+              type="text"
+              value={numInputVal}
+              onChange={function(e){setNumInputVal(e.target.value);}}
+              onBlur={commitNumInput}
+              onKeyDown={function(e){
+                if (e.key === "Enter") commitNumInput();
+                else if (e.key === "Escape") { setShowNumInput(false); setNumInputVal(""); }
+              }}
+              placeholder="e.g. 12"
+              style={inlineInputStyle}
+            />
+          : <button style={pillPlusStyle} onClick={function(){setShowNumInput(true); setNumInputVal("");}}>+ higher</button>}
       </div>
     </div>
     <div>
@@ -19039,9 +19102,24 @@ function ScribeGFPWizard(props) {
       <div style={stepHint}>These are the tubes made from the concentrated tube after diluting to 1 mg/mL. Pick the letter.</div>
       <div style={pillRow}>
         {LETTER_OPTS.map(function(l){
-          return <button key={l} style={pillStyle(l === letter)} onClick={function(){setLetter(l);}}>{l}</button>;
+          return <button key={l} style={pillStyle(l === letter)} onClick={function(){setLetter(l); setShowLetterInput(false);}}>{l}</button>;
         })}
-        <button style={pillPlusStyle} onClick={promptForHigherLetter}>+ more</button>
+        {showLetterInput
+          ? <input
+              autoFocus
+              type="text"
+              value={letterInputVal}
+              onChange={function(e){setLetterInputVal(e.target.value);}}
+              onBlur={commitLetterInput}
+              onKeyDown={function(e){
+                if (e.key === "Enter") commitLetterInput();
+                else if (e.key === "Escape") { setShowLetterInput(false); setLetterInputVal(""); }
+              }}
+              placeholder="e.g. F"
+              maxLength={1}
+              style={inlineInputStyle}
+            />
+          : <button style={pillPlusStyle} onClick={function(){setShowLetterInput(true); setLetterInputVal("");}}>+ more</button>}
       </div>
     </div>
     <div style={{padding:"10px 12px",background:"#fafbfd",border:"1px dashed "+C.divider,borderRadius:5,marginBottom:12}}>
