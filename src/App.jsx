@@ -17361,7 +17361,7 @@ var SCRIBE_GFP_WORKING_STOCK = {
 // that stored the full string. Still referenced by scribeTraceMissing.
 SCRIBE_GFP_WORKING_STOCK.prepId = SCRIBE_GFP_WORKING_STOCK.prefix + "." + SCRIBE_GFP_WORKING_STOCK.defaultNumber;
 var SCRIBE_SST_DEFAULT_CONCENTRATION = {
-  df: "0.7 mg/mL", bca: "0.5 mg/mL", bradford: "0.5 mg/mL",
+  df: "0.7 mg/mL", bca: "2.0 mg/mL", bradford: "2.0 mg/mL",
 };
 var SCRIBE_ICH_M10_ACCEPTANCE = "±20% of expected (80-120%; ICH M10)";
 var SCRIBE_REPLICATE_OPTS = ["duplicate", "triplicate", "singlicate (no replicates)"];
@@ -18666,9 +18666,18 @@ function ScribeCard(props) {
     var conc = t.concentration || "";
     // Format examples:
     //   in-house GFP (GFP-H250512-UFZ.3A, 1 mg/mL)
-    //   BSA (Thermo Fisher #23209, 2 mg/mL)
-    //   mAb (Lot A-2024-05, 5 mg/mL)
-    var head = source === "in-house" ? "in-house " + protein : protein;
+    //   Thermo Fisher BSA (2.0 mg/mL)              ← vendor leads for scannability
+    //   Thermo Fisher BSA (Lot #12345, 2.0 mg/mL)  ← with lot
+    //   Abcam GFP (0.5 mg/mL)
+    var head;
+    if (source === "in-house") {
+      head = "in-house " + protein;
+    } else if (source && source !== "Other") {
+      // Vendor name leads (Thermo Fisher, Abcam, etc.) then protein
+      head = source + " " + protein;
+    } else {
+      head = protein;
+    }
     var parts = [];
     if (detail) parts.push(detail);
     if (conc) parts.push(conc);
@@ -18682,12 +18691,13 @@ function ScribeCard(props) {
     if (id === "b4") {
       if (!st.sstUsed) {
         var reason = (st.sstDeclineReason && st.sstDeclineReason.value || "").trim();
-        return "No SST processed. Reason: " + (reason || "(unstated)") + ".";
+        return "Not performed. Reason: " + (reason || "(unstated)") + ".";
       }
       var sstStd = traceTerse(st.sstTrace);
       var accVal = (st.sstAcceptance && st.sstAcceptance.value) || "±20% (ICH M10)";
-      // "SST (in-house GFP (GFP-H250512-UFZ.3A, 1 mg/mL)) processed with samples using the same dilution scheme and analysis. Met acceptance: ±20% of expected (80-120%; ICH M10)."
-      return "SST (" + sstStd + ") processed with samples using the same dilution scheme and analysis. Met acceptance: " + accVal + ".";
+      // Drop "SST" prefix — the LIMS field is already labeled SST. Lead with
+      // vendor + protein for scannability (e.g. "Thermo Fisher BSA (2.0 mg/mL)").
+      return sstStd + " processed with samples using the same dilution scheme and analysis. Met acceptance: " + accVal + ".";
     }
     if (id === "b5") {
       var fit = (st.fitType && st.fitType.value) || "";
@@ -18695,7 +18705,11 @@ function ScribeCard(props) {
       var strat = (st.strategy && st.strategy.value) || "";
       var sampleSing = /singlicate/i.test((st.sampleReps && st.sampleReps.value) || "");
       var cvPart = sampleSing ? "" : " + CV \u2264 " + ((st.cvThreshold && st.cvThreshold.value) || "10%");
-      var base = fit + " (R\u00b2 " + r2 + "). Reported from least diluted qualified dilution meeting in-range" + cvPart + "; strategy: " + strat + ".";
+      // Subject-first phrasing so the LIMS reviewer knows this describes the
+      // reported concentration (not just the calibration): "The reported
+      // concentration used linear regression (R\u00b2 X) with a Y strategy \u2014
+      // least diluted qualified dilution meeting in-range + CV \u2264 Z%."
+      var base = "The reported concentration used " + fit + " (R\u00b2 " + r2 + ") with a " + strat + " strategy \u2014 least diluted qualified dilution meeting in-range" + cvPart + ".";
       // Curve equation sentence if ticked
       if (st._checklist && st._checklist.curveEquation && st.slope.value && st.intercept.value) {
         base += " Slope " + st.slope.value + "; intercept " + st.intercept.value + ".";
@@ -18717,7 +18731,11 @@ function ScribeCard(props) {
       setTimeout(function(){ setFlashState({}); }, 1500);
       return;
     }
-    var finalText = body;
+    // Block 2 (Sample Processing & Assay) goes to LabWare's long-form field
+    // which shows a preview and requires a double-click to expand. Prefix
+    // that with a helper string so the reviewer knows to double-click.
+    // Other blocks fit in short fields and don't need the prefix.
+    var finalText = (id === "b2") ? ("▶ Double-click here to view the full text.\n\n" + body) : body;
     var done = function(){
       setFlashState({ id: id, kind: "copied", label: "Copied ✓" });
       // Mark as copied with content hash
@@ -18756,7 +18774,8 @@ function ScribeCard(props) {
     var limit = LIMS_LIMITS[id];
     if (st._limsMode && limit) {
       var body = getBlockBodyTerse(id);
-      var n = body.length;
+      // b2 gets the double-click prefix on copy; count that too
+      var n = (id === "b2") ? (body.length + "▶ Double-click here to view the full text.\n\n".length) : body.length;
       var over = n > limit;
       counter = <span style={{
         marginRight: 6, fontSize: 10.5, fontWeight: 700,
