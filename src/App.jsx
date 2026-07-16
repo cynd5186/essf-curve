@@ -17369,6 +17369,9 @@ var SCRIBE_CV_OPTS = ["10%", "15%", "20%", "25%"];
 // Row H blank options for DF assay — most common two options + customize escape hatch.
 // "customize" opens the same "Other → text input" flow as the initials dropdown.
 var SCRIBE_BLANK_OPTS = ["phosphate-buffered saline (PBS)", "50 mM Tris, pH 8.0 (no salt)", "Other"];
+// Serial dilution ratios shown as whole ratios (analysts think "1:2 dilution",
+// not "dilution factor of 2"). "Other" opens inline text for custom write-in.
+var SCRIBE_SERIAL_RATIO_OPTS = ["1:2", "1:3", "1:4", "1:5", "1:10", "Other"];
 // Analysis strategies — must match Plate Assay's SM array (line ~747) verbatim.
 // When analyst picks a strategy in the Plate Assay analysis and later drafts
 // Scribe, the same label should appear here.
@@ -17468,7 +17471,8 @@ var SCRIBE_ASSAY_DEFAULTS = {
     stdBuffer:    { value: "PBS", type: "text" },
     stdRangeHigh: { value: "1.0", type: "text" },
     stdRangeLow:  { value: "0.016", type: "text" },
-    serialRatio:  { value: "2", type: "text" },
+    stdRangeLowManual: false,   // true = analyst overrode; false = auto-computed
+    serialRatio:  { value: "1:2", type: "select", options: SCRIBE_SERIAL_RATIO_OPTS },
     numPoints:    { value: "7", type: "text" },
     firstDil:     { value: "1:2", type: "text" },
     stdReps:      { value: "triplicate", type: "select", options: SCRIBE_REPLICATE_OPTS },
@@ -17492,7 +17496,8 @@ var SCRIBE_ASSAY_DEFAULTS = {
     stdBuffer:    { value: "PBS", type: "text" },
     stdRangeHigh: { value: "1.0", type: "text" },
     stdRangeLow:  { value: "0.016", type: "text" },
-    serialRatio:  { value: "2", type: "text" },
+    stdRangeLowManual: false,
+    serialRatio:  { value: "1:2", type: "select", options: SCRIBE_SERIAL_RATIO_OPTS },
     numPoints:    { value: "7", type: "text" },
     firstDil:     { value: "1:2", type: "text" },
     stdReps:      { value: "triplicate", type: "select", options: SCRIBE_REPLICATE_OPTS },
@@ -17655,8 +17660,13 @@ function scribeTraceToString(t) {
 // ─────────────────────────────────────────────────────────────────────────
 function scribeUpdateComputedRange(st) {
   if (!st.stdRangeHigh || !st.serialRatio || !st.numPoints) return;
+  // Skip auto-compute when analyst has manually overridden low
+  if (st.stdRangeLowManual) return;
   var high  = parseFloat(st.stdRangeHigh.value);
-  var ratio = parseFloat(st.serialRatio.value);
+  // Parse "1:X" ratio format (analyst-facing) → dilution factor X
+  var ratioRaw = String(st.serialRatio.value || "").trim();
+  var ratioMatch = ratioRaw.match(/^1\s*:\s*(\d+(?:\.\d+)?)$/);
+  var ratio = ratioMatch ? parseFloat(ratioMatch[1]) : parseFloat(ratioRaw);
   var n     = parseInt(st.numPoints.value, 10);
   if (!isFinite(high) || !isFinite(ratio) || !isFinite(n) || ratio <= 1 || n < 2) return;
   var low = high * Math.pow(1 / ratio, n - 1);
@@ -18080,7 +18090,7 @@ function ScribeCard(props) {
     // Dropdowns with "Other" escape hatch — swap dropdown for text input so
     // analyst can type a custom value instead of committing "Other" literally.
     // Applies to receivalInitials (SLJ/GKB/CGS/Other) and blankSubstance (PBS/Tris/Other).
-    if ((key === "receivalInitials" || key === "blankSubstance") && finalVal === "Other") {
+    if ((key === "receivalInitials" || key === "blankSubstance" || key === "serialRatio") && finalVal === "Other") {
       var anchorRect = editing.anchorRect;
       update(function(n){
         if (n[key]) n[key].value = "";
@@ -18196,16 +18206,16 @@ function ScribeCard(props) {
     if (key === "bca") {
       return <span>
         Total protein concentration was determined using the {F("kitVendor")} following {st.sop.value}.
-        Calibration standards were prepared as a {F("numPoints")}-point 1:{F("serialRatio")} serial dilution of {stdTraceUI} in {F("stdBuffer")}, with the highest calibration point at {F("stdRangeHigh")} mg/mL and covering a working range of {F("stdRangeLow")}–{F("stdRangeHigh")} mg/mL.
-        Each calibration point was analyzed in {F("stdReps")}. Absorbance at {F("wavelength")} was measured in a {F("plate")} plate on a {F("reader")} reader, with samples analyzed in {F("sampleReps")}.
+        Calibration standards were prepared as a {F("numPoints")}-point {F("serialRatio")} serial dilution of {stdTraceUI} in {F("stdBuffer")}, with the highest calibration point at {F("stdRangeHigh")} mg/mL and covering a working range of {st.stdRangeLow.value}–{st.stdRangeHigh.value} mg/mL.
+        Each calibration point was analyzed in {F("stdReps")}. Absorbance at {st.wavelength.value} was measured in a {st.plate.value} plate on a {st.reader.value} reader, with samples analyzed in {F("sampleReps")}.
         {cvDisclaimer}
       </span>;
     }
     // bradford
     return <span>
       Total protein concentration was determined using {st.sop.value}.
-      Calibration standards were prepared as a {F("numPoints")}-point 1:{F("serialRatio")} serial dilution of {stdTraceUI} in {F("stdBuffer")}, with the highest calibration point at {F("stdRangeHigh")} mg/mL and covering a working range of {F("stdRangeLow")}–{F("stdRangeHigh")} mg/mL.
-      Each calibration point was analyzed in {F("stdReps")}. Absorbance at {F("wavelength")} was measured in a {F("plate")} plate on a {F("reader")} reader, with samples analyzed in {F("sampleReps")}.
+      Calibration standards were prepared as a {F("numPoints")}-point {F("serialRatio")} serial dilution of {stdTraceUI} in {F("stdBuffer")}, with the highest calibration point at {F("stdRangeHigh")} mg/mL and covering a working range of {st.stdRangeLow.value}–{st.stdRangeHigh.value} mg/mL.
+      Each calibration point was analyzed in {F("stdReps")}. Absorbance at {st.wavelength.value} was measured in a {st.plate.value} plate on a {st.reader.value} reader, with samples analyzed in {F("sampleReps")}.
       {cvDisclaimer}
     </span>;
   };
@@ -18572,20 +18582,7 @@ function ScribeCard(props) {
     if (id === "b1") return getBlockBody(id);  // already terse
     if (id === "b3") return getBlockBody(id);  // just the volume
     if (id === "b6") return getBlockBody(id);  // analyst's own words
-    if (id === "b2") {
-      // Compact prep + method summary. Drop procedural wash/spin/exchange details;
-      // include only what's essential to identify the assay run in LIMS.
-      var prepKey = st._prepKey;
-      var assayKey = st._assayKey;
-      var prepLabels = { pellet_sup: "pellet+sup", lysate_eluate: "lysate/eluate", fractions: "fractions", custom: "custom" };
-      var assayLabels = { df: "direct fluorescence", bca: "BCA", bradford: "Bradford" };
-      var prepLbl = prepLabels[prepKey] || prepKey || "sample";
-      var assayLbl = assayLabels[assayKey] || assayKey || "assay";
-      var std = traceTerse(st.standardTrace);
-      var sopVal = (st.sop && st.sop.value) || "";
-      // "Sample (pellet+sup) processed per BTEC AN-003 rev 01 and analyzed by direct fluorescence using in-house GFP (GFP-H250512-UFZ.3A, 1 mg/mL) as calibration standard."
-      return "Sample (" + prepLbl + ") processed per " + sopVal + " and analyzed by " + assayLbl + " using " + std + " as calibration standard.";
-    }
+    if (id === "b2") return getBlockBody(id);  // 2048-char LabWare field — verbose fits comfortably
     if (id === "b4") {
       if (!st.sstUsed) {
         var reason = (st.sstDeclineReason && st.sstDeclineReason.value || "").trim();
@@ -18652,18 +18649,19 @@ function ScribeCard(props) {
     }
   };
 
-  // Copy button with optional character counter (LIMS mode only).
-  // Counter shows "N/254", red when N > 254. Hidden entirely when LIMS off.
-  var LIMS_LIMIT = 254;
+  // Per-block LabWare field limits. b2 gets 2048 chars (long-form field);
+  // b6 (Notes) is uncapped so no counter shown; everything else is 254.
+  var LIMS_LIMITS = { b1: 254, b2: 2048, b3: 254, b4: 254, b5: 254, b6: null };
   var renderCopyBtn = function(id){
     var isFlashing = flashState.id === id;
     var btnStyle = isFlashing ? s.copyBtnFlash(flashState.kind) : s.copyBtn;
     var label = isFlashing ? flashState.label : "Copy";
     var counter = null;
-    if (st._limsMode) {
+    var limit = LIMS_LIMITS[id];
+    if (st._limsMode && limit) {
       var body = getBlockBodyTerse(id);
       var n = body.length;
-      var over = n > LIMS_LIMIT;
+      var over = n > limit;
       counter = <span style={{
         marginRight: 6, fontSize: 10.5, fontWeight: 700,
         padding: "2px 6px", borderRadius: 4,
@@ -18671,8 +18669,8 @@ function ScribeCard(props) {
         background: over ? C.dotRed : "#f4f6fb",
         border: "1px solid " + (over ? C.dotRed : C.divider),
         fontFamily: "ui-monospace, Menlo, monospace",
-      }} title={over ? "Over 254-char LabWare limit" : "Copy length / LabWare limit"}>
-        {n}/{LIMS_LIMIT}
+      }} title={over ? ("Over " + limit + "-char LabWare limit") : ("Copy length / LabWare limit for this field")}>
+        {n}/{limit}
       </span>;
     }
     return <div style={{display:"flex",alignItems:"center"}}>
@@ -18759,6 +18757,48 @@ function ScribeCard(props) {
       <PageHeader instructor={props.instructor} setInstructor={props.setInstructor} onBack={props.onBack} large={true} workspaceLabel="Scribe" />
       <div style={s.body}>
 
+        {/* Tiny LIMS-mode pill toggle — right-aligned, out of the way of the analyst's
+            normal click path. When ON (default), Copy produces terse output fitting each
+            block's LabWare limit. When OFF, verbose paragraphs for formal reports.
+            Analyst sees the same on-screen paragraphs either way. */}
+        <div style={{display:"flex",justifyContent:"flex-end",marginBottom:8,paddingRight:2}}>
+          <div
+            onClick={function(){ update(function(n){ n._limsMode = !n._limsMode; }); }}
+            title={st._limsMode
+              ? "LIMS mode ON — Copy produces compact text for LabWare fields. Click to switch to verbose (full report) mode."
+              : "LIMS mode OFF — Copy produces verbose paragraphs for formal reports. Click to switch to LIMS mode."}
+            style={{
+              display: "inline-flex", alignItems: "center", gap: 6,
+              cursor: "pointer", userSelect: "none",
+              padding: "3px 6px 3px 8px",
+              borderRadius: 12,
+              background: "transparent",
+              fontSize: 10.5,
+              color: C.slate,
+            }}
+          >
+            <span style={{fontWeight:600,color:st._limsMode ? C.purpleDeep : C.slateLt}}>LIMS mode</span>
+            <span style={{
+              position: "relative",
+              width: 24, height: 14,
+              borderRadius: 8,
+              background: st._limsMode ? C.purple : C.divider,
+              transition: "background 0.15s",
+              flexShrink: 0,
+            }}>
+              <span style={{
+                position: "absolute",
+                top: 2, left: st._limsMode ? 12 : 2,
+                width: 10, height: 10,
+                borderRadius: "50%",
+                background: "#fff",
+                boxShadow: "0 1px 2px rgba(0,0,0,0.15)",
+                transition: "left 0.15s",
+              }}></span>
+            </span>
+          </div>
+        </div>
+
         {/* Compact template selector bar */}
         <div style={s.selectorBar}>
           <div style={s.selectorLabel}>Template</div>
@@ -18802,38 +18842,6 @@ function ScribeCard(props) {
                 </div>
               </div>;
             })()}
-            {/* LIMS mode toggle — when ON (default), Copy produces terse output
-                fitting LabWare's 254-char field; when OFF, verbose paragraphs
-                suitable for formal reports. Analyst sees the same on-screen
-                paragraphs either way. */}
-            <div
-              onClick={function(){ update(function(n){ n._limsMode = !n._limsMode; }); }}
-              title={st._limsMode
-                ? "LIMS mode ON — Copy produces compact text (\u2264 254 chars) for LabWare. Click to switch to verbose mode."
-                : "LIMS mode OFF — Copy produces full paragraphs for formal reports. Click to switch to LIMS mode."}
-              style={{
-                marginBottom: 10,
-                padding: "6px 10px",
-                background: st._limsMode ? C.purpleTint : "#fff",
-                border: "1px solid " + (st._limsMode ? C.purple : C.divider),
-                borderRadius: 6,
-                fontSize: 10.5,
-                cursor: "pointer",
-                userSelect: "none",
-                display: "flex", alignItems: "center", gap: 8,
-              }}
-            >
-              <span style={{
-                width: 14, height: 14, borderRadius: 3,
-                border: "1.5px solid " + (st._limsMode ? C.purple : C.slateLt),
-                background: st._limsMode ? C.purple : "#fff",
-                display: "flex", alignItems: "center", justifyContent: "center",
-                color: "#fff", fontSize: 10, fontWeight: 700, flexShrink: 0,
-              }}>{st._limsMode ? "\u2713" : ""}</span>
-              <span style={{ flex: 1, color: st._limsMode ? C.purpleDeep : C.slate, fontWeight: 600 }}>
-                LIMS mode <span style={{ fontWeight: 500, opacity: 0.8 }}>(compact copy)</span>
-              </span>
-            </div>
             {BLOCKS.map(function(b){
               var isActive = st._focusedBlock === b.id;
               var status = blockStatus(b.id);
