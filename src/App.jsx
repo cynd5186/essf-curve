@@ -17444,7 +17444,7 @@ var SCRIBE_ASSAY_DEFAULTS = {
   df: {
     sop:           { value: "BTEC AN-003 rev 01", type: "text" },
     proteinName:   { value: "GFPuv", type: "text" },
-    stdBuffer:     { value: "50 mM Na phosphate pH 7.2", type: "text" },
+    stdBuffer:     { value: "50 mM sodium phosphate, pH 7.2", type: "text" },
     blankSubstance:{ value: "phosphate-buffered saline (PBS)", type: "select", options: SCRIBE_BLANK_OPTS },
     firstDil:      { value: "1:10", type: "select", options: ["1:2","1:3","1:4","1:5","1:10","1:20","Other"] },
     serialDil:     { value: "1:2", type: "select", options: SCRIBE_SERIAL_RATIO_OPTS },
@@ -17473,7 +17473,7 @@ var SCRIBE_ASSAY_DEFAULTS = {
     sop:          { value: "BTEC AN-002", type: "text" },
     proteinName:  { value: "total protein", type: "text" },
     kitVendor:    { value: "Thermo Fisher Pierce BCA Protein Assay (P/N 23225)", type: "text" },
-    stdBuffer:    { value: "PBS", type: "text" },
+    stdBuffer:    { value: "phosphate-buffered saline (PBS)", type: "text" },
     stdRangeHigh: { value: "2.0", type: "text" },   // Auto-computed from standardConc / firstDil
     stdRangeLow:  { value: "0.031", type: "text" }, // Auto-computed from high × serialDil^(n-1)
     stdRangeLowManual: false,
@@ -17499,7 +17499,7 @@ var SCRIBE_ASSAY_DEFAULTS = {
   bradford: {
     sop:          { value: "Bio-Rad Quick Start Bradford (500-0205)", type: "text" },
     proteinName:  { value: "total protein", type: "text" },
-    stdBuffer:    { value: "PBS", type: "text" },
+    stdBuffer:    { value: "phosphate-buffered saline (PBS)", type: "text" },
     stdRangeHigh: { value: "2.0", type: "text" },
     stdRangeLow:  { value: "0.031", type: "text" },
     stdRangeLowManual: false,
@@ -17785,8 +17785,10 @@ function ScribeCard(props) {
         storageUntilDate: prev.storageUntilDate,
         receivalInitials: prev.receivalInitials,
         notes: prev.notes,
-        _copied: prev._copied,
-        _touched: prev._touched,
+        // Template change resets touched + copied to force re-verification.
+        // Analyst has to re-visit each block since paragraph content changed.
+        _copied: {},
+        _touched: {},
         _limsMode: prev._limsMode,
         _checklist: prev._checklist,
         _focusedBlock: prev._focusedBlock,
@@ -17807,8 +17809,9 @@ function ScribeCard(props) {
         storageUntilDate: prev.storageUntilDate,
         receivalInitials: prev.receivalInitials,
         notes: prev.notes,
-        _copied: prev._copied,
-        _touched: prev._touched,
+        // Template change resets touched + copied to force re-verification.
+        _copied: {},
+        _touched: {},
         _limsMode: prev._limsMode,
         _checklist: prev._checklist,
         _focusedBlock: prev._focusedBlock,
@@ -17985,6 +17988,41 @@ function ScribeCard(props) {
   // know which trace to update (standardTrace vs sstTrace) and where to anchor.
   var _gfpWizHook = useState(null);
   var gfpWizard = _gfpWizHook[0], setGfpWizard = _gfpWizHook[1];
+
+  // Touch delay: analysts often click a sidebar tab briefly while exploring;
+  // a small delay before marking a block "touched" avoids marking every
+  // navigated-through block as touched. The timer is cancelled if analyst
+  // navigates away before it fires.
+  var TOUCH_DELAY_MS = 750;
+  var pendingTouchTimer = useRef(null);
+  var pendingTouchBlock = useRef(null);
+  var scheduleDelayedTouch = function(blockId){
+    // Cancel any previous pending touch (analyst navigated away)
+    if (pendingTouchTimer.current) {
+      clearTimeout(pendingTouchTimer.current);
+    }
+    pendingTouchBlock.current = blockId;
+    pendingTouchTimer.current = setTimeout(function(){
+      // Only mark touched if the analyst is still on this block
+      // (they may have navigated away in the meantime)
+      setSt(function(prev){
+        if (prev._focusedBlock !== blockId) return prev;   // navigated away — no touch
+        if (prev._touched && prev._touched[blockId]) return prev;   // already touched
+        var next = Object.assign({}, prev);
+        next._touched = Object.assign({}, prev._touched || {}, {});
+        next._touched[blockId] = true;
+        return next;
+      });
+      pendingTouchTimer.current = null;
+      pendingTouchBlock.current = null;
+    }, TOUCH_DELAY_MS);
+  };
+  // Cleanup on unmount
+  useEffect(function(){
+    return function(){
+      if (pendingTouchTimer.current) clearTimeout(pendingTouchTimer.current);
+    };
+  }, []);
 
   // Ref for the currently-inline text input, so we can focus it after mount
   var inlineInputRef = useRef(null);
@@ -18207,16 +18245,23 @@ function ScribeCard(props) {
       var pre = st.preDilution.value.trim();
       var bex = st.bufferExchange.value.trim();
       var cln = st.cleanupStep.value.trim();
+      var hasSteps = pre || bex || cln;
       var clauses = [];
       if (pre) clauses.push("pre-diluted " + st.preDilution.value);
       if (bex) clauses.push("buffer-exchanged via " + st.bufferExchange.value);
       if (cln) clauses.push("cleaned up via " + st.cleanupStep.value);
-      var addendum = clauses.length ? " The sample was " + clauses.join("; ") + " prior to the assay." : "";
+      if (hasSteps) {
+        // Analyst added one or more optional prep steps — describe them.
+        return <span>
+          Samples were received as {F("prepType")} and {clauses.join("; ")} prior to being analyzed by the standard assay dilution scheme.
+        </span>;
+      }
+      // No optional prep — sample went straight to assay
       return <span>
-        Samples were received as {F("prepType")} and diluted directly into the assay dilution series and read.{addendum}
-        {(!pre && !bex && !cln) && <span style={{fontSize:11,color:C.slateLt,fontStyle:"italic",display:"block",marginTop:6}}>
+        Samples were received as {F("prepType")} and analyzed directly by the standard assay dilution scheme; no additional pre-assay sample preparation was required.
+        <span data-ui-only="true" style={{fontSize:11,color:C.slateLt,fontStyle:"italic",display:"block",marginTop:6}}>
           Optional: {F("preDilution")} pre-dilution · {F("bufferExchange")} buffer exchange · {F("cleanupStep")} cleanup step
-        </span>}
+        </span>
       </span>;
     }
     // custom
@@ -18889,7 +18934,10 @@ function ScribeCard(props) {
               return (
                 <div key={b.id}
                   style={s.sidebarTab(isActive, status)}
-                  onClick={function(){ update(function(n){ n._focusedBlock = b.id; markTouched(n, b.id); }); }}
+                  onClick={function(){
+                    update(function(n){ n._focusedBlock = b.id; });
+                    scheduleDelayedTouch(b.id);
+                  }}
                 >
                   <span style={s.sidebarNum(isActive)}>{b.num}</span>
                   <span style={{flex:1}}>{b.label}</span>
