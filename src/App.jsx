@@ -17479,11 +17479,11 @@ var SCRIBE_ASSAY_DEFAULTS = {
     proteinName:  { value: "total protein", type: "text" },
     kitVendor:    { value: "Thermo Fisher Pierce BCA Protein Assay (P/N 23225)", type: "text" },
     stdBuffer:    { value: "50 mM sodium phosphate buffer, pH 7.2", type: "text" },
-    stdRangeHigh: { value: "2.0", type: "text" },   // Auto-computed from standardConc / firstDil
-    stdRangeLow:  { value: "0.031", type: "text" }, // Auto-computed from high × serialDil^(n-1)
+    stdRangeHigh: { value: "1.0", type: "text" },   // Auto-computed from standardConc / firstDil
+    stdRangeLow:  { value: "0.016", type: "text" }, // Auto-computed from high × serialDil^(n-1)
     stdRangeLowManual: false,
     stdRangeHighManual: false,
-    firstDil:     { value: "1:1", type: "select", options: ["1:1","1:2","1:3","1:4","1:5","1:10","Other"] },
+    firstDil:     { value: "1:2", type: "select", options: ["1:1","1:2","1:3","1:4","1:5","1:10","Other"] },
     serialDil:    { value: "1:2", type: "select", options: SCRIBE_SERIAL_RATIO_OPTS },
     numPoints:    { value: "7", type: "text" },
     stdReps:      { value: "triplicate", type: "select", options: SCRIBE_REPLICATE_OPTS },
@@ -17505,11 +17505,11 @@ var SCRIBE_ASSAY_DEFAULTS = {
     sop:          { value: "Bio-Rad Quick Start Bradford (500-0205)", type: "text" },
     proteinName:  { value: "total protein", type: "text" },
     stdBuffer:    { value: "50 mM sodium phosphate buffer, pH 7.2", type: "text" },
-    stdRangeHigh: { value: "2.0", type: "text" },
-    stdRangeLow:  { value: "0.031", type: "text" },
+    stdRangeHigh: { value: "1.0", type: "text" },
+    stdRangeLow:  { value: "0.016", type: "text" },
     stdRangeLowManual: false,
     stdRangeHighManual: false,
-    firstDil:     { value: "1:1", type: "select", options: ["1:1","1:2","1:3","1:4","1:5","1:10","Other"] },
+    firstDil:     { value: "1:2", type: "select", options: ["1:1","1:2","1:3","1:4","1:5","1:10","Other"] },
     serialDil:    { value: "1:2", type: "select", options: SCRIBE_SERIAL_RATIO_OPTS },
     numPoints:    { value: "7", type: "text" },
     stdReps:      { value: "triplicate", type: "select", options: SCRIBE_REPLICATE_OPTS },
@@ -18289,12 +18289,12 @@ function ScribeCard(props) {
       // Gen5 protocol file removed entirely: it's specified in the SOP.
       var stdBufferVal = (st.stdBuffer && st.stdBuffer.value || "").trim();
       var blankVal = (st.blankSubstance && st.blankSubstance.value || "").trim();
-      var blankClause = (stdBufferVal && blankVal && stdBufferVal === blankVal)
-        ? <span>, with Row H as a same-buffer blank</span>
-        : <span>, with Row H as the {F("blankSubstance")} blank</span>;
+      var blankSentence = (stdBufferVal && blankVal && stdBufferVal === blankVal)
+        ? <span> Row H served as a same-buffer blank.</span>
+        : <span> Row H served as the {F("blankSubstance")} blank.</span>;
       return <span>
         Active protein concentration was determined by direct fluorescence following {st.sop.value} using {F("proteinName")}.
-        Calibration standards were prepared from {stdTraceUI} in {F("stdBuffer")} as a {F("numPoints")}-point series via an initial {F("firstDil")} dilution followed by {F("serialDil")} serial dilution down the column, covering a working range of {st.stdRangeLow.value}–{st.stdRangeHigh.value} mg/mL{blankClause}.
+        Calibration standards were prepared by diluting {stdTraceUI} into {F("stdBuffer")}: a {F("firstDil")} initial dilution, then {F("serialDil")} serial dilution down the column across {F("numPoints")} points, covering {st.stdRangeLow.value}–{st.stdRangeHigh.value} mg/mL.{blankSentence}
         Each calibration point was analyzed in {F("stdReps")}. Fluorescence was measured at {st.wavelength.value} in a {st.plate.value} plate on a {st.reader.value} reader, with samples analyzed in {F("sampleReps")}.
         {cvDisclaimer}
       </span>;
@@ -18302,7 +18302,7 @@ function ScribeCard(props) {
     if (key === "bca") {
       return <span>
         Total protein concentration was determined using the {F("kitVendor")} following {st.sop.value}.
-        Calibration standards were prepared from {stdTraceUI} in {F("stdBuffer")} as a {F("numPoints")}-point series via an initial {F("firstDil")} dilution followed by {F("serialDil")} serial dilution down the column, covering a working range of {st.stdRangeLow.value}–{st.stdRangeHigh.value} mg/mL.
+        Calibration standards were prepared by diluting {stdTraceUI} into {F("stdBuffer")}: a {F("firstDil")} initial dilution, then {F("serialDil")} serial dilution down the column across {F("numPoints")} points, covering {st.stdRangeLow.value}–{st.stdRangeHigh.value} mg/mL.
         Each calibration point was analyzed in {F("stdReps")}. Absorbance at {st.wavelength.value} was measured in a {st.plate.value} plate on a {st.reader.value} reader, with samples analyzed in {F("sampleReps")}.
         {cvDisclaimer}
       </span>;
@@ -18310,7 +18310,7 @@ function ScribeCard(props) {
     // bradford
     return <span>
       Total protein concentration was determined using {st.sop.value}.
-      Calibration standards were prepared from {stdTraceUI} in {F("stdBuffer")} as a {F("numPoints")}-point series via an initial {F("firstDil")} dilution followed by {F("serialDil")} serial dilution down the column, covering a working range of {st.stdRangeLow.value}–{st.stdRangeHigh.value} mg/mL.
+      Calibration standards were prepared by diluting {stdTraceUI} into {F("stdBuffer")}: a {F("firstDil")} initial dilution, then {F("serialDil")} serial dilution down the column across {F("numPoints")} points, covering {st.stdRangeLow.value}–{st.stdRangeHigh.value} mg/mL.
       Each calibration point was analyzed in {F("stdReps")}. Absorbance at {st.wavelength.value} was measured in a {st.plate.value} plate on a {st.reader.value} reader, with samples analyzed in {F("sampleReps")}.
       {cvDisclaimer}
     </span>;
