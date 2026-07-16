@@ -17366,7 +17366,17 @@ var SCRIBE_SST_DEFAULT_CONCENTRATION = {
 var SCRIBE_ICH_M10_ACCEPTANCE = "±20% of expected (80-120%; ICH M10)";
 var SCRIBE_REPLICATE_OPTS = ["duplicate", "triplicate", "singlicate (no replicates)"];
 var SCRIBE_CV_OPTS = ["10%", "15%", "20%", "25%"];
-var SCRIBE_STRATEGY_OPTS = ["Literature-backed (typical default)", "Analyst-decided (per this run)", "SOP-mandated"];
+// Analysis strategies — must match Plate Assay's SM array (line ~747) verbatim.
+// When analyst picks a strategy in the Plate Assay analysis and later drafts
+// Scribe, the same label should appear here.
+var SCRIBE_STRATEGY_OPTS = [
+  "Literature-backed (ICH M10)",       // Least-diluted qualified (IR + CV<=15%); default
+  "Mid-curve preference",              // IR dilution closest to midpoint of standard curve
+  "Average all in-range",              // Mean of all IR concentrations
+  "Weighted avg (1/CV)",               // Inverse-CV weighted mean
+  "Median of in-range",                // Median. Robust to outliers.
+  "Lowest CV only",                    // Single lowest %CV
+];
 var SCRIBE_FIT_OPTS = ["Linear regression", "4-parameter logistic (4PL)", "5-parameter logistic (5PL)"];
 var SCRIBE_RECEIVAL_FATE_OPTIONS = ["assayed immediately", "stored"];
 var SCRIBE_STORAGE_TEMP_OPTIONS = ["-80°C", "-20°C", "4°C", "RT"];
@@ -17439,7 +17449,7 @@ var SCRIBE_ASSAY_DEFAULTS = {
     sampleReps:    { value: "duplicate", type: "select", options: SCRIBE_REPLICATE_OPTS },
     r2:            { value: "0.998", type: "text" },
     cvThreshold:   { value: "10%", type: "select", options: SCRIBE_CV_OPTS },
-    strategy:      { value: "Literature-backed (typical default)", type: "select", options: SCRIBE_STRATEGY_OPTS },
+    strategy:      { value: "Literature-backed (ICH M10)", type: "select", options: SCRIBE_STRATEGY_OPTS },
     fitType:       { value: "Linear regression", type: "select", options: SCRIBE_FIT_OPTS },
     slope:         { value: "", type: "text" },
     intercept:     { value: "", type: "text" },
@@ -17464,7 +17474,7 @@ var SCRIBE_ASSAY_DEFAULTS = {
     sampleReps:   { value: "duplicate", type: "select", options: SCRIBE_REPLICATE_OPTS },
     r2:           { value: "0.998", type: "text" },
     cvThreshold:  { value: "10%", type: "select", options: SCRIBE_CV_OPTS },
-    strategy:     { value: "Literature-backed (typical default)", type: "select", options: SCRIBE_STRATEGY_OPTS },
+    strategy:     { value: "Literature-backed (ICH M10)", type: "select", options: SCRIBE_STRATEGY_OPTS },
     fitType:      { value: "Linear regression", type: "select", options: SCRIBE_FIT_OPTS },
     slope:        { value: "", type: "text" },
     intercept:    { value: "", type: "text" },
@@ -17488,7 +17498,7 @@ var SCRIBE_ASSAY_DEFAULTS = {
     sampleReps:   { value: "duplicate", type: "select", options: SCRIBE_REPLICATE_OPTS },
     r2:           { value: "0.997", type: "text" },
     cvThreshold:  { value: "10%", type: "select", options: SCRIBE_CV_OPTS },
-    strategy:     { value: "Literature-backed (typical default)", type: "select", options: SCRIBE_STRATEGY_OPTS },
+    strategy:     { value: "Literature-backed (ICH M10)", type: "select", options: SCRIBE_STRATEGY_OPTS },
     fitType:      { value: "Linear regression", type: "select", options: SCRIBE_FIT_OPTS },
     slope:        { value: "", type: "text" },
     intercept:    { value: "", type: "text" },
@@ -18293,9 +18303,29 @@ function ScribeCard(props) {
         <div data-copy-block="true">No system suitability standard was processed for this run. Reason: {F("sstDeclineReason")}.</div>
       </div>;
     }
+    // Reason still empty — render inline input if analyst clicked the prompt,
+    // otherwise show the amber "click to enter" prompt.
+    var reasonInputOrPrompt;
+    if (inlineEditKey === "sstDeclineReason") {
+      reasonInputOrPrompt = <input
+        ref={inlineInputRef}
+        type="text"
+        autoFocus
+        defaultValue=""
+        placeholder="e.g. Instrument SST failed at start of run"
+        onKeyDown={function(e){
+          if (e.key === "Enter") commitInlineText("sstDeclineReason", e.target.value);
+          else if (e.key === "Escape") setInlineEditKey(null);
+        }}
+        onBlur={function(e){ commitInlineText("sstDeclineReason", e.target.value); }}
+        style={{display:"inline-block",minWidth:280,padding:"0 6px",fontSize:"inherit",fontFamily:"inherit",color:C.purpleDeep,fontWeight:600,background:"#fff",border:"1.5px solid "+C.purple,borderRadius:3,outline:"none",verticalAlign:"baseline"}}
+      />;
+    } else {
+      reasonInputOrPrompt = <span style={s.fillNeeded} onClick={function(){setInlineEditKey("sstDeclineReason");}}>click to enter a reason why (required)</span>;
+    }
     return <div>
       {toggleBar}
-      <div data-copy-block="true">No system suitability standard was processed for this run. Reason: <span style={s.fillNeeded} onClick={function(){setInlineEditKey("sstDeclineReason");}}>click to enter rationale (required)</span>.</div>
+      <div data-copy-block="true">No system suitability standard was processed for this run. Reason: {reasonInputOrPrompt}.</div>
     </div>;
   };
 
@@ -18303,6 +18333,23 @@ function ScribeCard(props) {
   var renderVolume = function(){
     var v = st.assayVolume.value.trim();
     if (v) return <span>Assay volume used: {F("assayVolume")}.</span>;
+    // Empty — render inline input if analyst clicked the amber prompt,
+    // otherwise show the amber prompt itself.
+    if (inlineEditKey === "assayVolume") {
+      return <span>Assay volume used: <input
+        ref={inlineInputRef}
+        type="text"
+        autoFocus
+        defaultValue=""
+        placeholder="e.g. 50 mL or 200 uL"
+        onKeyDown={function(e){
+          if (e.key === "Enter") commitInlineText("assayVolume", e.target.value);
+          else if (e.key === "Escape") setInlineEditKey(null);
+        }}
+        onBlur={function(e){ commitInlineText("assayVolume", e.target.value); }}
+        style={{display:"inline-block",minWidth:120,padding:"0 6px",fontSize:"inherit",fontFamily:"inherit",color:C.purpleDeep,fontWeight:600,background:"#fff",border:"1.5px solid "+C.purple,borderRadius:3,outline:"none",verticalAlign:"baseline"}}
+      />.</span>;
+    }
     return <span>Assay volume used: <span style={s.fillNeeded} onClick={function(){setInlineEditKey("assayVolume");}}>click to enter</span>.</span>;
   };
 
@@ -18320,12 +18367,33 @@ function ScribeCard(props) {
     // Curve equation optional inline sentence
     var equationInline = null;
     if (st._checklist.curveEquation) {
+      // Reusable inline-input renderer for empty slope/intercept clicks
+      var inlineInputStyle = {display:"inline-block",minWidth:100,padding:"0 6px",fontSize:"inherit",fontFamily:"inherit",color:C.purpleDeep,fontWeight:600,background:"#fff",border:"1.5px solid "+C.purple,borderRadius:3,outline:"none",verticalAlign:"baseline"};
+      var makeInlineInput = function(key, placeholder){
+        return <input
+          ref={inlineInputRef}
+          type="text"
+          autoFocus
+          defaultValue=""
+          placeholder={placeholder}
+          onKeyDown={function(e){
+            if (e.key === "Enter") commitInlineText(key, e.target.value);
+            else if (e.key === "Escape") setInlineEditKey(null);
+          }}
+          onBlur={function(e){ commitInlineText(key, e.target.value); }}
+          style={inlineInputStyle}
+        />;
+      };
       var slopeUI = st.slope.value
         ? F("slope")
-        : <span style={s.fillNeeded} onClick={function(){setInlineEditKey("slope");}}>click to enter slope + units</span>;
+        : (inlineEditKey === "slope"
+          ? makeInlineInput("slope", "e.g. 12.4 RFU·mL/mg")
+          : <span style={s.fillNeeded} onClick={function(){setInlineEditKey("slope");}}>click to enter slope + units</span>);
       var interceptUI = st.intercept.value
         ? F("intercept")
-        : <span style={s.fillNeeded} onClick={function(){setInlineEditKey("intercept");}}>click to enter intercept + units</span>;
+        : (inlineEditKey === "intercept"
+          ? makeInlineInput("intercept", "e.g. 0.05 RFU")
+          : <span style={s.fillNeeded} onClick={function(){setInlineEditKey("intercept");}}>click to enter intercept + units</span>);
       equationInline = <span>&nbsp;The calibration curve produced a slope of {slopeUI} with a y-intercept of {interceptUI}.</span>;
     }
     return <span>{baseText}{checklistSentences ? " " + checklistSentences : ""}{equationInline}</span>;
@@ -18766,7 +18834,12 @@ function ScribeFieldEditor(props) {
         ref={ref}
         type="date"
         value={scribeParseAnyDateToISO(val) || ""}
-        onChange={function(e){ setVal(e.target.value); }}
+        onChange={function(e){
+          // Commit immediately on pick — no need for extra blur/Enter step.
+          // Analyst clicks the amber prompt → picker opens → picks date → committed.
+          setVal(e.target.value);
+          props.onCommit(e.target.value);
+        }}
         onBlur={function(){ props.onCommit(val); }}
         onKeyDown={function(e){
           if (e.key === "Enter") props.onCommit(val);
