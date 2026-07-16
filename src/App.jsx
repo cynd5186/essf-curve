@@ -17497,8 +17497,8 @@ var SCRIBE_ASSAY_DEFAULTS = {
     fitType:      { value: "Linear regression", type: "select", options: SCRIBE_FIT_OPTS },
     slope:        { value: "", type: "text" },
     intercept:    { value: "", type: "text" },
-    standardTrace: { protein: "BSA", proteinCustom: "", source: "", sourceDetail: "", concentration: "2.0 mg/mL" },
-    sstTrace:      { protein: "BSA", proteinCustom: "", source: "", sourceDetail: "", concentration: SCRIBE_SST_DEFAULT_CONCENTRATION.bca },
+    standardTrace: { protein: "BSA", proteinCustom: "", source: "Thermo Fisher", sourceDetail: "", concentration: "2.0 mg/mL" },
+    sstTrace:      { protein: "BSA", proteinCustom: "", source: "Thermo Fisher", sourceDetail: "", concentration: SCRIBE_SST_DEFAULT_CONCENTRATION.bca },
     sstAcceptance:{ value: SCRIBE_ICH_M10_ACCEPTANCE, type: "text" },
   },
   bradford: {
@@ -17523,8 +17523,8 @@ var SCRIBE_ASSAY_DEFAULTS = {
     fitType:      { value: "Linear regression", type: "select", options: SCRIBE_FIT_OPTS },
     slope:        { value: "", type: "text" },
     intercept:    { value: "", type: "text" },
-    standardTrace: { protein: "BSA", proteinCustom: "", source: "", sourceDetail: "", concentration: "2.0 mg/mL" },
-    sstTrace:      { protein: "BSA", proteinCustom: "", source: "", sourceDetail: "", concentration: SCRIBE_SST_DEFAULT_CONCENTRATION.bradford },
+    standardTrace: { protein: "BSA", proteinCustom: "", source: "Thermo Fisher", sourceDetail: "", concentration: "2.0 mg/mL" },
+    sstTrace:      { protein: "BSA", proteinCustom: "", source: "Thermo Fisher", sourceDetail: "", concentration: SCRIBE_SST_DEFAULT_CONCENTRATION.bradford },
     sstAcceptance:{ value: SCRIBE_ICH_M10_ACCEPTANCE, type: "text" },
   },
 };
@@ -17730,8 +17730,24 @@ function scribeUpdateComputedRange(st) {
 // The component
 // ═══════════════════════════════════════════════════════════════════════
 function ScribeCard(props) {
+  // Pull display name from auth so we can auto-fill received-by initials.
+  // Mapping is by first-name (case-insensitive). Analyst can still override
+  // via the dropdown (Other → custom text).
+  var displayName = useDisplayName();
+  var autoInitials = "";
+  if (displayName) {
+    var d = String(displayName).trim().toLowerCase();
+    if (d === "stephanie")     autoInitials = "SLJ";
+    else if (d === "greg")     autoInitials = "GKB";
+    else if (d === "cyndell")  autoInitials = "CGS";
+  }
   var _stateHook = useState(function(){
-    return scribeBuildState("pellet_sup", "df", null);
+    var initial = scribeBuildState("pellet_sup", "df", null);
+    // Apply auto-init to receivalInitials if user was recognized
+    if (autoInitials && initial.receivalInitials) {
+      initial.receivalInitials.value = autoInitials;
+    }
+    return initial;
   });
   var st = _stateHook[0], setSt = _stateHook[1];
 
