@@ -17341,6 +17341,49 @@ function slot(value, hint) {
   return "[" + hint + "]";
 }
 
+function ScribeCard(props) {
+  // ScribeCard is the NEW Scribe (v14 mockup design) accessible as a
+  // standalone tile under Tools. This is distinct from ScribeTool (v5d20)
+  // which is still embedded inside the Plate Assay Scribe tab and continues
+  // to serve that context until it's later refactored to match ScribeCard.
+  //
+  // Design (v14 spec, verified in Scribe_redesign_mockup_v14.html):
+  //   - 6 LIMS-mirror blocks in a sidebar layout
+  //   - Block 1: Sample Receival Storage (single mad-libs sentence)
+  //   - Block 2: Sample Processing & Assay
+  //   - Block 3: Assay Volume (value only)
+  //   - Block 4: SST Used (compact confirm strip + full paragraph)
+  //   - Block 5: Standard Curve Info (with checklist popover)
+  //   - Block 6: Additional Notes
+  //
+  // Stage 1 (this commit): stub only, proving tile navigation works.
+  // Stage 2 (next commit): full v14 content ported over.
+  return (
+    <div style={{padding:"0 0 2.5rem",maxWidth:1320,margin:"0 auto",boxSizing:"border-box"}}>
+      <PageHeader instructor={props.instructor} setInstructor={props.setInstructor} onBack={props.onBack} large={true} workspaceLabel="Scribe" />
+      <div style={{padding:"1.25rem 16px 0"}}>
+        <div style={{background:"#fff",border:"1px solid #dfe7f2",borderRadius:12,padding:"32px 28px",boxShadow:"0 2px 8px rgba(11,42,111,0.04)"}}>
+          <div style={{fontSize:11,fontWeight:700,color:"#9B6DC7",textTransform:"uppercase",letterSpacing:0.5,marginBottom:8}}>Scribe (v14 redesign)</div>
+          <div style={{fontSize:22,fontWeight:700,color:"#0b2a6f",marginBottom:12}}>Scribe scaffold in place ✓</div>
+          <div style={{fontSize:13,color:"#5a6984",lineHeight:1.6,maxWidth:640,marginBottom:20}}>
+            The Scribe tile is wired to the Tools section. Sticky header shows "Scribe". Back button returns to Tools.
+            Stage 2 will fill in the six-block LIMS-mirror layout (Sample Receival Storage, Sample Processing & Assay,
+            Assay Volume, SST Used, Standard Curve Info, Additional Notes) from the v14 mockup.
+          </div>
+          <div style={{fontSize:12,color:"#6e6e73",lineHeight:1.6,padding:"12px 14px",background:"#f9fafd",border:"1px dashed #dfe7f2",borderRadius:8}}>
+            <strong style={{color:"#0b2a6f"}}>Stage 1 sanity checks (verify these work):</strong>
+            <ul style={{margin:"8px 0 0",paddingLeft:20}}>
+              <li>Sticky header at top says "Scribe" (not "Plate Assay" or anything else)</li>
+              <li>"← All tools" button returns to the tile grid</li>
+              <li>Refreshing this page while the tile is open... (behavior TBD — noting for later)</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ScribeTool(props) {
   // Two contexts:
   //   - Standalone (from Tools tile): props.cfgContext is null/undefined.
@@ -24908,12 +24951,21 @@ function App() {
             <path d="M5.5 14 Q7 13 9 13.5 Q11 14 13 13.5 Q15 13 16.5 14 L16.5 17 Q16.5 18.5 15 18.5 L7 18.5 Q5.5 18.5 5.5 17 Z" fill="#fff" opacity="0.5"/>
             <line x1="6" y1="11" x2="9" y2="11" stroke="#fff" strokeWidth="0.8" strokeLinecap="round" opacity="0.6"/>
           </svg>;
+          var iconScribe = <svg width="22" height="22" viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg">
+            {/* Document with text lines — evokes writing / structured entry */}
+            <path d="M5 3 L14 3 L17 6 L17 19 L5 19 Z" stroke="#fff" strokeWidth="1.4" fill="none" strokeLinejoin="round"/>
+            <path d="M14 3 L14 6 L17 6" stroke="#fff" strokeWidth="1.4" fill="none" strokeLinejoin="round"/>
+            <line x1="7.5" y1="9" x2="14.5" y2="9" stroke="#fff" strokeWidth="1.2" strokeLinecap="round"/>
+            <line x1="7.5" y1="12" x2="14.5" y2="12" stroke="#fff" strokeWidth="1.2" strokeLinecap="round"/>
+            <line x1="7.5" y1="15" x2="12" y2="15" stroke="#fff" strokeWidth="1.2" strokeLinecap="round"/>
+          </svg>;
           var methodTools = [
             {id:"unit",  title:"Unit Converter",          desc:"Convert mg/mL ↔ ug/mL ↔ ng/mL etc.",  icon:iconConv,  color:"#0F8AA2"},
             {id:"spike", title:"Spike Recovery Planner",   desc:"Plan spike volumes and check expected recovery.", icon:iconSpike, color:"#6337b9"},
             {id:"elisa", title:"Dilution Planner",        desc:"Plan tube pre-dilutions and plate serial dilutions for any assay.", icon:iconElisa, color:"#BF7A1A"},
             {id:"ms_tools", title:"Mass Spec Tools", desc:"Peptide mapping prep recipe · mass on column · solution maker · mass↔moles. All in one tabbed view, with a shared protein library.", icon:iconPepPrep, color:"#0b2a6f"},
             {id:"validation", title:"Validation Designer", desc:"Design simple ICH Q2-aligned validation experiments — linearity, accuracy, precision, LLOQ, spike recovery.", icon:iconValidation, color:"#6337b9"},
+            {id:"scribe", title:"Scribe", desc:"Generate consistent LIMS-ready assay documentation. Mad-libs style — fill in the blanks, copy per block to your LIMS field.", icon:iconScribe, color:"#9B6DC7"},
           ];
           var bioTools = [
             {id:"growth_rate", title:"Specific Growth Rate (µ)", desc:"Compute µ, doubling time, lag/exp phase from at-line OD samples. Auto-detects exponential phase. Multi-batch.", icon:iconGrowth, color:"#1b7f6a"},
@@ -24976,6 +25028,7 @@ function App() {
             }} />}
             {selectedTool==="validation" && <ValidationDesignerEntry instructor={instructor} unit={unit} />}
             {selectedTool==="ms_tools" && <LCMSCalculatorsCard instructor={instructor} customProteins={customProteins} saveProtein={saveProtein} />}
+            {selectedTool==="scribe" && <ScribeCard instructor={instructor} />}
             {selectedTool==="growth_rate" && <GrowthRateCalculatorCard batches={btBatches} setBatches={setBtBatches} activeId={btActiveId} setActiveId={setBtActiveId} instructor={instructor} step={btStep} setStep={setBtStep} />}
           </div>;
         })()}
