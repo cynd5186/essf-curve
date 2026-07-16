@@ -17506,7 +17506,7 @@ function scribeBuildState(prepKey, assayKey, preserved) {
     receivalDate:     (preserved && preserved.receivalDate) || { value: scribeFormatDateForDisplay(new Date().toISOString().slice(0,10)) || "", type: "text" },
     receivalFate:     (preserved && preserved.receivalFate) || { value: "assayed immediately", type: "select", options: SCRIBE_RECEIVAL_FATE_OPTIONS },
     storageCondition: (preserved && preserved.storageCondition) || { value: "-80°C", type: "select", options: SCRIBE_STORAGE_TEMP_OPTIONS },
-    storageDuration:  (preserved && preserved.storageDuration) || { value: "", type: "text" },
+    storageUntilDate: (preserved && preserved.storageUntilDate) || { value: "", type: "text" },
     receivalInitials: (preserved && preserved.receivalInitials) || { value: "", type: "select", options: ["", "SLJ", "GKB", "CGS", "Other"] },
     notes:            (preserved && preserved.notes) || "",
     _copied:          (preserved && preserved._copied) || {},
@@ -17552,6 +17552,30 @@ function scribeFormatDateForDisplay(s) {
   }
   if (!isFinite(d)) return null;
   return SCRIBE_SHORT_MONTHS[d.getMonth()] + " " + d.getDate() + ", " + d.getFullYear();
+}
+
+// Compute integer days between two date strings (any format that Date can parse
+// or "Sept 4, 2025" style). Returns { days, valid, sameDay, negative }.
+// If either date can't be parsed, valid=false.
+function scribeDaysBetween(startStr, endStr) {
+  if (!startStr || !endStr) return { valid: false };
+  var startISO = scribeParseAnyDateToISO(startStr);
+  var endISO   = scribeParseAnyDateToISO(endStr);
+  if (!startISO || !endISO) return { valid: false };
+  var sm = startISO.split("-"), em = endISO.split("-");
+  var start = new Date(parseInt(sm[0]), parseInt(sm[1]) - 1, parseInt(sm[2]));
+  var end   = new Date(parseInt(em[0]), parseInt(em[1]) - 1, parseInt(em[2]));
+  if (!isFinite(start) || !isFinite(end)) return { valid: false };
+  // Convert to UTC-midnight to avoid DST offset (integer day math)
+  var startMs = Date.UTC(start.getFullYear(), start.getMonth(), start.getDate());
+  var endMs   = Date.UTC(end.getFullYear(),   end.getMonth(),   end.getDate());
+  var days = Math.round((endMs - startMs) / (1000 * 60 * 60 * 24));
+  return {
+    valid: true,
+    days: days,
+    sameDay: days === 0,
+    negative: days < 0,
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -17646,7 +17670,7 @@ function ScribeCard(props) {
         receivalDate: prev.receivalDate,
         receivalFate: prev.receivalFate,
         storageCondition: prev.storageCondition,
-        storageDuration: prev.storageDuration,
+        storageUntilDate: prev.storageUntilDate,
         receivalInitials: prev.receivalInitials,
         notes: prev.notes,
         _copied: prev._copied,
@@ -17666,7 +17690,7 @@ function ScribeCard(props) {
         receivalDate: prev.receivalDate,
         receivalFate: prev.receivalFate,
         storageCondition: prev.storageCondition,
-        storageDuration: prev.storageDuration,
+        storageUntilDate: prev.storageUntilDate,
         receivalInitials: prev.receivalInitials,
         notes: prev.notes,
         _copied: prev._copied,
@@ -17686,9 +17710,13 @@ function ScribeCard(props) {
     purple: "#9B6DC7",
     purpleDeep: "#6b3fa0",
     purpleTint: "#f2eafa",
-    amber: "#c66a1e",
+    amber: "#c66a1e",           // Kept for amber prompts on empty required fills
     amberBg: "#fef3d5",
     amberBorder: "#e8b957",
+    // Status-dot palette (Red / Yellow / Green)
+    dotRed:    "#c14545",       // Missing required fields
+    dotYellow: "#e8b957",       // Ready but not yet copied (or copied then edited)
+    dotGreen:  "#2e7d5b",       // Copied and current
     green: "#2e7d5b",
     fillBg: "rgba(155, 109, 199, 0.14)",
     bg: "#f4f6fb",
@@ -17740,9 +17768,15 @@ function ScribeCard(props) {
     },
     statusDot: function(kind){
       var color = "transparent";
-      if (kind === "warn") color = C.amber;
-      else if (kind === "copied") color = C.green;
-      return { width: 8, height: 8, borderRadius: "50%", background: color, marginLeft: "auto", flexShrink: 0 };
+      if (kind === "warn")        color = C.dotRed;
+      else if (kind === "ready")  color = C.dotYellow;
+      else if (kind === "copied") color = C.dotGreen;
+      return {
+        width: 10, height: 10, borderRadius: "50%",
+        background: color,
+        boxShadow: color !== "transparent" ? "0 0 0 1.5px #fff, 0 1px 2px rgba(0,0,0,0.12)" : "none",
+        marginLeft: "auto", flexShrink: 0,
+      };
     },
     blocksCol: { flex: 1, display: "flex", flexDirection: "column", gap: 12 },
     block: function(focused){
@@ -17852,7 +17886,7 @@ function ScribeCard(props) {
     // exception for receivalDate (date picker) and receivalInitials when in
     // "Other" text-override mode — those still use the popup editor.
     var isTextType = field.type === "text";
-    var isDateField = key === "receivalDate";
+    var isDateField = key === "receivalDate" || key === "storageUntilDate";
     var isInlineable = isTextType && !isDateField;
 
     if (isInlineable && inlineEditKey === key) {
@@ -17954,7 +17988,7 @@ function ScribeCard(props) {
     var key = editing.key;
     var finalVal = newVal;
     // Post-commit formatters
-    if (key === "receivalDate" && finalVal) {
+    if ((key === "receivalDate" || key === "storageUntilDate") && finalVal) {
       var formatted = scribeFormatDateForDisplay(finalVal);
       if (formatted) finalVal = formatted;
     }
@@ -18009,10 +18043,24 @@ function ScribeCard(props) {
       : <span style={s.fillNeeded} onClick={function(e){startEdit(e, "receivalInitials");}}>click to specify initials</span>;
     var middleClause;
     if (fate === "stored") {
-      var durationInline = st.storageDuration.value.trim()
-        ? <span>&nbsp;{F("storageDuration")}</span>
-        : <span>&nbsp;<span style={{fontSize:10.5,fontWeight:600,color:C.slate,background:"#f4f6fb",border:"1px dashed "+C.divider,borderRadius:2,padding:"0 4px",cursor:"pointer"}} onClick={function(){setInlineEditKey("storageDuration");}}>+ duration</span></span>;
-      middleClause = <span>{F("receivalFate")} at {F("storageCondition")}{durationInline}</span>;
+      // Until-date: required when fate is "stored". Shows amber prompt when empty.
+      var untilPart = st.storageUntilDate.value.trim()
+        ? F("storageUntilDate")
+        : <span style={s.fillNeeded} onClick={function(e){startEdit(e, "storageUntilDate");}}>click to specify until date</span>;
+      // Storage-period auto-compute: shows in parens after until-date if both dates parseable.
+      // Silent when receivalDate is missing (can't compute without a start).
+      var period = scribeDaysBetween(st.receivalDate.value, st.storageUntilDate.value);
+      var periodText = null;
+      if (period.valid) {
+        if (period.negative) {
+          periodText = <span style={{fontStyle:"italic",color:C.amber,fontSize:11.5,marginLeft:4}}>({period.days} days — check dates)</span>;
+        } else if (period.sameDay) {
+          periodText = <span style={{fontStyle:"italic",color:C.slate,fontSize:11.5,marginLeft:4}}>(same day)</span>;
+        } else {
+          periodText = <span style={{fontStyle:"italic",color:C.slate,fontSize:11.5,marginLeft:4}}>({period.days} day{period.days === 1 ? "" : "s"})</span>;
+        }
+      }
+      middleClause = <span>{F("receivalFate")} at {F("storageCondition")} until {untilPart}{periodText}</span>;
     } else {
       middleClause = F("receivalFate");
     }
@@ -18258,12 +18306,26 @@ function ScribeCard(props) {
       var date     = (st.receivalDate.value      || "").trim();
       var fate     = (st.receivalFate.value      || "").trim();
       var cond     = (st.storageCondition.value  || "").trim();
-      var duration = (st.storageDuration.value   || "").trim();
+      var untilDate= (st.storageUntilDate.value  || "").trim();
       var initials = (st.receivalInitials.value  || "").trim();
-      var middle = fate === "stored"
-        ? "stored at " + cond + (duration ? " " + duration : "")
-        : fate;
-      // New sentence: "Sample was dropped off on [date] and received by [initials], then [fate]."
+      var middle;
+      if (fate === "stored") {
+        var storageClause = "stored at " + cond;
+        if (untilDate) {
+          storageClause += " until " + untilDate;
+          // Auto-compute storage period parenthetical when both dates present
+          var period = scribeDaysBetween(date, untilDate);
+          if (period.valid) {
+            if (period.sameDay)      storageClause += " (same day)";
+            else if (period.negative) storageClause += " (" + period.days + " days — check dates)";
+            else                      storageClause += " (" + period.days + " day" + (period.days === 1 ? "" : "s") + ")";
+          }
+        }
+        middle = storageClause;
+      } else {
+        middle = fate;
+      }
+      // "Sample was dropped off on [date] and received by [initials], then [middle]."
       var datePhrase = date ? " on " + date : "";
       var initialsPhrase = initials ? " and received by " + initials : "";
       return "Sample was dropped off" + datePhrase + initialsPhrase + ", then " + middle + ".";
@@ -18338,6 +18400,10 @@ function ScribeCard(props) {
       var m = [];
       if (!st.receivalDate.value.trim())     m.push("Receival date");
       if (!st.receivalInitials.value.trim()) m.push("Received-by initials");
+      // Until-date required when analyst chose "stored"
+      if (st.receivalFate.value === "stored" && !st.storageUntilDate.value.trim()) {
+        m.push("Storage until date");
+      }
       return m;
     }
     if (id === "b2") return scribeTraceMissing(st.standardTrace, "Calibration standard");
@@ -18361,13 +18427,18 @@ function ScribeCard(props) {
 
   // Sidebar status per block (warn / copied / neutral)
   var blockStatus = function(id){
+    // Three-state:
+    //   "warn"   = required fields missing → RED
+    //   "ready"  = all required filled but not currently copied (or copied then edited) → YELLOW
+    //   "copied" = all required filled AND currently-copied hash matches → GREEN
+    // Optional blocks (5 with no curveEquation, 6 with no notes) still return "ready"
+    // since empty is acceptable for them.
     var m = validateBlock(id);
     if (m.length) return "warn";
     var body = getBlockBody(id);
-    if (!body) return "";
-    var hash = body.length + "|" + body.slice(0, 40);
-    if (st._copied && st._copied[id] && st._copied[id] === hash) return "copied";
-    return "";
+    var hash = body ? (body.length + "|" + body.slice(0, 40)) : "";
+    if (body && st._copied && st._copied[id] && st._copied[id] === hash) return "copied";
+    return "ready";
   };
 
   // ─── CHECKLIST POPOVER (opened from Assay Method sub-heading) ─────────
@@ -18438,7 +18509,11 @@ function ScribeCard(props) {
                 >
                   <span style={s.sidebarNum(isActive)}>{b.num}</span>
                   <span style={{flex:1}}>{b.label}</span>
-                  <span style={s.statusDot(status)} title={status === "warn" ? "Missing required fields" : status === "copied" ? "Copied and current" : ""}></span>
+                  <span style={s.statusDot(status)} title={
+                    status === "warn"   ? "Missing required fields" :
+                    status === "ready"  ? "Ready to copy" :
+                    status === "copied" ? "Copied — matches current text" : ""
+                  }></span>
                 </div>
               );
             })}
@@ -18611,8 +18686,8 @@ function ScribeFieldEditor(props) {
     return function(){ clearTimeout(t); document.removeEventListener("mousedown", onClick); };
   }, [field, props.forceText]);
 
-  // Native date picker for receivalDate
-  if (props.editingKey === "receivalDate") {
+  // Native date picker for receivalDate and storageUntilDate
+  if (props.editingKey === "receivalDate" || props.editingKey === "storageUntilDate") {
     return <div style={{position:"fixed",left:props.anchorRect.left,top:props.anchorRect.top + 4,zIndex:1000,background:"#fff",border:"1.5px solid #9B6DC7",borderRadius:5,padding:"6px 8px",boxShadow:"0 4px 12px rgba(11,42,111,0.20)"}}>
       <input
         ref={ref}
