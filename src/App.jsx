@@ -17503,11 +17503,11 @@ function scribeBuildState(prepKey, assayKey, preserved) {
     sstConfirmed:     (preserved && preserved.sstConfirmed) || false,
     sstDeclineReason: (preserved && preserved.sstDeclineReason) || { value: "", type: "text" },
     assayVolume:      (preserved && preserved.assayVolume) || { value: "", type: "text" },
-    receivalDate:     (preserved && preserved.receivalDate) || { value: "", type: "text" },
+    receivalDate:     (preserved && preserved.receivalDate) || { value: scribeFormatDateForDisplay(new Date().toISOString().slice(0,10)) || "", type: "text" },
     receivalFate:     (preserved && preserved.receivalFate) || { value: "assayed immediately", type: "select", options: SCRIBE_RECEIVAL_FATE_OPTIONS },
     storageCondition: (preserved && preserved.storageCondition) || { value: "-80°C", type: "select", options: SCRIBE_STORAGE_TEMP_OPTIONS },
     storageDuration:  (preserved && preserved.storageDuration) || { value: "", type: "text" },
-    receivalInitials: (preserved && preserved.receivalInitials) || { value: "", type: "text" },
+    receivalInitials: (preserved && preserved.receivalInitials) || { value: "", type: "select", options: ["", "SLJ", "GKB", "CGS", "Other"] },
     notes:            (preserved && preserved.notes) || "",
     _copied:          (preserved && preserved._copied) || {},
     _checklist:       (preserved && preserved._checklist) || {},
@@ -17748,11 +17748,11 @@ function ScribeCard(props) {
     block: function(focused){
       return {
         background: "#fff",
-        border: "1px solid " + (focused ? C.purple : C.divider),
+        border: "1px solid " + C.purple,
         borderRadius: 10,
         overflow: "hidden",
-        boxShadow: focused ? "0 2px 8px rgba(155,109,199,0.10)" : "none",
-        transition: "border-color 0.15s, box-shadow 0.15s",
+        boxShadow: "0 2px 8px rgba(155,109,199,0.10)",
+        display: focused ? "block" : "none",
       };
     },
     blockHeader: {
@@ -17880,6 +17880,22 @@ function ScribeCard(props) {
           finalVal = num.toFixed(1) + " mL";
         }
       }
+    }
+    // Initials "Other" escape hatch — swap dropdown selection for text input
+    // so the analyst can type custom initials instead of committing "Other" literally.
+    if (key === "receivalInitials" && finalVal === "Other") {
+      var anchorRect = editing.anchorRect;
+      update(function(n){
+        if (n[key]) n[key].value = "";
+        n._copied = {};
+      });
+      setEditing({
+        key: key,
+        anchorRect: anchorRect,
+        value: "",
+        forceText: true,   // signal to ScribeFieldEditor to render text input, not select
+      });
+      return;
     }
     update(function(n){
       if (n[key]) n[key].value = finalVal;
@@ -18327,7 +18343,7 @@ function ScribeCard(props) {
               return (
                 <div key={b.id}
                   style={s.sidebarTab(isActive, status)}
-                  onClick={function(){ update(function(n){n._focusedBlock = b.id;}); document.getElementById("scribe-" + b.id).scrollIntoView({behavior: "smooth", block: "start"}); }}
+                  onClick={function(){ update(function(n){n._focusedBlock = b.id;}); }}
                 >
                   <span style={s.sidebarNum(isActive)}>{b.num}</span>
                   <span style={{flex:1}}>{b.label}</span>
@@ -18445,6 +18461,7 @@ function ScribeCard(props) {
         anchorRect={editing.anchorRect}
         editingKey={editing.key}
         initialValue={editing.value}
+        forceText={editing.forceText}
         onCommit={commitEdit}
         onCancel={cancelEdit}
       />}
@@ -18486,7 +18503,7 @@ function ScribeFieldEditor(props) {
     </div>;
   }
 
-  if (field && field.type === "select") {
+  if (field && field.type === "select" && !props.forceText) {
     return <div style={{position:"fixed",left:props.anchorRect.left,top:props.anchorRect.top + 4,zIndex:1000,background:"#fff",border:"1.5px solid #9B6DC7",borderRadius:5,padding:"6px 8px",boxShadow:"0 4px 12px rgba(11,42,111,0.20)"}}>
       <select
         ref={ref}
