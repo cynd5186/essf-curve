@@ -17348,9 +17348,18 @@ function slot(value, hint) {
 // don't re-allocate arrays/objects unnecessarily.
 // ─────────────────────────────────────────────────────────────────────────
 var SCRIBE_GFP_WORKING_STOCK = {
-  prepId: "GFP-H250512-UFZ.3",   // Update when stock rotates
+  // Fixed batch identifier — everything up through the location code.
+  // The .N part (aliquot from -80°C freezer) and the trailing letter
+  // (sub-aliquot from the 1 mg/mL working stock) are picked by the analyst
+  // via the ScribeGFPWizard component (see below).
+  prefix: "GFP-H250512-UFZ",     // GFP, HIC-purified, 2025-05-12, stored in ultra-low freezer
+  defaultNumber: "3",             // Sane default so paragraph renders cleanly on load
+  defaultLetter: "A",
   concentration: "1 mg/mL",
 };
+// Legacy prepId — kept as a computed for backwards-compat with existing state
+// that stored the full string. Still referenced by scribeTraceMissing.
+SCRIBE_GFP_WORKING_STOCK.prepId = SCRIBE_GFP_WORKING_STOCK.prefix + "." + SCRIBE_GFP_WORKING_STOCK.defaultNumber;
 var SCRIBE_SST_DEFAULT_CONCENTRATION = {
   df: "0.7 mg/mL", bca: "0.5 mg/mL", bradford: "0.5 mg/mL",
 };
@@ -17434,8 +17443,8 @@ var SCRIBE_ASSAY_DEFAULTS = {
     fitType:       { value: "Linear regression", type: "select", options: SCRIBE_FIT_OPTS },
     slope:         { value: "", type: "text" },
     intercept:     { value: "", type: "text" },
-    standardTrace: { protein: "GFP", proteinCustom: "", source: "in-house", sourceDetail: SCRIBE_GFP_WORKING_STOCK.prepId, concentration: SCRIBE_GFP_WORKING_STOCK.concentration },
-    sstTrace:      { protein: "GFP", proteinCustom: "", source: "in-house", sourceDetail: SCRIBE_GFP_WORKING_STOCK.prepId, concentration: SCRIBE_SST_DEFAULT_CONCENTRATION.df },
+    standardTrace: { protein: "GFP", proteinCustom: "", source: "in-house", sourceDetail: SCRIBE_GFP_WORKING_STOCK.prefix + "." + SCRIBE_GFP_WORKING_STOCK.defaultNumber + SCRIBE_GFP_WORKING_STOCK.defaultLetter, concentration: SCRIBE_GFP_WORKING_STOCK.concentration },
+    sstTrace:      { protein: "GFP", proteinCustom: "", source: "in-house", sourceDetail: SCRIBE_GFP_WORKING_STOCK.prefix + "." + SCRIBE_GFP_WORKING_STOCK.defaultNumber + SCRIBE_GFP_WORKING_STOCK.defaultLetter, concentration: SCRIBE_SST_DEFAULT_CONCENTRATION.df },
     sstAcceptance: { value: SCRIBE_ICH_M10_ACCEPTANCE, type: "text" },
   },
   bca: {
@@ -17593,8 +17602,14 @@ function scribeTraceMissing(t, label) {
   else if (t.protein === "BSA" && t.source !== "Thermo Fisher") detailRequired = true;
   var detail = t.sourceDetail || "";
   if (detailRequired && !detail) missing.push((label || "Standard") + ": lot / batch / detail");
-  if (t.protein === "GFP" && t.source === "in-house" && detail === SCRIBE_GFP_WORKING_STOCK.prepId) {
-    missing.push((label || "Standard") + ": GFP vial letter");
+  // GFP in-house identifier format: PREFIX.NUMBER + LETTER (e.g. GFP-H250512-UFZ.3A)
+  // If detail matches the prefix but is missing number+letter, flag it.
+  if (t.protein === "GFP" && t.source === "in-house" && detail) {
+    var gfpMatch = detail.match(/^(GFP-H250512-UFZ)\.?(\d*)([A-Z]?)$/);
+    if (gfpMatch) {
+      if (!gfpMatch[2]) missing.push((label || "Standard") + ": GFP tube number (from −80 °C)");
+      if (!gfpMatch[3]) missing.push((label || "Standard") + ": GFP working-stock tube letter");
+    }
   }
   if (!t.concentration) missing.push((label || "Standard") + ": concentration");
   return missing;
@@ -17863,6 +17878,12 @@ function ScribeCard(props) {
   // they edit in place within the paragraph flow.
   var _inlineHook = useState(null);
   var inlineEditKey = _inlineHook[0], setInlineEditKey = _inlineHook[1];
+
+  // GFP wizard state — when non-null, the ScribeGFPWizard popover is open
+  // over the given trace's identifier. Holds { stateKey, anchorRect } so we
+  // know which trace to update (standardTrace vs sstTrace) and where to anchor.
+  var _gfpWizHook = useState(null);
+  var gfpWizard = _gfpWizHook[0], setGfpWizard = _gfpWizHook[1];
 
   // Ref for the currently-inline text input, so we can focus it after mount
   var inlineInputRef = useRef(null);
@@ -18137,15 +18158,23 @@ function ScribeCard(props) {
     if (missing.length) {
       return <span style={s.fillNeeded} onClick={function(){openTraceModal(stateKey, label);}}>click to specify {label.toLowerCase()}</span>;
     }
-    // GFP + in-house + prefix match: inline vial-letter editor
-    if (trace.protein === "GFP" && trace.source === "in-house" && trace.sourceDetail && trace.sourceDetail.indexOf(SCRIBE_GFP_WORKING_STOCK.prepId) === 0) {
-      var prefix = SCRIBE_GFP_WORKING_STOCK.prepId;
-      var suffix = trace.sourceDetail.slice(prefix.length);
-      return <span style={{color:C.purpleDeep,fontWeight:600,background:C.fillBg,padding:"0 3px",borderRadius:2,borderBottom:"1.5px dotted "+C.purple}}>
+    // GFP + in-house + prefix match: show identifier with fixed prefix + clickable number/letter
+    if (trace.protein === "GFP" && trace.source === "in-house" && trace.sourceDetail && trace.sourceDetail.indexOf(SCRIBE_GFP_WORKING_STOCK.prefix) === 0) {
+      // Parse the identifier: PREFIX.NUMBER + LETTER (e.g. GFP-H250512-UFZ.3A)
+      var idRest = trace.sourceDetail.slice(SCRIBE_GFP_WORKING_STOCK.prefix.length);
+      var parts = idRest.match(/^\.?(\d*)([A-Z]?)$/) || ["", "", ""];
+      var num = parts[1] || "";
+      var letter = parts[2] || "";
+      var tooltip = "Concentrated tube #" + (num || "?") + " → working stock tube " + (letter || "?") + " (1 mg/mL)";
+      return <span style={{color:C.purpleDeep,fontWeight:600,background:C.fillBg,padding:"0 3px",borderRadius:2,borderBottom:"1.5px dotted "+C.purple,position:"relative"}} title={tooltip}>
         in-house GFP (
-        <span style={{color:C.slate,fontWeight:500}}>{prefix}</span>
-        <span style={{color:C.purpleDeep,fontWeight:700,padding:"0 2px",borderRadius:2,background:"rgba(155,109,199,0.20)",cursor:"pointer"}} onClick={function(){promptGFPSuffix(stateKey);}} title="Click to edit vial letter">
-          {suffix || <em style={{color:C.amber}}>[vial]</em>}
+        <span style={{color:C.slate,fontWeight:500}}>{SCRIBE_GFP_WORKING_STOCK.prefix}.</span>
+        <span
+          style={{color:C.purpleDeep,fontWeight:700,padding:"0 2px",borderRadius:2,background:"rgba(155,109,199,0.20)",cursor:"pointer"}}
+          onClick={function(ev){openGFPWizard(ev, stateKey);}}
+          title="Click to change tube number and letter"
+        >
+          {num || <em style={{color:C.amber}}>[#]</em>}{letter || <em style={{color:C.amber}}>[?]</em>}
         </span>
         {trace.concentration ? ", " + trace.concentration : ""})
         <span style={{color:C.slateLt,cursor:"pointer",fontSize:11,marginLeft:2}} onClick={function(){openTraceModal(stateKey, label);}} title="Edit full traceability">✎</span>
@@ -18155,17 +18184,25 @@ function ScribeCard(props) {
     return <span style={s.fill} onClick={function(){openTraceModal(stateKey, label);}}>{scribeTraceToString(trace)}</span>;
   };
 
-  var promptGFPSuffix = function(stateKey){
-    var trace = st[stateKey];
-    var currentSuffix = trace.sourceDetail.slice(SCRIBE_GFP_WORKING_STOCK.prepId.length);
-    var newSuffix = window.prompt("GFP vial letter (e.g. A, B, C):", currentSuffix);
-    if (newSuffix === null) return;
-    var suffix = newSuffix.trim().toUpperCase();
-    update(function(n){
-      n[stateKey] = Object.assign({}, n[stateKey], { sourceDetail: SCRIBE_GFP_WORKING_STOCK.prepId + suffix });
-      n._copied = {};
+  var openGFPWizard = function(ev, stateKey){
+    ev.stopPropagation();
+    var rect = ev.currentTarget.getBoundingClientRect();
+    setGfpWizard({
+      stateKey: stateKey,
+      anchorRect: { left: rect.left, top: rect.bottom, right: rect.right },
     });
   };
+  var saveGFPWizard = function(num, letter){
+    if (!gfpWizard) return;
+    var stateKey = gfpWizard.stateKey;
+    var newDetail = SCRIBE_GFP_WORKING_STOCK.prefix + "." + num + letter;
+    update(function(n){
+      n[stateKey] = Object.assign({}, n[stateKey], { sourceDetail: newDetail });
+      n._copied = {};
+    });
+    setGfpWizard(null);
+  };
+  var closeGFPWizard = function(){ setGfpWizard(null); };
 
   var openTraceModal = function(stateKey, label){
     update(function(n){
@@ -18631,6 +18668,14 @@ function ScribeCard(props) {
         onCommit={commitEdit}
         onCancel={cancelEdit}
       />}
+
+      {/* GFP identifier wizard (inline popover) */}
+      {gfpWizard && <ScribeGFPWizard
+        anchorRect={gfpWizard.anchorRect}
+        currentDetail={st[gfpWizard.stateKey] ? st[gfpWizard.stateKey].sourceDetail : ""}
+        onSave={saveGFPWizard}
+        onCancel={closeGFPWizard}
+      />}
     </div>
   );
 }
@@ -18787,7 +18832,7 @@ function ScribeTraceModal(props) {
     // Cascade: source change may auto-fill GFP working stock ID
     if (field === "source") {
       if (newT.protein === "GFP" && value === "in-house") {
-        newT.sourceDetail = SCRIBE_GFP_WORKING_STOCK.prepId;
+        newT.sourceDetail = SCRIBE_GFP_WORKING_STOCK.prefix + "." + SCRIBE_GFP_WORKING_STOCK.defaultNumber + SCRIBE_GFP_WORKING_STOCK.defaultLetter;
         if (!newT.concentration) newT.concentration = SCRIBE_GFP_WORKING_STOCK.concentration;
       } else {
         newT.sourceDetail = "";
@@ -18881,6 +18926,141 @@ function ScribeTraceModal(props) {
         <button style={btnSecondary} onClick={props.onCancel}>Cancel</button>
         <button style={Object.assign({}, btnPrimary, missing.length ? {opacity:0.5,cursor:"not-allowed"} : {})} onClick={function(){ if (!missing.length) props.onSave(); }} disabled={missing.length > 0}>Save</button>
       </div>
+    </div>
+  </div>;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Sub-component: GFP identifier wizard
+// -----------------------------------------------------------------------
+// Analysts frequently confuse the two tube levels in the in-house GFP
+// identifier. This wizard walks them through it in plain workflow language:
+//   Step 1: which concentrated tube (from -80°C) was diluted?
+//   Step 2: which working stock tube (1 mg/mL) are they using?
+// Both are pill selectors; "+ higher" / "+ more" opens window.prompt for
+// values outside the default range.
+// ═══════════════════════════════════════════════════════════════════════
+function ScribeGFPWizard(props) {
+  // Parse currentDetail into number + letter
+  var prefix = SCRIBE_GFP_WORKING_STOCK.prefix;
+  var rest = (props.currentDetail || "").indexOf(prefix) === 0
+    ? props.currentDetail.slice(prefix.length)
+    : "";
+  var match = rest.match(/^\.?(\d*)([A-Z]?)$/) || ["", "", ""];
+  var _n = useState(match[1] || SCRIBE_GFP_WORKING_STOCK.defaultNumber);
+  var num = _n[0], setNum = _n[1];
+  var _l = useState(match[2] || SCRIBE_GFP_WORKING_STOCK.defaultLetter);
+  var letter = _l[0], setLetter = _l[1];
+
+  // Outside-click closes
+  var panelRef = useRef(null);
+  useEffect(function(){
+    var onClick = function(e){
+      if (panelRef.current && !panelRef.current.contains(e.target)) props.onCancel();
+    };
+    var t = setTimeout(function(){ document.addEventListener("mousedown", onClick); }, 50);
+    return function(){ clearTimeout(t); document.removeEventListener("mousedown", onClick); };
+  }, []);
+  useEffect(function(){
+    var onKey = function(e){
+      if (e.key === "Escape") props.onCancel();
+      else if (e.key === "Enter") {
+        if (num && letter) props.onSave(num, letter);
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return function(){ document.removeEventListener("keydown", onKey); };
+  }, [num, letter]);
+
+  var NUM_OPTS = ["1","2","3","4","5","6","7"];
+  var LETTER_OPTS = ["A","B","C","D","E"];
+
+  // Styles
+  var C = { ink:"#0b2a6f", slate:"#5a6984", slateLt:"#8a99b8", divider:"#dfe7f2", purple:"#9B6DC7", purpleDeep:"#6b3fa0", purpleTint:"#f2eafa" };
+  var pillStyle = function(selected){
+    return {
+      padding: "6px 12px",
+      fontSize: 13, fontWeight: 700,
+      color: selected ? "#fff" : C.purpleDeep,
+      background: selected ? C.purple : "#fff",
+      border: "1.5px solid " + (selected ? C.purple : C.divider),
+      borderRadius: 20,
+      cursor: "pointer",
+      fontFamily: "inherit",
+      minWidth: 40, textAlign: "center",
+      userSelect: "none",
+    };
+  };
+  var pillPlusStyle = Object.assign({}, pillStyle(false), { color: C.slate, fontWeight: 600 });
+  var stepLabel = { fontSize:11, fontWeight:700, color:C.purpleDeep, textTransform:"uppercase", letterSpacing:0.4, marginBottom:4 };
+  var stepQ = { fontSize:13, fontWeight:600, color:C.ink, marginBottom:6 };
+  var stepHint = { fontSize:11.5, color:C.slate, fontStyle:"italic", marginBottom:8, lineHeight:1.4 };
+  var pillRow = { display:"flex", gap:6, flexWrap:"wrap", marginBottom:14 };
+
+  var promptForHigherNum = function(){
+    var v = window.prompt("Enter tube number:", "");
+    if (v && /^\d+$/.test(v.trim())) setNum(v.trim());
+  };
+  var promptForHigherLetter = function(){
+    var v = window.prompt("Enter tube letter (single letter):", "");
+    if (v && /^[A-Za-z]$/.test(v.trim())) setLetter(v.trim().toUpperCase());
+  };
+
+  return <div
+    ref={panelRef}
+    style={{
+      position: "fixed",
+      left: Math.max(8, Math.min(props.anchorRect.left, window.innerWidth - 420)),
+      top: props.anchorRect.top + 6,
+      zIndex: 1000,
+      background: "#fff",
+      border: "1.5px solid " + C.purple,
+      borderRadius: 8,
+      boxShadow: "0 8px 24px rgba(11,42,111,0.16)",
+      width: 400,
+      maxWidth: "calc(100vw - 20px)",
+      padding: "14px 16px",
+    }}
+  >
+    <div style={{marginBottom:14}}>
+      <div style={stepLabel}>Step 1</div>
+      <div style={stepQ}>Which concentrated tube (from the −80 °C freezer) was diluted to make the 1 mg/mL working stock you're using?</div>
+      <div style={stepHint}>This is the ~4 mg/mL stock. Pick the tube number that was pulled.</div>
+      <div style={pillRow}>
+        {NUM_OPTS.map(function(n){
+          return <button key={n} style={pillStyle(n === num)} onClick={function(){setNum(n);}}>{n}</button>;
+        })}
+        <button style={pillPlusStyle} onClick={promptForHigherNum}>+ higher</button>
+      </div>
+    </div>
+    <div>
+      <div style={stepLabel}>Step 2</div>
+      <div style={stepQ}>Which working stock tube (1 mg/mL) are you using?</div>
+      <div style={stepHint}>These are the tubes made from the concentrated tube after diluting to 1 mg/mL. Pick the letter.</div>
+      <div style={pillRow}>
+        {LETTER_OPTS.map(function(l){
+          return <button key={l} style={pillStyle(l === letter)} onClick={function(){setLetter(l);}}>{l}</button>;
+        })}
+        <button style={pillPlusStyle} onClick={promptForHigherLetter}>+ more</button>
+      </div>
+    </div>
+    <div style={{padding:"10px 12px",background:"#fafbfd",border:"1px dashed "+C.divider,borderRadius:5,marginBottom:12}}>
+      <div style={{fontSize:10.5,fontWeight:700,color:C.slate,textTransform:"uppercase",letterSpacing:0.4,marginBottom:4}}>Full identifier</div>
+      <div style={{fontSize:15,fontWeight:700,color:C.ink,fontFamily:"ui-monospace,Menlo,monospace"}}>
+        <span style={{color:C.slate,fontWeight:500}}>{SCRIBE_GFP_WORKING_STOCK.prefix}.</span>
+        <span style={{color:C.purpleDeep,background:"rgba(155,109,199,0.20)",padding:"0 2px",borderRadius:2}}>{num || "?"}{letter || "?"}</span>
+      </div>
+    </div>
+    <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+      <button
+        onClick={props.onCancel}
+        style={{padding:"7px 16px",fontSize:12,fontWeight:600,color:C.slate,background:"#fff",border:"1px solid "+C.divider,borderRadius:5,cursor:"pointer",fontFamily:"inherit"}}
+      >Cancel</button>
+      <button
+        onClick={function(){ if (num && letter) props.onSave(num, letter); }}
+        disabled={!num || !letter}
+        style={{padding:"7px 16px",fontSize:12,fontWeight:700,color:"#fff",background:C.purple,border:"1px solid "+C.purple,borderRadius:5,cursor:(num && letter)?"pointer":"not-allowed",fontFamily:"inherit",opacity:(num && letter)?1:0.5}}
+      >Save</button>
     </div>
   </div>;
 }
