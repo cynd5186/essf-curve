@@ -17822,6 +17822,23 @@ function ScribeCard(props) {
 
   // ─── FILL: click-to-edit inline field ─────────────────────────────────
   // Returns JSX for a purple-highlighted click-to-edit span. Used everywhere
+  // Inline text-edit state — when non-null, the given text field renders as
+  // an inline input instead of a span. Cleared on commit/cancel. This is
+  // separate from `editing` (which is used for dropdowns and date picker),
+  // because text fields don't need to be anchored via getBoundingClientRect —
+  // they edit in place within the paragraph flow.
+  var _inlineHook = useState(null);
+  var inlineEditKey = _inlineHook[0], setInlineEditKey = _inlineHook[1];
+
+  // Ref for the currently-inline text input, so we can focus it after mount
+  var inlineInputRef = useRef(null);
+  useEffect(function(){
+    if (inlineEditKey && inlineInputRef.current) {
+      inlineInputRef.current.focus();
+      if (inlineInputRef.current.select) inlineInputRef.current.select();
+    }
+  }, [inlineEditKey]);
+
   // in the paragraphs (like the mockup's f() function).
   var F = function(key, opts){
     opts = opts || {};
@@ -17830,17 +17847,90 @@ function ScribeCard(props) {
     var val = field.value;
     var placeholder = opts.placeholder;
     var isMissing = opts.requiredEmpty && !val;
+
+    // Inline edit mode: text fields become an <input> in place. Special
+    // exception for receivalDate (date picker) and receivalInitials when in
+    // "Other" text-override mode — those still use the popup editor.
+    var isTextType = field.type === "text";
+    var isDateField = key === "receivalDate";
+    var isInlineable = isTextType && !isDateField;
+
+    if (isInlineable && inlineEditKey === key) {
+      // Compute a reasonable width from current value length
+      var displayVal = val || "";
+      var widthCh = Math.max(6, displayVal.length + 2);
+      return <input
+        ref={inlineInputRef}
+        type="text"
+        defaultValue={val || ""}
+        onKeyDown={function(e){
+          if (e.key === "Enter") {
+            commitInlineText(key, e.target.value);
+          } else if (e.key === "Escape") {
+            setInlineEditKey(null);
+          }
+        }}
+        onBlur={function(e){
+          commitInlineText(key, e.target.value);
+        }}
+        style={{
+          display: "inline-block",
+          width: widthCh + "ch",
+          minWidth: "60px",
+          padding: "0 4px",
+          fontSize: "inherit",
+          fontFamily: "inherit",
+          color: C.purpleDeep,
+          fontWeight: 600,
+          background: "#fff",
+          border: "1.5px solid " + C.purple,
+          borderRadius: 3,
+          outline: "none",
+          verticalAlign: "baseline",
+        }}
+      />;
+    }
+
     if (!val && !placeholder) val = "—";
     if (isMissing) {
-      return <span style={s.fillNeeded} onClick={function(e){startEdit(e, key);}}>{placeholder || "click to specify"}</span>;
+      return <span style={s.fillNeeded} onClick={function(e){
+        if (isInlineable) { setInlineEditKey(key); }
+        else { startEdit(e, key); }
+      }}>{placeholder || "click to specify"}</span>;
     }
     var style = (field.type === "select") ? s.fillDropdown : s.fill;
     return (
-      <span style={style} onClick={function(e){startEdit(e, key);}}>
+      <span style={style} onClick={function(e){
+        if (isInlineable) { setInlineEditKey(key); }
+        else { startEdit(e, key); }
+      }}>
         {val}
         {field.type === "select" && <span style={{position:"absolute",right:4,top:"50%",transform:"translateY(-50%)",fontSize:9,color:C.purple,pointerEvents:"none"}}>▾</span>}
       </span>
     );
+  };
+
+  // Commit inline text edit. Runs the same post-commit formatters as commitEdit
+  // (assayVolume normalization etc.) so behavior is consistent.
+  var commitInlineText = function(key, newVal){
+    var finalVal = newVal;
+    if (key === "assayVolume" && finalVal) {
+      var raw = String(finalVal).trim();
+      var isMicroL = /µ?u?l\b/i.test(raw) && !/ml\b/i.test(raw);
+      var mch = raw.match(/-?\d*\.?\d+/);
+      if (mch) {
+        var num = parseFloat(mch[0]);
+        if (isFinite(num)) {
+          if (isMicroL) num = num / 1000;
+          finalVal = num.toFixed(1) + " mL";
+        }
+      }
+    }
+    update(function(n){
+      if (n[key]) n[key].value = finalVal;
+      n._copied = {};
+    });
+    setInlineEditKey(null);
   };
 
   // ─── EDIT: inline editor for a field ──────────────────────────────────
@@ -17921,12 +18011,12 @@ function ScribeCard(props) {
     if (fate === "stored") {
       var durationInline = st.storageDuration.value.trim()
         ? <span>&nbsp;{F("storageDuration")}</span>
-        : <span>&nbsp;<span style={{fontSize:10.5,fontWeight:600,color:C.slate,background:"#f4f6fb",border:"1px dashed "+C.divider,borderRadius:2,padding:"0 4px",cursor:"pointer"}} onClick={function(e){startEdit(e, "storageDuration");}}>+ duration</span></span>;
+        : <span>&nbsp;<span style={{fontSize:10.5,fontWeight:600,color:C.slate,background:"#f4f6fb",border:"1px dashed "+C.divider,borderRadius:2,padding:"0 4px",cursor:"pointer"}} onClick={function(){setInlineEditKey("storageDuration");}}>+ duration</span></span>;
       middleClause = <span>{F("receivalFate")} at {F("storageCondition")}{durationInline}</span>;
     } else {
       middleClause = F("receivalFate");
     }
-    return <span>{datePart}: Sample dropped off and {middleClause}. Received by {initialsPart}.</span>;
+    return <span>Sample was dropped off on {datePart} and received by {initialsPart}, then {middleClause}.</span>;
   };
 
   // ─── SAMPLE PREP BLOCK (b2, prep sub) ─────────────────────────────────
@@ -18058,51 +18148,51 @@ function ScribeCard(props) {
 
   // ─── SST BLOCK (b4) ───────────────────────────────────────────────────
   var renderSST = function(){
+    // Small toggle bar at top — Yes/No, defaults to Yes. UI-only, not copied.
+    var toggleBar = <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:10,fontSize:12,userSelect:"none"}} data-ui-only="true">
+      <span style={{fontWeight:700,color:C.slate}}>SST used?</span>
+      <button
+        onClick={function(){update(function(n){n.sstUsed = true; n._copied = {};});}}
+        style={{
+          padding:"3px 12px",fontSize:11,fontWeight:700,fontFamily:"inherit",cursor:"pointer",borderRadius:4,
+          border:"1px solid "+C.purple,
+          background: st.sstUsed ? C.purple : "#fff",
+          color: st.sstUsed ? "#fff" : C.purpleDeep,
+        }}
+      >Yes</button>
+      <button
+        onClick={function(){update(function(n){n.sstUsed = false; n._copied = {};});}}
+        style={{
+          padding:"3px 12px",fontSize:11,fontWeight:700,fontFamily:"inherit",cursor:"pointer",borderRadius:4,
+          border:"1px solid "+(st.sstUsed ? C.divider : C.amber),
+          background: !st.sstUsed ? C.amber : "#fff",
+          color: !st.sstUsed ? "#fff" : C.slate,
+        }}
+      >No</button>
+    </div>;
+
     if (st.sstUsed) {
       var t = st.sstTrace || {};
       var traceUI = renderTraceInline(t, "SST", "sstTrace");
-      // Compact confirm strip (UI-only, excluded from copy)
-      var stripInner;
-      if (t.protein === "GFP" && t.source === "in-house" && t.sourceDetail && t.sourceDetail.indexOf(SCRIBE_GFP_WORKING_STOCK.prepId) === 0) {
-        var suffix = t.sourceDetail.slice(SCRIBE_GFP_WORKING_STOCK.prepId.length);
-        stripInner = <span><strong>GFP</strong> working stock, vial <span style={{fontWeight:700}} onClick={function(){promptGFPSuffix("sstTrace");}}>{suffix || <em style={{color:C.amber}}>[vial]</em>}</span>, {t.concentration || "—"} — meets ICH M10 (±20%)</span>;
-      } else if (t.protein) {
-        stripInner = <span><strong>{t.protein}</strong>, {t.concentration || "no conc"} — {t.sourceDetail || "no lot"}</span>;
-      } else {
-        stripInner = <span>Click ✎ to configure SST</span>;
-      }
       return <div>
-        <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",padding:"8px 10px",marginBottom:10,background:C.purpleTint,border:"1px solid "+C.purple,borderRadius:5,fontSize:12,userSelect:"none"}} data-ui-only="true">
-          <span style={{fontWeight:700,color:C.purpleDeep}}>☑ SST used —</span>
-          <span style={{flex:1}}>{stripInner}</span>
-          <span style={{display:"flex",gap:8,marginLeft:"auto"}}>
-            <span style={{padding:"3px 8px",background:"#fff",border:"1px solid "+C.purple,borderRadius:4,fontSize:11,fontWeight:600,color:C.purpleDeep,cursor:"pointer"}} onClick={function(){openTraceModal("sstTrace", "SST");}}>✎</span>
-            <span style={{padding:"3px 8px",background:"#fff",border:"1px solid "+C.purple,borderRadius:4,fontSize:11,fontWeight:600,color:C.purpleDeep,cursor:"pointer"}} onClick={function(){update(function(n){n.sstUsed = false; n.sstConfirmed = false; n._copied = {};});}}>✗ No SST</span>
-          </span>
-        </div>
+        {toggleBar}
         <div data-copy-block="true">
           A system suitability standard was processed alongside the submitted samples using the same dilution scheme: {traceUI}. It met its acceptance criterion of {F("sstAcceptance")}.
         </div>
       </div>;
     }
-    // SST unchecked
+
+    // SST NOT used — force a rationale
     var reasonVal = (st.sstDeclineReason && st.sstDeclineReason.value) ? st.sstDeclineReason.value.trim() : "";
     if (reasonVal) {
       return <div>
-        <div style={{display:"flex",alignItems:"center",gap:8,padding:"8px 10px",marginBottom:10,background:"#fff8ea",border:"1px solid "+C.amberBorder,borderRadius:5,fontSize:12,userSelect:"none"}} data-ui-only="true">
-          <span style={{fontWeight:700,color:C.amber}}>☐ SST NOT used</span>
-          <span style={{marginLeft:"auto",padding:"3px 8px",background:"#fff",border:"1px solid "+C.purple,borderRadius:4,fontSize:11,fontWeight:600,color:C.purpleDeep,cursor:"pointer"}} onClick={function(){update(function(n){n.sstUsed = true; n._copied = {};});}}>✓ Re-enable SST</span>
-        </div>
+        {toggleBar}
         <div data-copy-block="true">No system suitability standard was processed for this run. Reason: {F("sstDeclineReason")}.</div>
       </div>;
     }
-    // Awaiting reason
     return <div>
-      <div style={{display:"flex",alignItems:"center",gap:8,padding:"8px 10px",marginBottom:10,background:"#fff8ea",border:"1px solid "+C.amberBorder,borderRadius:5,fontSize:12,userSelect:"none"}} data-ui-only="true">
-        <span style={{fontWeight:700,color:C.amber}}>☐ SST NOT used</span>
-        <span style={{marginLeft:"auto",padding:"3px 8px",background:"#fff",border:"1px solid "+C.purple,borderRadius:4,fontSize:11,fontWeight:600,color:C.purpleDeep,cursor:"pointer"}} onClick={function(){update(function(n){n.sstUsed = true; n._copied = {};});}}>✓ Re-enable SST</span>
-      </div>
-      <div data-copy-block="true">Reason SST was not used: <span style={s.fillNeeded} onClick={function(e){startEdit(e, "sstDeclineReason");}}>click to enter</span>.</div>
+      {toggleBar}
+      <div data-copy-block="true">No system suitability standard was processed for this run. Reason: <span style={s.fillNeeded} onClick={function(){setInlineEditKey("sstDeclineReason");}}>click to enter rationale (required)</span>.</div>
     </div>;
   };
 
@@ -18110,7 +18200,7 @@ function ScribeCard(props) {
   var renderVolume = function(){
     var v = st.assayVolume.value.trim();
     if (v) return <span>Assay volume used: {F("assayVolume")}.</span>;
-    return <span>Assay volume used: <span style={s.fillNeeded} onClick={function(e){startEdit(e, "assayVolume");}}>click to enter</span>.</span>;
+    return <span>Assay volume used: <span style={s.fillNeeded} onClick={function(){setInlineEditKey("assayVolume");}}>click to enter</span>.</span>;
   };
 
   // ─── STANDARD CURVE INFO BLOCK (b5) ───────────────────────────────────
@@ -18129,10 +18219,10 @@ function ScribeCard(props) {
     if (st._checklist.curveEquation) {
       var slopeUI = st.slope.value
         ? F("slope")
-        : <span style={s.fillNeeded} onClick={function(e){startEdit(e, "slope");}}>click to enter slope + units</span>;
+        : <span style={s.fillNeeded} onClick={function(){setInlineEditKey("slope");}}>click to enter slope + units</span>;
       var interceptUI = st.intercept.value
         ? F("intercept")
-        : <span style={s.fillNeeded} onClick={function(e){startEdit(e, "intercept");}}>click to enter intercept + units</span>;
+        : <span style={s.fillNeeded} onClick={function(){setInlineEditKey("intercept");}}>click to enter intercept + units</span>;
       equationInline = <span>&nbsp;The calibration curve produced a slope of {slopeUI} with a y-intercept of {interceptUI}.</span>;
     }
     return <span>{baseText}{checklistSentences ? " " + checklistSentences : ""}{equationInline}</span>;
@@ -18170,12 +18260,13 @@ function ScribeCard(props) {
       var cond     = (st.storageCondition.value  || "").trim();
       var duration = (st.storageDuration.value   || "").trim();
       var initials = (st.receivalInitials.value  || "").trim();
-      var datePart = date ? date + ": " : "";
       var middle = fate === "stored"
         ? "stored at " + cond + (duration ? " " + duration : "")
         : fate;
-      var initialsPart = initials ? " Received by " + initials + "." : "";
-      return datePart + "Sample dropped off and " + middle + "." + initialsPart;
+      // New sentence: "Sample was dropped off on [date] and received by [initials], then [fate]."
+      var datePhrase = date ? " on " + date : "";
+      var initialsPhrase = initials ? " and received by " + initials : "";
+      return "Sample was dropped off" + datePhrase + initialsPhrase + ", then " + middle + ".";
     }
     if (id === "b2") {
       // Serialize the two paragraphs — mirror what renderPrep and renderAssay produce,
@@ -18477,6 +18568,14 @@ function ScribeFieldEditor(props) {
   var _v = useState(props.initialValue || "");
   var val = _v[0], setVal = _v[1];
   var ref = useRef(null);
+  // Hovered index for custom-menu (Option A) — starts on current value
+  var initialHovered = 0;
+  if (field && field.type === "select" && field.options && !props.forceText) {
+    var idx = field.options.indexOf(props.initialValue || "");
+    if (idx >= 0) initialHovered = idx;
+  }
+  var _hh = useState(initialHovered);
+  var hovered = _hh[0], setHovered = _hh[1];
 
   useEffect(function(){
     if (ref.current) {
@@ -18484,6 +18583,33 @@ function ScribeFieldEditor(props) {
       if (ref.current.select) ref.current.select();
     }
   }, []);
+
+  // Keyboard nav for custom menu (arrow keys + Enter + Escape)
+  useEffect(function(){
+    if (!(field && field.type === "select" && !props.forceText)) return;
+    var opts = field.options || [];
+    var onKey = function(e){
+      if (e.key === "ArrowDown") { e.preventDefault(); setHovered(function(h){ return (h + 1) % opts.length; }); }
+      else if (e.key === "ArrowUp") { e.preventDefault(); setHovered(function(h){ return (h - 1 + opts.length) % opts.length; }); }
+      else if (e.key === "Enter") { e.preventDefault(); props.onCommit(opts[hovered]); }
+      else if (e.key === "Escape") { props.onCancel(); }
+    };
+    document.addEventListener("keydown", onKey);
+    return function(){ document.removeEventListener("keydown", onKey); };
+  }, [hovered, field, props.forceText]);
+
+  // Outside-click closes the menu
+  useEffect(function(){
+    if (!(field && field.type === "select" && !props.forceText)) return;
+    var onClick = function(e){
+      if (ref.current && !ref.current.contains(e.target)) {
+        props.onCancel();
+      }
+    };
+    // Delay so the click that opened the menu doesn't immediately close it
+    var t = setTimeout(function(){ document.addEventListener("mousedown", onClick); }, 50);
+    return function(){ clearTimeout(t); document.removeEventListener("mousedown", onClick); };
+  }, [field, props.forceText]);
 
   // Native date picker for receivalDate
   if (props.editingKey === "receivalDate") {
@@ -18503,23 +18629,52 @@ function ScribeFieldEditor(props) {
     </div>;
   }
 
+  // Select field — Option A: custom menu that opens immediately, no closed-dropdown-box step.
   if (field && field.type === "select" && !props.forceText) {
-    return <div style={{position:"fixed",left:props.anchorRect.left,top:props.anchorRect.top + 4,zIndex:1000,background:"#fff",border:"1.5px solid #9B6DC7",borderRadius:5,padding:"6px 8px",boxShadow:"0 4px 12px rgba(11,42,111,0.20)"}}>
-      <select
-        ref={ref}
-        value={val}
-        onChange={function(e){
-          setVal(e.target.value);
-          props.onCommit(e.target.value);
-        }}
-        onBlur={function(){ props.onCommit(val); }}
-        onKeyDown={function(e){ if (e.key === "Escape") props.onCancel(); }}
-        style={{padding:"3px 6px",fontSize:12,border:"1px solid #9B6DC7",borderRadius:3,fontFamily:"inherit",minWidth:120}}
-      >
-        {(field.options || []).map(function(opt){
-          return <option key={opt} value={opt}>{opt || "— none —"}</option>;
-        })}
-      </select>
+    var options = field.options || [];
+    return <div
+      ref={ref}
+      tabIndex={-1}
+      style={{
+        position: "fixed",
+        left: props.anchorRect.left,
+        top: props.anchorRect.top + 4,
+        zIndex: 1000,
+        background: "#fff",
+        border: "1.5px solid #9B6DC7",
+        borderRadius: 6,
+        boxShadow: "0 6px 18px rgba(11,42,111,0.16)",
+        minWidth: 200,
+        maxHeight: 240,
+        overflowY: "auto",
+        padding: "4px 0",
+        outline: "none",
+      }}
+    >
+      {options.map(function(opt, i){
+        var isCurrent = opt === val;
+        var isHovered = i === hovered;
+        return <div
+          key={opt || "__empty__"}
+          onClick={function(){ props.onCommit(opt); }}
+          onMouseEnter={function(){ setHovered(i); }}
+          style={{
+            padding: "8px 14px",
+            fontSize: 13,
+            color: isCurrent ? "#6b3fa0" : "#0b2a6f",
+            fontWeight: isCurrent ? 700 : 400,
+            background: isHovered ? "#f2eafa" : (isCurrent ? "rgba(155,109,199,0.06)" : "transparent"),
+            cursor: "pointer",
+            userSelect: "none",
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+          }}
+        >
+          <span style={{width:12,color:"#9B6DC7",fontWeight:700,textAlign:"center",fontSize:12,flexShrink:0}}>{isCurrent ? "✓" : ""}</span>
+          <span>{opt || "— none —"}</span>
+        </div>;
+      })}
     </div>;
   }
 
