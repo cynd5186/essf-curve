@@ -19831,20 +19831,6 @@ function ScribeAssayMultiSelect(props) {
     gap: 8,
     cursor: "pointer",
   };
-  var cbStyle = function(checked){ return {
-    width: 14,
-    height: 14,
-    borderRadius: 3,
-    border: "1.5px solid " + (checked ? "#6a3fb5" : "#b8c4d8"),
-    background: checked ? "#6a3fb5" : "#fff",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    color: "#fff",
-    fontSize: 10,
-    fontWeight: 700,
-    flexShrink: 0,
-  };};
 
   var ORDER = ["bca", "bradford", "p660", "df"];
   return <span ref={wrapRef} style={{position:"relative",display:"inline-block"}}>
@@ -19862,7 +19848,12 @@ function ScribeAssayMultiSelect(props) {
           onMouseEnter={function(e){ e.currentTarget.style.background = "#f4f6fb"; }}
           onMouseLeave={function(e){ e.currentTarget.style.background = "transparent"; }}
         >
-          <span style={cbStyle(checked)}>{checked ? "✓" : ""}</span>
+          <input
+            type="checkbox"
+            checked={checked}
+            readOnly
+            style={{width:14,height:14,accentColor:"#6a3fb5",cursor:"pointer",margin:0,flexShrink:0}}
+          />
           <span style={{color:"#0b2a6f"}}>{LABELS[key]}</span>
         </div>;
       })}
