@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { LoginGate, HeaderUserBadge, useAuth } from "./auth.jsx";
+import SampleBatchEditor from "./SampleBatchEditor.jsx";
 
 // ─────────────────────────────────────────────────────────────────────────
 //  TEMPORARY: AUTH DISABLED FOR LOCAL TESTING
@@ -32,9 +33,9 @@ var FEATURES = {
   compatibility: true,  // Buffer/reagent interference tool (Pierce protein assays). Enabled.
   scribe: true,         // Method-description template generator. Enabled.
   bioburden: true,      // CFU bioburden assay (USP <61>/<62>-style). Enabled v1.
-  limsFormatter: false, // OLD LIMS Formatter — DISABLED. Will be replaced by SampleBatchEditor
-                        // (Sample & Batch ID Editor, imported verbatim from eSSF Helper as a
-                        // single source of truth). Tile renders greyed-out in the meantime.
+  limsFormatter: true,  // Sample & Batch ID Editor — verbatim import of SampleBatchEditor.jsx
+                        // from eSSF Helper (single source of truth). Tile is user-facing "Editor";
+                        // flag key kept as limsFormatter for minimal churn across existing refs.
 };
 
 var avg = function(a) { return a.length ? a.reduce(function(s,v){return s+v;},0)/a.length : 0; };
@@ -14065,8 +14066,8 @@ function ChooserScreen(props){
               <line x1="19" y1="16" x2="19" y2="22" stroke={FEATURES.limsFormatter ? "#1e4470" : "#888780"} strokeWidth="0.6" />
             </svg>
           ),
-          name: "LIMS Formatter",
-          desc: "Pair samples with batch IDs in the exact form LIMS expects",
+          name: "Editor",
+          desc: "Build sample name + batch ID lists for the eSSF request form",
           enabled: FEATURES.limsFormatter,
           onClick: function(){ onChoose("limsFormatter"); },
         })}
@@ -17573,12 +17574,160 @@ var SCRIBE_ASSAY_DEFAULTS = {
 // Utility: build a fresh state for a given prep + assay combination.
 // Preserves cross-template values (SST toggle, receival, notes, checklist).
 // ─────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────
+// C1 transformer — converts the existing Plate Assay scribeCfgContext (built
+// at ~line 26727, produces { templateId, values, checks }) into the NEW
+// prefill object shape that ScribeCard accepts. Also runs sample-name
+// inference from cfg.names.
+//
+// Kept as a separate function so the 163-line extraction logic upstream
+// stays untouched — we just translate its output.
+// ─────────────────────────────────────────────────────────────────────────
+function scribeCfgContextToPrefill(cfgContext, cfg) {
+  if (!cfgContext) return null;
+  var vals = cfgContext.values || {};
+  var checks = cfgContext.checks || {};
+  // Template ID → new assayKey. "fluor" maps to "df", "bca" stays, "bradford" stays.
+  var assayKeyMap = { fluor: "df", bca: "bca", bradford: "bradford", p660: "p660" };
+  var assayKey = assayKeyMap[cfgContext.templateId] || "bca";
+  // Sample-name inference (returns { prepKey, confidence })
+  var sampleNames = [];
+  if (cfg && cfg.names) {
+    sampleNames = String(cfg.names).split(/[\r\n,;]+/).map(function(s){return s.trim();}).filter(Boolean);
+  }
+  var inference = scribeInferPrepFromSampleNames(sampleNames);
+  var prepKey = inference.prepKey || "pellet_sup";  // default when inference fails
+  var prepInferred = inference.confidence === "high";
+  var prefill = {
+    prepKey: prepKey,
+    assayKey: assayKey,
+    prepInferred: prepInferred,
+    assayInferred: false,  // assay comes from template pick, always certain
+  };
+  if (vals.r2) prefill.r2 = vals.r2;
+  if (vals.slope) prefill.slope = vals.slope;
+  if (vals.intercept) prefill.intercept = vals.intercept;
+  if (vals.cvThreshold) prefill.cvThreshold = vals.cvThreshold + "%";
+  if (vals.sampleReps)  prefill.sampleReps = vals.sampleReps;
+  if (vals.stdReplicates) prefill.stdReps = vals.stdReplicates;
+  if (vals.sampleVol) prefill.assayVolume = vals.sampleVol;
+  var standardTrace = {};
+  if (cfg && cfg.sn) standardTrace.protein = cfg.sn;
+  if (vals.stdStockConc) {
+    standardTrace.concentration = vals.stdStockConc + (vals.unit ? " " + vals.unit : " mg/mL");
+  }
+  if (Object.keys(standardTrace).length > 0) prefill.standardTrace = standardTrace;
+  if (checks.linearRegression) prefill.fitType = "Linear regression";
+  if (checks.dilutionalLinearity) prefill.strategy = "Literature-backed (ICH M10)";
+  return prefill;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Sample-name inference — detect likely prep type from sample naming.
+// Called by C1 (Plate Assay → Scribe embed) to pre-populate the prep dropdown,
+// then surface an inline confirm prompt so analyst can verify.
+//
+// Returns { prepKey, confidence } where:
+//   confidence "high" → show inline confirm ("Detected X — right?")
+//   confidence "low"  → silent fallback to default, no prompt
+//
+// Patterns (from real lab conventions):
+//   Pellet + supernatant: samples end in P or S with a preceding number,
+//     e.g. "1P", "1S", "BR1210P", "BR1210S". Detected when ≥2 pairs found.
+//   Fractions: names starting with "Fraction" (case-insensitive) or matching
+//     a column-fraction pattern like "F1"/"A1"/"B2" for ≥3 samples.
+//   Lysate/eluate: names containing "lysate", "eluate", "elution", "flowthrough"
+//     (case-insensitive). Detected when ≥1 match.
+// ─────────────────────────────────────────────────────────────────────────
+function scribeInferPrepFromSampleNames(sampleNames) {
+  if (!sampleNames || !sampleNames.length) return { prepKey: null, confidence: "none" };
+  var names = sampleNames.filter(function(n){ return n && String(n).trim(); }).map(String);
+  if (!names.length) return { prepKey: null, confidence: "none" };
+  // Pellet + supernatant pattern: matches names ending in P or S with digits before
+  // e.g. "1P", "12P", "BR1210P", "Sample3P". Requires BOTH P and S present.
+  var pelletCount = names.filter(function(n){ return /\d+\s*[Pp]\s*$/.test(n) || /_[Pp]$/.test(n); }).length;
+  var supCount    = names.filter(function(n){ return /\d+\s*[Ss]\s*$/.test(n) || /_[Ss]$/.test(n); }).length;
+  if (pelletCount >= 1 && supCount >= 1 && (pelletCount + supCount) >= names.length * 0.6) {
+    return { prepKey: "pellet_sup", confidence: "high" };
+  }
+  // Lysate / eluate keywords (checked before "fractions" — fractions is more generic)
+  var lysateHits = names.filter(function(n){
+    return /lysate|eluate|elution|flowthrough|flow[\s-]?through/i.test(n);
+  }).length;
+  if (lysateHits >= 1 && lysateHits >= names.length * 0.5) {
+    return { prepKey: "lysate_eluate", confidence: "high" };
+  }
+  // Fraction pattern: "Fraction X" explicit, or column-position like A1/B2/C3
+  // (needs at least 3 samples with such patterns for confidence)
+  var explicitFractionHits = names.filter(function(n){ return /^fraction/i.test(n) || /^frac[.\s]/i.test(n); }).length;
+  var columnFractionHits = names.filter(function(n){ return /^[A-H]\d{1,2}$/.test(n.trim()); }).length;
+  if (explicitFractionHits >= names.length * 0.5) return { prepKey: "fractions", confidence: "high" };
+  if (columnFractionHits >= 3 && columnFractionHits >= names.length * 0.6) return { prepKey: "fractions", confidence: "high" };
+  // Nothing matched with confidence
+  return { prepKey: null, confidence: "none" };
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// A2 paired workflow: build the "second assay" state cluster.
+// Only fields needed for split blocks (b4 SST, b5 Standard Curve) are
+// included, plus b2 method-specific fields (sop, wavelength, plate, etc.)
+// so the second method paragraph can render. Shared fields (assayVolume,
+// sampleReps, receival) live only in the primary st.
+// ─────────────────────────────────────────────────────────────────────────
+function scribeBuildSecondAssayCluster(assayKey) {
+  var assay = SCRIBE_ASSAY_DEFAULTS[assayKey] || {};
+  return {
+    _assayKey: assayKey,
+    // b4 SST
+    sstUsed:          true,
+    sstConfirmed:     false,
+    sstDeclineReason: { value: "", type: "text" },
+    sstTrace:         Object.assign({}, assay.sstTrace || { protein: "BSA", proteinCustom: "", source: "", sourceDetail: "", concentration: "" }),
+    sstAcceptance:    assay.sstAcceptance ? Object.assign({}, assay.sstAcceptance) : { value: SCRIBE_ICH_M10_ACCEPTANCE, type: "text" },
+    // b5 Standard Curve
+    r2:            assay.r2         ? Object.assign({}, assay.r2)         : { value: "", type: "text" },
+    slope:         assay.slope      ? Object.assign({}, assay.slope)      : { value: "", type: "text" },
+    intercept:     assay.intercept  ? Object.assign({}, assay.intercept)  : { value: "", type: "text" },
+    fitType:       assay.fitType    ? Object.assign({}, assay.fitType)    : { value: "Linear regression", type: "select", options: SCRIBE_FIT_OPTS },
+    strategy:      assay.strategy   ? Object.assign({}, assay.strategy)   : { value: "Literature-backed (ICH M10)", type: "select", options: SCRIBE_STRATEGY_OPTS },
+    cvThreshold:   assay.cvThreshold? Object.assign({}, assay.cvThreshold): { value: "10%", type: "select", options: SCRIBE_CV_OPTS },
+    // b2 method-specific (for rendering the second paragraph)
+    sop:           assay.sop           ? Object.assign({}, assay.sop)           : { value: "", type: "text" },
+    proteinName:   assay.proteinName   ? Object.assign({}, assay.proteinName)   : { value: "", type: "text" },
+    kitVendor:     assay.kitVendor     ? Object.assign({}, assay.kitVendor)     : { value: "", type: "text" },
+    stdBuffer:     assay.stdBuffer     ? Object.assign({}, assay.stdBuffer)     : { value: "", type: "text" },
+    stdRangeHigh:  assay.stdRangeHigh  ? Object.assign({}, assay.stdRangeHigh)  : { value: "", type: "text" },
+    stdRangeLow:   assay.stdRangeLow   ? Object.assign({}, assay.stdRangeLow)   : { value: "", type: "text" },
+    stdRangeLowManual: false,
+    stdRangeHighManual: false,
+    firstDil:      assay.firstDil      ? Object.assign({}, assay.firstDil)      : { value: "1:1", type: "text" },
+    serialDil:     assay.serialDil     ? Object.assign({}, assay.serialDil)     : { value: "1:2", type: "text" },
+    numPoints:     assay.numPoints     ? Object.assign({}, assay.numPoints)     : { value: "7", type: "text" },
+    stdReps:       assay.stdReps       ? Object.assign({}, assay.stdReps)       : { value: "triplicate", type: "select", options: SCRIBE_REPLICATE_OPTS },
+    plate:         assay.plate         ? Object.assign({}, assay.plate)         : { value: "", type: "text" },
+    wavelength:    assay.wavelength    ? Object.assign({}, assay.wavelength)    : { value: "", type: "text" },
+    reader:        assay.reader        ? Object.assign({}, assay.reader)        : { value: "", type: "text" },
+    standardTrace: Object.assign({}, assay.standardTrace || { protein: "BSA", proteinCustom: "", source: "", sourceDetail: "", concentration: "" }),
+    // DF-only
+    blankSubstance: assay.blankSubstance ? Object.assign({}, assay.blankSubstance) : null,
+    // Copy status (for green-dot logic on this half)
+    _copied:  {},
+    _touched: {},
+  };
+}
+
 function scribeBuildState(prepKey, assayKey, preserved) {
   var prep = SCRIBE_PREP_DEFAULTS[prepKey] || {};
   var assay = SCRIBE_ASSAY_DEFAULTS[assayKey] || {};
   var st = {
     _prepKey: prepKey,
     _assayKey: assayKey,
+    // A2 paired workflow: when non-null, indicates a second assay is active.
+    // The primary is total-protein (bca/bradford/p660) OR df; the second is
+    // whichever is the missing piece. State cluster for the second assay is
+    // built lazily by scribeBuildSecondAssayCluster() and stored in _secondAssay.
+    _secondAssayKey:  (preserved && preserved._secondAssayKey) || null,
+    _secondAssay:     (preserved && preserved._secondAssay) || null,
     sstUsed:          (preserved && preserved.sstUsed !== undefined) ? preserved.sstUsed : true,
     sstConfirmed:     (preserved && preserved.sstConfirmed) || false,
     sstDeclineReason: (preserved && preserved.sstDeclineReason) || { value: "", type: "text" },
@@ -17597,6 +17746,10 @@ function scribeBuildState(prepKey, assayKey, preserved) {
     _showChecklistPopover: false,
     _modalOpen:       null,  // null | { key: "standardTrace"|"sstTrace", label, forSST }
     _modalTrace:      null,  // copy of the trace being edited
+    // C1: which auto-inferences has analyst responded to.
+    // Fields: prepKey ("pending"|"confirmed"|"changed"), assayKey (same).
+    // Only shown as inline confirm when value === "pending".
+    _confirms:        (preserved && preserved._confirms) || {},
   };
   // Deep-copy prep + assay templates into state
   for (var k in prep) st[k] = JSON.parse(JSON.stringify(prep[k]));
@@ -17781,11 +17934,49 @@ function ScribeCard(props) {
     else if (d === "greg")     autoInitials = "GKB";
     else if (d === "cyndell")  autoInitials = "CGS";
   }
+  // C1: optional prefill object from Plate Assay embed context.
+  // Shape: { prepKey, assayKey, prepInferred, assayInferred, standardTrace,
+  //          sstTrace, fitType, r2, slope, intercept, strategy, cvThreshold,
+  //          sampleReps, stdReps, assayVolume, sstUsed, sstAcceptance }
+  // When absent (landing-tile launch), Scribe uses standard defaults.
+  var prefill = props.prefill || null;
   var _stateHook = useState(function(){
-    var initial = scribeBuildState("pellet_sup", "df", null);
+    var prepKey  = (prefill && prefill.prepKey)  || "pellet_sup";
+    var assayKey = (prefill && prefill.assayKey) || "df";
+    var initial = scribeBuildState(prepKey, assayKey, null);
     // Apply auto-init to receivalInitials if user was recognized
     if (autoInitials && initial.receivalInitials) {
       initial.receivalInitials.value = autoInitials;
+    }
+    // Apply prefill values into fields (overriding defaults)
+    if (prefill) {
+      // Standard curve fields (b5)
+      if (prefill.fitType     && initial.fitType)     initial.fitType.value     = prefill.fitType;
+      if (prefill.r2          && initial.r2)          initial.r2.value          = String(prefill.r2);
+      if (prefill.slope       && initial.slope)       initial.slope.value       = String(prefill.slope);
+      if (prefill.intercept   && initial.intercept)   initial.intercept.value   = String(prefill.intercept);
+      if (prefill.strategy    && initial.strategy)    initial.strategy.value    = prefill.strategy;
+      if (prefill.cvThreshold && initial.cvThreshold) initial.cvThreshold.value = prefill.cvThreshold;
+      if (prefill.sampleReps  && initial.sampleReps)  initial.sampleReps.value  = prefill.sampleReps;
+      if (prefill.stdReps     && initial.stdReps)     initial.stdReps.value     = prefill.stdReps;
+      // b3
+      if (prefill.assayVolume && initial.assayVolume) initial.assayVolume.value = String(prefill.assayVolume);
+      // b4 SST
+      if (prefill.sstUsed !== undefined) initial.sstUsed = prefill.sstUsed;
+      if (prefill.sstAcceptance && initial.sstAcceptance) initial.sstAcceptance.value = prefill.sstAcceptance;
+      // Trace objects (calibration standard + SST)
+      if (prefill.standardTrace && initial.standardTrace) {
+        initial.standardTrace = Object.assign({}, initial.standardTrace, prefill.standardTrace);
+      }
+      if (prefill.sstTrace && initial.sstTrace) {
+        initial.sstTrace = Object.assign({}, initial.sstTrace, prefill.sstTrace);
+      }
+      // Confirm state: only mark as "pending" (needs analyst response) when
+      // the inference is actually uncertain. Certain values (from analysis
+      // template picks) don't get a prompt.
+      initial._confirms = {};
+      if (prefill.prepInferred)  initial._confirms.prepKey  = "pending";
+      if (prefill.assayInferred) initial._confirms.assayKey = "pending";
     }
     return initial;
   });
@@ -17878,6 +18069,58 @@ function ScribeCard(props) {
         _focusedBlock: prev._focusedBlock,
       };
       return scribeBuildState(prev._prepKey, key, preserved);
+    });
+  };
+
+  // A2: setAssays(newPrimary, newSecondary) — handles paired workflow toggles
+  // driven by ScribeAssayMultiSelect. If newSecondary is null and previous had
+  // a second assay, drops the cluster cleanly. If primary changes, rebuilds
+  // primary state (preserving shared fields).
+  var setAssays = function(newPrimary, newSecondary){
+    setSt(function(prev){
+      var primaryChanged = newPrimary !== prev._assayKey;
+      var secondaryChanged = newSecondary !== prev._secondAssayKey;
+      // Build the base state (primary side). Rebuild if primary changed;
+      // otherwise reuse.
+      var base;
+      if (primaryChanged) {
+        var preserved = {
+          sstUsed: prev.sstUsed,
+          sstConfirmed: prev.sstConfirmed,
+          sstDeclineReason: prev.sstDeclineReason,
+          assayVolume: prev.assayVolume,
+          receivalDate: prev.receivalDate,
+          receivalFate: prev.receivalFate,
+          storageCondition: prev.storageCondition,
+          storageUntilDate: prev.storageUntilDate,
+          receivalInitials: prev.receivalInitials,
+          notes: prev.notes,
+          _copied: {},
+          _touched: {},
+          _limsMode: prev._limsMode,
+          _checklist: prev._checklist,
+          _focusedBlock: prev._focusedBlock,
+        };
+        base = scribeBuildState(prev._prepKey, newPrimary, preserved);
+      } else {
+        base = Object.assign({}, prev);
+      }
+      // Now handle the second assay cluster
+      if (secondaryChanged) {
+        if (newSecondary) {
+          // Add or replace second-assay cluster
+          base._secondAssayKey = newSecondary;
+          base._secondAssay = scribeBuildSecondAssayCluster(newSecondary);
+        } else {
+          // Drop cleanly
+          base._secondAssayKey = null;
+          base._secondAssay = null;
+        }
+      } else if (!primaryChanged) {
+        base._secondAssayKey = prev._secondAssayKey;
+        base._secondAssay = prev._secondAssay;
+      }
+      return base;
     });
   };
 
@@ -18095,13 +18338,20 @@ function ScribeCard(props) {
   }, [inlineEditKey]);
 
   // in the paragraphs (like the mockup's f() function).
-  var F = function(key, opts){
+  // F(key, opts, scope) — inline field renderer. scope = null (primary state)
+  // or "sec" (second-assay cluster in st._secondAssay). When scope="sec",
+  // reads/writes go through the second-assay cluster instead of st.
+  var F = function(key, opts, scope){
     opts = opts || {};
-    var field = st[key];
+    var container = (scope === "sec") ? (st._secondAssay || {}) : st;
+    var field = container[key];
     if (!field) return <span style={{color:"#c00"}}>?{key}</span>;
     var val = field.value;
     var placeholder = opts.placeholder;
     var isMissing = opts.requiredEmpty && !val;
+
+    // Scope-qualified inline-edit key: "sec:sop" vs "sop"
+    var inlineKey = scope === "sec" ? ("sec:" + key) : key;
 
     // Inline edit mode: text fields become an <input> in place. Special
     // exception for receivalDate (date picker) and receivalInitials when in
@@ -18110,8 +18360,7 @@ function ScribeCard(props) {
     var isDateField = key === "receivalDate" || key === "storageUntilDate";
     var isInlineable = isTextType && !isDateField;
 
-    if (isInlineable && inlineEditKey === key) {
-      // Compute a reasonable width from current value length
+    if (isInlineable && inlineEditKey === inlineKey) {
       var displayVal = val || "";
       var widthCh = Math.max(6, displayVal.length + 2);
       return <input
@@ -18120,13 +18369,13 @@ function ScribeCard(props) {
         defaultValue={val || ""}
         onKeyDown={function(e){
           if (e.key === "Enter") {
-            commitInlineText(key, e.target.value);
+            commitInlineText(key, e.target.value, scope);
           } else if (e.key === "Escape") {
             setInlineEditKey(null);
           }
         }}
         onBlur={function(e){
-          commitInlineText(key, e.target.value);
+          commitInlineText(key, e.target.value, scope);
         }}
         style={{
           display: "inline-block",
@@ -18149,15 +18398,15 @@ function ScribeCard(props) {
     if (!val && !placeholder) val = "—";
     if (isMissing) {
       return <span style={s.fillNeeded} onClick={function(e){
-        if (isInlineable) { setInlineEditKey(key); }
-        else { startEdit(e, key); }
+        if (isInlineable) { setInlineEditKey(inlineKey); }
+        else { startEdit(e, key, scope); }
       }}>{placeholder || "click to specify"}</span>;
     }
     var style = (field.type === "select") ? s.fillDropdown : s.fill;
     return (
       <span style={style} onClick={function(e){
-        if (isInlineable) { setInlineEditKey(key); }
-        else { startEdit(e, key); }
+        if (isInlineable) { setInlineEditKey(inlineKey); }
+        else { startEdit(e, key, scope); }
       }}>
         {val}
         {field.type === "select" && <span data-ui-only="true" style={{position:"absolute",right:4,top:"50%",transform:"translateY(-50%)",fontSize:9,color:C.purple,pointerEvents:"none"}}>▾</span>}
@@ -18167,7 +18416,8 @@ function ScribeCard(props) {
 
   // Commit inline text edit. Runs the same post-commit formatters as commitEdit
   // (assayVolume normalization etc.) so behavior is consistent.
-  var commitInlineText = function(key, newVal){
+  // scope: null = primary st, "sec" = st._secondAssay cluster
+  var commitInlineText = function(key, newVal, scope){
     var finalVal = newVal;
     if (key === "assayVolume" && finalVal) {
       var raw = String(finalVal).trim();
@@ -18182,8 +18432,18 @@ function ScribeCard(props) {
       }
     }
     update(function(n){
-      if (n[key]) n[key].value = finalVal;
-      n._copied = {};
+      if (scope === "sec") {
+        if (!n._secondAssay) return;
+        // Deep-write to _secondAssay
+        if (n._secondAssay[key]) {
+          n._secondAssay = Object.assign({}, n._secondAssay);
+          n._secondAssay[key] = Object.assign({}, n._secondAssay[key], { value: finalVal });
+          n._secondAssay._copied = {};  // any edit invalidates prior copy on this side
+        }
+      } else {
+        if (n[key]) n[key].value = finalVal;
+        n._copied = {};
+      }
       markTouched(n, blockForField(key));
     });
     setInlineEditKey(null);
@@ -18192,15 +18452,17 @@ function ScribeCard(props) {
   // ─── EDIT: inline editor for a field ──────────────────────────────────
   // Uses a lightweight in-place popover with an input/select.
   var _editHook = useState(null);
-  var editing = _editHook[0], setEditing = _editHook[1];  // { key, anchorRect, value }
+  var editing = _editHook[0], setEditing = _editHook[1];  // { key, scope, anchorRect, value }
 
-  var startEdit = function(ev, key){
+  var startEdit = function(ev, key, scope){
     ev.stopPropagation();
     var rect = ev.currentTarget.getBoundingClientRect();
-    var field = st[key];
+    var container = scope === "sec" ? (st._secondAssay || {}) : st;
+    var field = container[key];
     if (!field) return;
     setEditing({
       key: key,
+      scope: scope || null,
       anchorRect: { left: rect.left, top: rect.bottom, right: rect.right },
       value: field.value || "",
     });
@@ -18229,28 +18491,39 @@ function ScribeCard(props) {
     }
     // Dropdowns with "Other" escape hatch — swap dropdown for text input so
     // analyst can type a custom value instead of committing "Other" literally.
-    // Applies to receivalInitials (SLJ/GKB/CGS/Other) and blankSubstance (PBS/Tris/Other).
     if ((key === "receivalInitials" || key === "blankSubstance" || key === "serialDil" || key === "firstDil" || key === "exchangeBuffer" || key === "lysisMethod") && finalVal === "Other") {
       var anchorRect = editing.anchorRect;
+      var editScope = editing.scope;
       update(function(n){
-        if (n[key]) n[key].value = "";
-        n._copied = {};
+        if (editScope === "sec" && n._secondAssay && n._secondAssay[key]) {
+          n._secondAssay = Object.assign({}, n._secondAssay);
+          n._secondAssay[key] = Object.assign({}, n._secondAssay[key], { value: "" });
+          n._secondAssay._copied = {};
+        } else if (n[key]) {
+          n[key].value = "";
+          n._copied = {};
+        }
         markTouched(n, blockForField(key));
       });
       setEditing({
         key: key,
+        scope: editScope,
         anchorRect: anchorRect,
         value: "",
-        forceText: true,   // signal to ScribeFieldEditor to render text input, not select
+        forceText: true,
       });
       return;
     }
+    var editScope = editing.scope;
     update(function(n){
-      if (n[key]) n[key].value = finalVal;
-      // Invalidate copy marker for the block containing this field (broad invalidation:
-      // any edit clears all copy markers on the theory that the analyst may have
-      // touched something that flowed into any block).
-      n._copied = {};
+      if (editScope === "sec" && n._secondAssay && n._secondAssay[key]) {
+        n._secondAssay = Object.assign({}, n._secondAssay);
+        n._secondAssay[key] = Object.assign({}, n._secondAssay[key], { value: finalVal });
+        n._secondAssay._copied = {};
+      } else if (n[key]) {
+        n[key].value = finalVal;
+        n._copied = {};
+      }
       markTouched(n, blockForField(key));
     });
     setEditing(null);
@@ -18304,7 +18577,7 @@ function ScribeCard(props) {
         ? <span>Cells were lysed by {F("lysisMethod")} ({F("beadBeatTime")}) with {F("iceCooling")} ice cooling between cycles, then clarified at {F("clarifySpin")}.</span>
         : <span>Cells were lysed by {F("lysisMethod")}, then clarified at {F("clarifySpin")}.</span>;
       return <span>
-        Samples were received as {F("prepType")} and washed {F("washCycles")} in {F("washBuffer")}, then resuspended in {F("resuspVol")}.
+        Samples were received as {F("prepType")}. Pellets were washed {F("washCycles")} in {F("washBuffer")}, then resuspended in {F("resuspVol")}.
         {" "}{lysisSentence}
         {" "}Supernatants were passed through an initial spin at {F("initialSpin")} and buffer-exchanged into {F("exchangeBuffer")} through {F("exchangeCycles")} cycles using a {F("mwcoFilter")}.
       </span>;
@@ -18387,6 +18660,47 @@ function ScribeCard(props) {
     </span>;
   };
 
+  // A2: second-assay method paragraph — click-to-edit via F(key, opts, "sec")
+  var renderSecondAssayMethod = function(){
+    var sec = st._secondAssay;
+    if (!sec) return null;
+    var key = sec._assayKey;
+    var sampleSing = /singlicate/i.test(st.sampleReps.value);  // shared
+    var stdSing    = /singlicate/i.test((sec.stdReps && sec.stdReps.value) || "");
+    var cvDisclaimer = (sampleSing || stdSing)
+      ? <em>&nbsp;Because {sampleSing && stdSing ? "standards and samples were" : sampleSing ? "samples were" : "standards were"} analyzed in singlicate, any CV values reported are meaningless and should not be used as an acceptance criterion.</em>
+      : null;
+    var stdTraceUI = renderTraceInline(sec.standardTrace, "Calibration standard", "sec.standardTrace");
+    if (key === "df") {
+      var bufV = (sec.stdBuffer && sec.stdBuffer.value || "").trim();
+      var blkV = (sec.blankSubstance && sec.blankSubstance.value || "").trim();
+      var blankSentence = (bufV && blkV && bufV === blkV)
+        ? <span> Row H served as a same-buffer blank.</span>
+        : <span> Row H served as the {F("blankSubstance", null, "sec")} blank.</span>;
+      return <span>
+        Active protein concentration was determined by direct fluorescence following {sec.sop.value} using {F("proteinName", null, "sec")}.
+        Calibration standards were prepared by diluting {stdTraceUI} into {F("stdBuffer", null, "sec")}: a {F("firstDil", null, "sec")} initial dilution, then {F("serialDil", null, "sec")} serial dilution down the column across {F("numPoints", null, "sec")} points, covering {sec.stdRangeLow.value}–{sec.stdRangeHigh.value} mg/mL.{blankSentence}
+        Each calibration point was analyzed in {F("stdReps", null, "sec")}. Fluorescence was measured at {sec.wavelength.value} in a {sec.plate.value} plate on a {sec.reader.value} reader, with samples analyzed in {F("sampleReps")}.
+        {cvDisclaimer}
+      </span>;
+    }
+    if (key === "bca" || key === "p660") {
+      return <span>
+        Total protein concentration was determined using the {F("kitVendor", null, "sec")} following {sec.sop.value}.
+        Calibration standards were prepared by diluting {stdTraceUI} into {F("stdBuffer", null, "sec")}: a {F("firstDil", null, "sec")} initial dilution, then {F("serialDil", null, "sec")} serial dilution down the column across {F("numPoints", null, "sec")} points, covering {sec.stdRangeLow.value}–{sec.stdRangeHigh.value} mg/mL.
+        Each calibration point was analyzed in {F("stdReps", null, "sec")}. Absorbance at {sec.wavelength.value} was measured in a {sec.plate.value} plate on a {sec.reader.value} reader, with samples analyzed in {F("sampleReps")}.
+        {cvDisclaimer}
+      </span>;
+    }
+    // bradford
+    return <span>
+      Total protein concentration was determined using {sec.sop.value}.
+      Calibration standards were prepared by diluting {stdTraceUI} into {F("stdBuffer", null, "sec")}: a {F("firstDil", null, "sec")} initial dilution, then {F("serialDil", null, "sec")} serial dilution down the column across {F("numPoints", null, "sec")} points, covering {sec.stdRangeLow.value}–{sec.stdRangeHigh.value} mg/mL.
+      Each calibration point was analyzed in {F("stdReps", null, "sec")}. Absorbance at {sec.wavelength.value} was measured in a {sec.plate.value} plate on a {sec.reader.value} reader, with samples analyzed in {F("sampleReps")}.
+      {cvDisclaimer}
+    </span>;
+  };
+
   // Trace inline renderer — shows trace as click-to-edit; opens modal on click
   var renderTraceInline = function(trace, label, stateKey){
     var missing = scribeTraceMissing(trace, label);
@@ -18431,25 +18745,40 @@ function ScribeCard(props) {
     if (!gfpWizard) return;
     var stateKey = gfpWizard.stateKey;
     var newDetail = SCRIBE_GFP_WORKING_STOCK.prefix + "." + num + letter;
+    var isSec = /^sec\./.test(stateKey);
+    var baseKey = isSec ? stateKey.slice(4) : stateKey;
     update(function(n){
-      n[stateKey] = Object.assign({}, n[stateKey], { sourceDetail: newDetail });
-      // Auto-inherit: when the CALIBRATION STANDARD identifier changes AND the
-      // SST uses the same protein + source (both in-house GFP), sync the SST
-      // identifier too. Analyst can still override by clicking the SST
-      // identifier separately. This eliminates the double-picking that
-      // annoyed the analysts. Not applied in reverse (SST → standard) since
-      // the standard is the primary reference.
-      if (stateKey === "standardTrace"
-          && n.sstTrace
-          && n.sstTrace.protein === n.standardTrace.protein
-          && n.sstTrace.source === n.standardTrace.source
-          && n.sstTrace.protein === "GFP"
-          && n.sstTrace.source === "in-house") {
-        n.sstTrace = Object.assign({}, n.sstTrace, { sourceDetail: newDetail });
-        markTouched(n, "b4");   // SST also affected via inheritance
+      var container = isSec ? (n._secondAssay || null) : n;
+      if (!container) return;
+      if (isSec) {
+        n._secondAssay = Object.assign({}, n._secondAssay);
+        n._secondAssay[baseKey] = Object.assign({}, n._secondAssay[baseKey], { sourceDetail: newDetail });
+        // Auto-inherit within sec: if updating sec.standardTrace and sec.sstTrace matches, sync
+        if (baseKey === "standardTrace"
+            && n._secondAssay.sstTrace
+            && n._secondAssay.sstTrace.protein === n._secondAssay.standardTrace.protein
+            && n._secondAssay.sstTrace.source === n._secondAssay.standardTrace.source
+            && n._secondAssay.sstTrace.protein === "GFP"
+            && n._secondAssay.sstTrace.source === "in-house") {
+          n._secondAssay.sstTrace = Object.assign({}, n._secondAssay.sstTrace, { sourceDetail: newDetail });
+        }
+        n._secondAssay._copied = {};
+        markTouched(n, baseKey === "sstTrace" ? "b4" : "b2");
+      } else {
+        n[baseKey] = Object.assign({}, n[baseKey], { sourceDetail: newDetail });
+        // Auto-inherit primary: standardTrace → sstTrace if matching (as before)
+        if (baseKey === "standardTrace"
+            && n.sstTrace
+            && n.sstTrace.protein === n.standardTrace.protein
+            && n.sstTrace.source === n.standardTrace.source
+            && n.sstTrace.protein === "GFP"
+            && n.sstTrace.source === "in-house") {
+          n.sstTrace = Object.assign({}, n.sstTrace, { sourceDetail: newDetail });
+          markTouched(n, "b4");
+        }
+        n._copied = {};
+        markTouched(n, baseKey === "sstTrace" ? "b4" : "b2");
       }
-      n._copied = {};
-      markTouched(n, stateKey === "sstTrace" ? "b4" : "b2");
     });
     setGfpWizard(null);
   };
@@ -18457,8 +18786,12 @@ function ScribeCard(props) {
 
   var openTraceModal = function(stateKey, label){
     update(function(n){
+      // Support "sec.standardTrace" / "sec.sstTrace" dotted path for the second-assay cluster
+      var isSec = /^sec\./.test(stateKey);
+      var baseKey = isSec ? stateKey.slice(4) : stateKey;
+      var srcObj = isSec ? (n._secondAssay || {}) : n;
       n._modalOpen = { key: stateKey, label: label };
-      n._modalTrace = JSON.parse(JSON.stringify(n[stateKey]));
+      n._modalTrace = JSON.parse(JSON.stringify(srcObj[baseKey] || {}));
     });
   };
   var closeTraceModal = function(){
@@ -18475,62 +18808,88 @@ function ScribeCard(props) {
     }
     if (t.source === "Other") t.source = "";
     update(function(n){
-      n[stateKey] = t;
+      var isSec = /^sec\./.test(stateKey);
+      var baseKey = isSec ? stateKey.slice(4) : stateKey;
+      if (isSec && n._secondAssay) {
+        n._secondAssay = Object.assign({}, n._secondAssay);
+        n._secondAssay[baseKey] = t;
+        n._secondAssay._copied = {};
+      } else {
+        n[baseKey] = t;
+        n._copied = {};
+      }
       n._modalOpen = null;
       n._modalTrace = null;
-      n._copied = {};
-      markTouched(n, stateKey === "sstTrace" ? "b4" : "b2");
+      // Mark block touched: sstTrace → b4, standardTrace → b2
+      markTouched(n, baseKey === "sstTrace" ? "b4" : "b2");
     });
   };
 
   // ─── SST BLOCK (b4) ───────────────────────────────────────────────────
-  var renderSST = function(){
+  // Scoped SST render. scope: null=primary st, "sec"=second-assay cluster.
+  // Both call sites use identical UI patterns — scope routes reads/writes.
+  var renderSST = function(scope){
+    var container = scope === "sec" ? (st._secondAssay || {}) : st;
+    var sstUsedVal = container.sstUsed;
+    var setSstUsed = function(nextVal){
+      update(function(n){
+        if (scope === "sec" && n._secondAssay) {
+          n._secondAssay = Object.assign({}, n._secondAssay, { sstUsed: nextVal });
+          n._secondAssay._copied = {};
+        } else {
+          n.sstUsed = nextVal;
+          n._copied = {};
+        }
+        markTouched(n, "b4");
+      });
+    };
     // Small toggle bar at top — Yes/No, defaults to Yes. UI-only, not copied.
     var toggleBar = <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:10,fontSize:12,userSelect:"none"}} data-ui-only="true">
       <span style={{fontWeight:700,color:C.slate}}>SST used?</span>
       <button
-        onClick={function(){update(function(n){n.sstUsed = true; n._copied = {}; markTouched(n, "b4");});}}
+        onClick={function(){ setSstUsed(true); }}
         style={{
           padding:"3px 12px",fontSize:11,fontWeight:700,fontFamily:"inherit",cursor:"pointer",borderRadius:4,
           border:"1px solid "+C.purple,
-          background: st.sstUsed ? C.purple : "#fff",
-          color: st.sstUsed ? "#fff" : C.purpleDeep,
+          background: sstUsedVal ? C.purple : "#fff",
+          color: sstUsedVal ? "#fff" : C.purpleDeep,
         }}
       >Yes</button>
       <button
-        onClick={function(){update(function(n){n.sstUsed = false; n._copied = {}; markTouched(n, "b4");});}}
+        onClick={function(){ setSstUsed(false); }}
         style={{
           padding:"3px 12px",fontSize:11,fontWeight:700,fontFamily:"inherit",cursor:"pointer",borderRadius:4,
-          border:"1px solid "+(st.sstUsed ? C.divider : C.amber),
-          background: !st.sstUsed ? C.amber : "#fff",
-          color: !st.sstUsed ? "#fff" : C.slate,
+          border:"1px solid "+(sstUsedVal ? C.divider : C.amber),
+          background: !sstUsedVal ? C.amber : "#fff",
+          color: !sstUsedVal ? "#fff" : C.slate,
         }}
       >No</button>
     </div>;
 
-    if (st.sstUsed) {
-      var t = st.sstTrace || {};
-      var traceUI = renderTraceInline(t, "SST", "sstTrace");
+    if (sstUsedVal) {
+      var t = container.sstTrace || {};
+      var traceKey = scope === "sec" ? "sec.sstTrace" : "sstTrace";
+      var traceUI = renderTraceInline(t, "SST", traceKey);
       return <div>
         {toggleBar}
         <div data-copy-block="true">
-          A system suitability standard ({traceUI}) was processed alongside the submitted samples using the same dilution scheme and the same analysis. It met its acceptance criterion of {F("sstAcceptance")}.
+          A system suitability standard ({traceUI}) was processed alongside the submitted samples using the same dilution scheme and the same analysis. It met its acceptance criterion of {F("sstAcceptance", null, scope)}.
         </div>
       </div>;
     }
 
     // SST NOT used — force a rationale
-    var reasonVal = (st.sstDeclineReason && st.sstDeclineReason.value) ? st.sstDeclineReason.value.trim() : "";
+    var reasonField = container.sstDeclineReason;
+    var reasonVal = (reasonField && reasonField.value) ? reasonField.value.trim() : "";
+    var reasonInlineKey = scope === "sec" ? "sec:sstDeclineReason" : "sstDeclineReason";
     if (reasonVal) {
       return <div>
         {toggleBar}
-        <div data-copy-block="true">No system suitability standard was processed for this run. Reason: {F("sstDeclineReason")}.</div>
+        <div data-copy-block="true">No system suitability standard was processed for this run. Reason: {F("sstDeclineReason", null, scope)}.</div>
       </div>;
     }
-    // Reason still empty — render inline input if analyst clicked the prompt,
-    // otherwise show the amber "click to enter" prompt.
     var reasonInputOrPrompt;
-    if (inlineEditKey === "sstDeclineReason") {
+    if (inlineEditKey === reasonInlineKey) {
       reasonInputOrPrompt = <input
         ref={inlineInputRef}
         type="text"
@@ -18538,14 +18897,14 @@ function ScribeCard(props) {
         defaultValue=""
         placeholder="e.g. Instrument SST failed at start of run"
         onKeyDown={function(e){
-          if (e.key === "Enter") commitInlineText("sstDeclineReason", e.target.value);
+          if (e.key === "Enter") commitInlineText("sstDeclineReason", e.target.value, scope);
           else if (e.key === "Escape") setInlineEditKey(null);
         }}
-        onBlur={function(e){ commitInlineText("sstDeclineReason", e.target.value); }}
+        onBlur={function(e){ commitInlineText("sstDeclineReason", e.target.value, scope); }}
         style={{display:"inline-block",minWidth:280,padding:"0 6px",fontSize:"inherit",fontFamily:"inherit",color:C.purpleDeep,fontWeight:600,background:"#fff",border:"1.5px solid "+C.purple,borderRadius:3,outline:"none",verticalAlign:"baseline"}}
       />;
     } else {
-      reasonInputOrPrompt = <span style={s.fillNeeded} onClick={function(){setInlineEditKey("sstDeclineReason");}}>click to enter a reason why (required)</span>;
+      reasonInputOrPrompt = <span style={s.fillNeeded} onClick={function(){setInlineEditKey(reasonInlineKey);}}>click to enter a reason why (required)</span>;
     }
     return <div>
       {toggleBar}
@@ -18578,22 +18937,27 @@ function ScribeCard(props) {
   };
 
   // ─── STANDARD CURVE INFO BLOCK (b5) ───────────────────────────────────
-  var renderCurve = function(){
-    var sampleSing = /singlicate/i.test(st.sampleReps.value);
+  var renderCurve = function(scope){
+    var container = scope === "sec" ? (st._secondAssay || {}) : st;
+    var sampleSing = /singlicate/i.test(st.sampleReps.value);  // shared
     var acceptanceClause = sampleSing
       ? <span>The reported concentration was taken from the least diluted qualified dilution that met the in-range acceptance criterion</span>
-      : <span>The reported concentration was taken from the least diluted qualified dilution that met the in-range and CV ≤ {F("cvThreshold")} acceptance criteria</span>;
-    var baseText = <span>{F("fitType")} across the calibration series produced an R² of {F("r2")}. {acceptanceClause} ({F("strategy")} analysis strategy).</span>;
-    // Checklist static sentences (excluding curveEquation which has its own inline handling)
-    var checklistSentences = SCRIBE_CHECKLIST_ITEMS
+      : <span>The reported concentration was taken from the least diluted qualified dilution that met the in-range and CV ≤ {F("cvThreshold", null, scope)} acceptance criteria</span>;
+    var baseText = <span>{F("fitType", null, scope)} across the calibration series produced an R² of {F("r2", null, scope)}. {acceptanceClause} ({F("strategy", null, scope)} analysis strategy).</span>;
+    // Checklist static sentences (only for primary scope — checklist is shared)
+    var checklistSentences = scope === "sec" ? "" : SCRIBE_CHECKLIST_ITEMS
       .filter(function(item){ return !item.dynamic && st._checklist[item.id]; })
       .map(function(item){ return item.sentence; }).join(" ");
-    // Curve equation optional inline sentence
+    // Curve equation optional inline sentence (only for primary; secondary uses its own values)
     var equationInline = null;
-    if (st._checklist.curveEquation) {
-      // Reusable inline-input renderer for empty slope/intercept clicks
+    var showEquation = scope === "sec"
+      ? (container.slope && container.slope.value && container.intercept && container.intercept.value)
+      : st._checklist.curveEquation;
+    if (showEquation) {
       var inlineInputStyle = {display:"inline-block",minWidth:100,padding:"0 6px",fontSize:"inherit",fontFamily:"inherit",color:C.purpleDeep,fontWeight:600,background:"#fff",border:"1.5px solid "+C.purple,borderRadius:3,outline:"none",verticalAlign:"baseline"};
-      var makeInlineInput = function(key, placeholder){
+      var slopeInlineKey = scope === "sec" ? "sec:slope" : "slope";
+      var interceptInlineKey = scope === "sec" ? "sec:intercept" : "intercept";
+      var makeInlineInput = function(key, placeholder, sc){
         return <input
           ref={inlineInputRef}
           type="text"
@@ -18601,23 +18965,23 @@ function ScribeCard(props) {
           defaultValue=""
           placeholder={placeholder}
           onKeyDown={function(e){
-            if (e.key === "Enter") commitInlineText(key, e.target.value);
+            if (e.key === "Enter") commitInlineText(key, e.target.value, sc);
             else if (e.key === "Escape") setInlineEditKey(null);
           }}
-          onBlur={function(e){ commitInlineText(key, e.target.value); }}
+          onBlur={function(e){ commitInlineText(key, e.target.value, sc); }}
           style={inlineInputStyle}
         />;
       };
-      var slopeUI = st.slope.value
-        ? F("slope")
-        : (inlineEditKey === "slope"
-          ? makeInlineInput("slope", "e.g. 12.4 RFU·mL/mg")
-          : <span style={s.fillNeeded} onClick={function(){setInlineEditKey("slope");}}>click to enter slope + units</span>);
-      var interceptUI = st.intercept.value
-        ? F("intercept")
-        : (inlineEditKey === "intercept"
-          ? makeInlineInput("intercept", "e.g. 0.05 RFU")
-          : <span style={s.fillNeeded} onClick={function(){setInlineEditKey("intercept");}}>click to enter intercept + units</span>);
+      var slopeUI = (container.slope && container.slope.value)
+        ? F("slope", null, scope)
+        : (inlineEditKey === slopeInlineKey
+          ? makeInlineInput("slope", "e.g. 12.4 RFU·mL/mg", scope)
+          : <span style={s.fillNeeded} onClick={function(){setInlineEditKey(slopeInlineKey);}}>click to enter slope + units</span>);
+      var interceptUI = (container.intercept && container.intercept.value)
+        ? F("intercept", null, scope)
+        : (inlineEditKey === interceptInlineKey
+          ? makeInlineInput("intercept", "e.g. 0.05 RFU", scope)
+          : <span style={s.fillNeeded} onClick={function(){setInlineEditKey(interceptInlineKey);}}>click to enter intercept + units</span>);
       equationInline = <span>&nbsp;The calibration curve produced a slope of {slopeUI} with a y-intercept of {interceptUI}.</span>;
     }
     return <span>{baseText}{checklistSentences ? " " + checklistSentences : ""}{equationInline}</span>;
@@ -18712,17 +19076,44 @@ function ScribeCard(props) {
     }
     if (id === "b3") return (st.assayVolume.value || "").trim();
     if (id === "b4") {
-      // SST paragraph only (ui-only strip is excluded via data-copy-block wrapper)
       var el = document.getElementById("scribe-block-sst");
-      if (!el) return "";
+      if (!el) {
+        // In paired mode, b4 has no single DOM node; primary SST paragraph is in the first split col
+        // We can synthesize from state instead:
+        return b4BodyFromState(null);
+      }
       var copyBlockEl = el.querySelector('[data-copy-block="true"]');
       return cleanCopyText(copyBlockEl);
+    }
+    if (id === "b4_sec") {
+      // Second-assay SST paragraph — synthesize from state (no dedicated DOM anchor)
+      return b4BodyFromState("sec");
     }
     if (id === "b5") {
       var curveEl = document.getElementById("scribe-block-curve");
       return cleanCopyText(curveEl);
     }
+    if (id === "b5_sec") {
+      var curveEl2 = document.getElementById("scribe-block-curve-2");
+      return cleanCopyText(curveEl2);
+    }
     if (id === "b6") return (st.notes || "").trim();
+    return "";
+  };
+
+  // Synthesize b4 SST paragraph text from state (bypasses DOM). Used when the
+  // block is in a split render or when we need the second-assay side.
+  var b4BodyFromState = function(scope){
+    var container = scope === "sec" ? (st._secondAssay || {}) : st;
+    var sstUsedVal = container.sstUsed;
+    if (sstUsedVal) {
+      var t = container.sstTrace || {};
+      var sstStd = traceTerse(t);
+      var accVal = (container.sstAcceptance && container.sstAcceptance.value) || "±20% (ICH M10)";
+      return "A system suitability standard (" + sstStd + ") was processed alongside the submitted samples using the same dilution scheme and the same analysis. It met its acceptance criterion of " + accVal + ".";
+    }
+    var reasonVal = (container.sstDeclineReason && container.sstDeclineReason.value || "").trim();
+    if (reasonVal) return "No system suitability standard was processed for this run. Reason: " + reasonVal + ".";
     return "";
   };
 
@@ -18766,9 +19157,18 @@ function ScribeCard(props) {
       }
       var sstStd = traceTerse(st.sstTrace);
       var accVal = (st.sstAcceptance && st.sstAcceptance.value) || "±20% (ICH M10)";
-      // Drop "SST" prefix — the LIMS field is already labeled SST. Lead with
-      // vendor + protein for scannability (e.g. "Thermo Fisher BSA (2.0 mg/mL)").
       return sstStd + " processed with samples using the same dilution scheme and analysis. Met acceptance: " + accVal + ".";
+    }
+    if (id === "b4_sec") {
+      var sec = st._secondAssay;
+      if (!sec) return "";
+      if (!sec.sstUsed) {
+        var reasonSec = (sec.sstDeclineReason && sec.sstDeclineReason.value || "").trim();
+        return "Not performed. Reason: " + (reasonSec || "(unstated)") + ".";
+      }
+      var sstStdSec = traceTerse(sec.sstTrace);
+      var accValSec = (sec.sstAcceptance && sec.sstAcceptance.value) || "±20% (ICH M10)";
+      return sstStdSec + " processed with samples using the same dilution scheme and analysis. Met acceptance: " + accValSec + ".";
     }
     if (id === "b5") {
       var fit = (st.fitType && st.fitType.value) || "";
@@ -18776,16 +19176,26 @@ function ScribeCard(props) {
       var strat = (st.strategy && st.strategy.value) || "";
       var sampleSing = /singlicate/i.test((st.sampleReps && st.sampleReps.value) || "");
       var cvPart = sampleSing ? "" : " + CV \u2264 " + ((st.cvThreshold && st.cvThreshold.value) || "10%");
-      // Subject-first phrasing so the LIMS reviewer knows this describes the
-      // reported concentration (not just the calibration): "The reported
-      // concentration used linear regression (R\u00b2 X) with a Y strategy \u2014
-      // least diluted qualified dilution meeting in-range + CV \u2264 Z%."
       var base = "The reported concentration used " + fit + " (R\u00b2 " + r2 + ") with a " + strat + " strategy \u2014 least diluted qualified dilution meeting in-range" + cvPart + ".";
-      // Curve equation sentence if ticked
       if (st._checklist && st._checklist.curveEquation && st.slope.value && st.intercept.value) {
         base += " Slope " + st.slope.value + "; intercept " + st.intercept.value + ".";
       }
       return base;
+    }
+    if (id === "b5_sec") {
+      var sec = st._secondAssay;
+      if (!sec) return "";
+      var fitS = (sec.fitType && sec.fitType.value) || "";
+      var r2S = (sec.r2 && sec.r2.value) || "";
+      var stratS = (sec.strategy && sec.strategy.value) || "";
+      var sampleSingS = /singlicate/i.test((st.sampleReps && st.sampleReps.value) || "");  // shared reps
+      var cvPartS = sampleSingS ? "" : " + CV \u2264 " + ((sec.cvThreshold && sec.cvThreshold.value) || "10%");
+      var baseS = "The reported concentration used " + fitS + " (R\u00b2 " + r2S + ") with a " + stratS + " strategy \u2014 least diluted qualified dilution meeting in-range" + cvPartS + ".";
+      // Second-assay slope/intercept (if both filled)
+      if (sec.slope && sec.slope.value && sec.intercept && sec.intercept.value) {
+        baseS += " Slope " + sec.slope.value + "; intercept " + sec.intercept.value + ".";
+      }
+      return baseS;
     }
     return "";
   };
@@ -18807,14 +19217,21 @@ function ScribeCard(props) {
     // that with a helper string so the reviewer knows to double-click.
     // Other blocks fit in short fields and don't need the prefix.
     var finalText = (id === "b2") ? ("▶ Double-click here to view the full text.\n\n" + body) : body;
+    var isSecScope = /_sec$/.test(id);
+    var baseId = isSecScope ? id.replace(/_sec$/, "") : id;
     var done = function(){
       setFlashState({ id: id, kind: "copied", label: "Copied ✓" });
-      // Mark as copied with content hash
       var hash = body.length + "|" + body.slice(0, 40);
       update(function(n){
-        n._copied = Object.assign({}, n._copied, {});
-        n._copied[id] = hash;
-        markTouched(n, id);
+        if (isSecScope && n._secondAssay) {
+          n._secondAssay = Object.assign({}, n._secondAssay);
+          n._secondAssay._copied = Object.assign({}, n._secondAssay._copied || {}, {});
+          n._secondAssay._copied[baseId] = hash;
+        } else {
+          n._copied = Object.assign({}, n._copied, {});
+          n._copied[baseId] = hash;
+        }
+        markTouched(n, baseId);
       });
       setTimeout(function(){ setFlashState({}); }, 1500);
     };
@@ -18842,10 +19259,10 @@ function ScribeCard(props) {
     var btnStyle = isFlashing ? s.copyBtnFlash(flashState.kind) : s.copyBtn;
     var label = isFlashing ? flashState.label : "Copy";
     var counter = null;
-    var limit = LIMS_LIMITS[id];
+    var baseId = /_sec$/.test(id) ? id.replace(/_sec$/, "") : id;
+    var limit = LIMS_LIMITS[baseId];
     if (st._limsMode && limit) {
       var body = getBlockBodyTerse(id);
-      // b2 gets the double-click prefix on copy; count that too
       var n = (id === "b2") ? (body.length + "▶ Double-click here to view the full text.\n\n".length) : body.length;
       var over = n > limit;
       counter = <span style={{
@@ -18871,7 +19288,6 @@ function ScribeCard(props) {
       var m = [];
       if (!st.receivalDate.value.trim())     m.push("Receival date");
       if (!st.receivalInitials.value.trim()) m.push("Received-by initials");
-      // Until-date required when analyst chose "stored"
       if (st.receivalFate.value === "stored" && !st.storageUntilDate.value.trim()) {
         m.push("Storage until date");
       }
@@ -18880,15 +19296,35 @@ function ScribeCard(props) {
     if (id === "b2") return scribeTraceMissing(st.standardTrace, "Calibration standard");
     if (id === "b3") return st.assayVolume.value.trim() ? [] : ["Assay volume"];
     if (id === "b4") {
-      if (st.sstUsed) return scribeTraceMissing(st.sstTrace, "SST");
-      if (st.sstDeclineReason && st.sstDeclineReason.value.trim()) return [];
-      return ["SST decline reason"];
+      var m4 = [];
+      if (st.sstUsed) {
+        m4 = m4.concat(scribeTraceMissing(st.sstTrace, "SST"));
+      } else if (!(st.sstDeclineReason && st.sstDeclineReason.value.trim())) {
+        m4.push("SST decline reason");
+      }
+      // In paired mode, also check second-assay SST
+      if (st._secondAssayKey && st._secondAssay) {
+        var sec = st._secondAssay;
+        if (sec.sstUsed) {
+          m4 = m4.concat(scribeTraceMissing(sec.sstTrace, "Second SST"));
+        } else if (!(sec.sstDeclineReason && sec.sstDeclineReason.value.trim())) {
+          m4.push("Second SST decline reason");
+        }
+      }
+      return m4;
     }
     if (id === "b5") {
       var mm = [];
       if (st._checklist.curveEquation) {
         if (!st.slope || !st.slope.value)     mm.push("Slope (curve equation)");
         if (!st.intercept || !st.intercept.value) mm.push("Intercept (curve equation)");
+      }
+      // In paired mode, second-assay curve equation (if analyst chose to record it via
+      // filling slope+intercept) — otherwise nothing required
+      if (st._secondAssayKey && st._secondAssay) {
+        var sec2 = st._secondAssay;
+        // Only require sec slope+intercept if analyst has TOUCHED the sec curve — skipping enforcement here to keep 2nd side flexible
+        // (Curve equation is optional per side unless the primary checklist checkbox is on.)
       }
       return mm;
     }
@@ -18898,22 +19334,26 @@ function ScribeCard(props) {
 
   // Sidebar status per block (warn / ready / copied)
   var blockStatus = function(id){
-    // NEW three-state rule (analyst training feedback):
-    //   RED    ("warn")   = untouched OR touched but required fields still missing
-    //   YELLOW ("ready")  = touched AND required fields all filled AND not currently copied
-    //                       (also covers blocks with no required fields, once touched)
-    //   GREEN  ("copied") = analyst clicked Copy AND content is unchanged since
-    //                       AND all required fields ARE filled (can't green-flag a bad copy)
-    //
-    // Validation is authoritative — missing required fields keep the block red
-    // regardless of whether copy was clicked (copy doesn't enforce validation).
     var m = validateBlock(id);
     if (m.length) return "warn";
-    // Required fields all filled — check copy state
+    // For paired b4/b5: green requires BOTH sides copied
+    if (st._secondAssayKey && (id === "b4" || id === "b5")) {
+      var bodyPrimary = getBlockBody(id);
+      var hashPrimary = bodyPrimary ? (bodyPrimary.length + "|" + bodyPrimary.slice(0, 40)) : "";
+      var primaryCopied = bodyPrimary && st._copied && st._copied[id] === hashPrimary;
+      var bodySec = getBlockBody(id + "_sec");
+      var hashSec = bodySec ? (bodySec.length + "|" + bodySec.slice(0, 40)) : "";
+      var sec = st._secondAssay || {};
+      var secCopied = bodySec && sec._copied && sec._copied[id] === hashSec;
+      if (primaryCopied && secCopied) return "copied";
+      var isTouchedPair = st._touched && st._touched[id];
+      if (!isTouchedPair) return "warn";
+      return "ready";
+    }
+    // Standard (single-assay or shared block) path
     var body = getBlockBody(id);
     var hash = body ? (body.length + "|" + body.slice(0, 40)) : "";
     if (body && st._copied && st._copied[id] && st._copied[id] === hash) return "copied";
-    // Not copied — check touched
     var isTouched = st._touched && st._touched[id];
     if (!isTouched) return "warn";
     return "ready";
@@ -18964,14 +19404,15 @@ function ScribeCard(props) {
               <option value="custom">Customize</option>
             </select>
           </label>
-          <label style={{fontSize:11,color:C.slate,display:"flex",alignItems:"center",gap:4}}>
-            Assay:
-            <select style={s.selectorSelect} value={st._assayKey} onChange={function(e){setAssay(e.target.value);}}>
-              <option value="df">Direct Fluorescence (GFP)</option>
-              <option value="bca">BCA</option>
-              <option value="bradford">Bradford</option>
-              <option value="p660">Pierce 660 nm</option>
-            </select>
+          <label style={{fontSize:11,color:C.slate,display:"flex",alignItems:"center",gap:4,position:"relative"}}>
+            Assays:
+            <ScribeAssayMultiSelect
+              assayKey={st._assayKey}
+              secondAssayKey={st._secondAssayKey}
+              onChange={function(newPrimary, newSecondary){
+                setAssays(newPrimary, newSecondary);
+              }}
+            />
           </label>
           {/* LIMS mode pill toggle — sits in the tagline slot, right-aligned.
               When ON (default), Copy produces terse output fitting each block's
@@ -19013,6 +19454,54 @@ function ScribeCard(props) {
           </div>
         </div>
 
+        {/* C1: Inline confirm prompts for auto-inferred prep + assay type.
+            Only shown when this Scribe was opened from a Plate Assay context
+            AND the value was inferred (not certain from analysis template).
+            Analyst clicks "Yes" to accept or "Change" to open the dropdown. */}
+        {st._confirms && st._confirms.prepKey === "pending" && (() => {
+          var prepLabelMap = { pellet_sup: "pellet + supernatant", lysate_eluate: "lysate/eluate", fractions: "fractions", custom: "custom" };
+          var prepLabel = prepLabelMap[st._prepKey] || st._prepKey;
+          return <div style={{
+            display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",
+            padding:"6px 12px",marginBottom:8,
+            background:C.purpleTint,border:"1px dashed "+C.purple,borderRadius:4,
+            fontSize:11.5,color:C.purpleDeep,fontStyle:"italic",
+          }}>
+            <span style={{flex:"1 1 auto"}}>Auto-detected <b style={{fontStyle:"normal"}}>{prepLabel}</b> from your sample names.</span>
+            <button
+              onClick={function(){ update(function(n){ n._confirms = Object.assign({}, n._confirms, { prepKey: "confirmed" }); }); }}
+              style={{background:C.purple,color:"#fff",border:"none",padding:"3px 10px",borderRadius:3,fontSize:11,fontWeight:700,fontStyle:"normal",cursor:"pointer"}}
+            >Yes, that's right</button>
+            <button
+              onClick={function(){
+                update(function(n){ n._confirms = Object.assign({}, n._confirms, { prepKey: "changed" }); });
+                // Analyst can now use the prep dropdown at the top
+              }}
+              style={{background:"#fff",color:C.purple,border:"1px solid "+C.purple,padding:"3px 10px",borderRadius:3,fontSize:11,fontWeight:700,fontStyle:"normal",cursor:"pointer"}}
+            >Change</button>
+          </div>;
+        })()}
+        {st._confirms && st._confirms.assayKey === "pending" && (() => {
+          var assayLabelMap = { df: "Direct Fluorescence (GFP)", bca: "BCA", bradford: "Bradford", p660: "Pierce 660 nm" };
+          var assayLabel = assayLabelMap[st._assayKey] || st._assayKey;
+          return <div style={{
+            display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",
+            padding:"6px 12px",marginBottom:8,
+            background:C.purpleTint,border:"1px dashed "+C.purple,borderRadius:4,
+            fontSize:11.5,color:C.purpleDeep,fontStyle:"italic",
+          }}>
+            <span style={{flex:"1 1 auto"}}>Auto-detected <b style={{fontStyle:"normal"}}>{assayLabel}</b> from your analysis.</span>
+            <button
+              onClick={function(){ update(function(n){ n._confirms = Object.assign({}, n._confirms, { assayKey: "confirmed" }); }); }}
+              style={{background:C.purple,color:"#fff",border:"none",padding:"3px 10px",borderRadius:3,fontSize:11,fontWeight:700,fontStyle:"normal",cursor:"pointer"}}
+            >Yes, that's right</button>
+            <button
+              onClick={function(){ update(function(n){ n._confirms = Object.assign({}, n._confirms, { assayKey: "changed" }); }); }}
+              style={{background:"#fff",color:C.purple,border:"1px solid "+C.purple,padding:"3px 10px",borderRadius:3,fontSize:11,fontWeight:700,fontStyle:"normal",cursor:"pointer"}}
+            >Change</button>
+          </div>;
+        })()}
+
         {/* Two-column layout: sidebar + blocks */}
         <div style={s.layoutContainer}>
           <div style={s.sidebar}>
@@ -19034,6 +19523,7 @@ function ScribeCard(props) {
             {BLOCKS.map(function(b){
               var isActive = st._focusedBlock === b.id;
               var status = blockStatus(b.id);
+              var isPairedSplit = !!st._secondAssayKey && (b.id === "b4" || b.id === "b5");
               return (
                 <div key={b.id}
                   style={s.sidebarTab(isActive, status)}
@@ -19044,6 +19534,10 @@ function ScribeCard(props) {
                 >
                   <span style={s.sidebarNum(isActive)}>{b.num}</span>
                   <span style={{flex:1}}>{b.label}</span>
+                  {isPairedSplit && <span style={{
+                    marginRight: 4, fontSize: 9, fontWeight: 700, color: C.purpleDeep,
+                    background: C.purpleTint, padding: "1px 5px", borderRadius: 7, letterSpacing: 0.3,
+                  }}>2×</span>}
                   <span style={s.statusDot(status)} title={
                     status === "warn"   ? "Missing required fields" :
                     status === "ready"  ? "Ready to copy" :
@@ -19073,8 +19567,16 @@ function ScribeCard(props) {
               <div style={s.blockBody}>
                 <div style={s.subHeadingFirst}>Sample Preparation</div>
                 <div id="scribe-block-prep">{renderPrep()}</div>
-                <div style={s.subHeading}>Assay Method</div>
+                <div style={s.subHeading}>Assay Method{st._secondAssayKey ? ({
+                  bca: " — BCA", bradford: " — Bradford", p660: " — Pierce 660 nm", df: " — Direct Fluorescence (GFP)",
+                }[st._assayKey] || "") : ""}</div>
                 <div id="scribe-block-assay">{renderAssay()}</div>
+                {st._secondAssayKey && <>
+                  <div style={s.subHeading}>Assay Method — {({
+                    bca: "BCA", bradford: "Bradford", p660: "Pierce 660 nm", df: "Direct Fluorescence (GFP)",
+                  }[st._secondAssayKey] || st._secondAssayKey)}</div>
+                  <div id="scribe-block-assay-2">{renderSecondAssayMethod()}</div>
+                </>}
               </div>
             </div>
 
@@ -19090,22 +19592,73 @@ function ScribeCard(props) {
             {/* Block 4: SST Used */}
             <div id="scribe-b4" style={s.block(st._focusedBlock === "b4")}>
               <div style={s.blockHeader}>
-                <div style={s.blockLabel}><span style={s.blockNum}>4</span>System Suitability Std. Used</div>
-                {renderCopyBtn("b4")}
+                <div style={s.blockLabel}>
+                  <span style={s.blockNum}>4</span>System Suitability Std. Used
+                  {st._secondAssayKey && <span style={{marginLeft:8,fontSize:9.5,fontWeight:700,color:C.purpleDeep,background:C.purpleTint,padding:"1px 6px",borderRadius:8,letterSpacing:0.5}}>2×</span>}
+                </div>
+                {!st._secondAssayKey && renderCopyBtn("b4")}
               </div>
-              <div style={s.blockBody} id="scribe-block-sst">{renderSST()}</div>
+              {st._secondAssayKey ? (
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16,padding:14}}>
+                  <div style={{background:"#fafbfe",border:"1px solid "+C.purpleTint,borderRadius:6,padding:12}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                      <div style={{fontSize:10.5,fontWeight:700,color:C.purpleDeep,textTransform:"uppercase",letterSpacing:0.6}}>
+                        {({bca:"BCA",bradford:"Bradford",p660:"Pierce 660 nm",df:"Direct Fluorescence (GFP)"})[st._assayKey]}
+                      </div>
+                      {renderCopyBtn("b4")}
+                    </div>
+                    {renderSST(null)}
+                  </div>
+                  <div style={{background:"#fafbfe",border:"1px solid "+C.purpleTint,borderRadius:6,padding:12}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                      <div style={{fontSize:10.5,fontWeight:700,color:C.purpleDeep,textTransform:"uppercase",letterSpacing:0.6}}>
+                        {({bca:"BCA",bradford:"Bradford",p660:"Pierce 660 nm",df:"Direct Fluorescence (GFP)"})[st._secondAssayKey]}
+                      </div>
+                      {renderCopyBtn("b4_sec")}
+                    </div>
+                    {renderSST("sec")}
+                  </div>
+                </div>
+              ) : (
+                <div style={s.blockBody} id="scribe-block-sst">{renderSST(null)}</div>
+              )}
             </div>
 
             {/* Block 5: Standard Curve Info */}
             <div id="scribe-b5" style={s.block(st._focusedBlock === "b5")}>
               <div style={s.blockHeader}>
-                <div style={s.blockLabel}><span style={s.blockNum}>5</span>Standard Curve Information</div>
-                {renderCopyBtn("b5")}
+                <div style={s.blockLabel}>
+                  <span style={s.blockNum}>5</span>Standard Curve Information
+                  {st._secondAssayKey && <span style={{marginLeft:8,fontSize:9.5,fontWeight:700,color:C.purpleDeep,background:C.purpleTint,padding:"1px 6px",borderRadius:8,letterSpacing:0.5}}>2×</span>}
+                </div>
+                {!st._secondAssayKey && renderCopyBtn("b5")}
               </div>
               <div style={s.blockBody}>
-                <div id="scribe-block-curve">{renderCurve()}</div>
-                {/* Optional analytical steps — checklist at bottom of block. Ticked items
-                    flow into the paragraph above so the tick→text relationship is visible. */}
+                {st._secondAssayKey ? (
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16}}>
+                    <div style={{background:"#fafbfe",border:"1px solid "+C.purpleTint,borderRadius:6,padding:12}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                        <div style={{fontSize:10.5,fontWeight:700,color:C.purpleDeep,textTransform:"uppercase",letterSpacing:0.6}}>
+                          {({bca:"BCA",bradford:"Bradford",p660:"Pierce 660 nm",df:"Direct Fluorescence (GFP)"})[st._assayKey]}
+                        </div>
+                        {renderCopyBtn("b5")}
+                      </div>
+                      <div id="scribe-block-curve">{renderCurve(null)}</div>
+                    </div>
+                    <div style={{background:"#fafbfe",border:"1px solid "+C.purpleTint,borderRadius:6,padding:12}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                        <div style={{fontSize:10.5,fontWeight:700,color:C.purpleDeep,textTransform:"uppercase",letterSpacing:0.6}}>
+                          {({bca:"BCA",bradford:"Bradford",p660:"Pierce 660 nm",df:"Direct Fluorescence (GFP)"})[st._secondAssayKey]}
+                        </div>
+                        {renderCopyBtn("b5_sec")}
+                      </div>
+                      <div id="scribe-block-curve-2">{renderCurve("sec")}</div>
+                    </div>
+                  </div>
+                ) : (
+                  <div id="scribe-block-curve">{renderCurve(null)}</div>
+                )}
+                {/* Optional analytical steps — checklist at bottom of block (SHARED even when paired) */}
                 <div style={{marginTop:14,paddingTop:12,borderTop:"1px dashed "+C.divider}}>
                   <div style={{fontSize:10.5,fontWeight:700,color:C.slate,textTransform:"uppercase",letterSpacing:0.4,marginBottom:8}}>Optional analytical steps</div>
                   {SCRIBE_CHECKLIST_ITEMS.map(function(item){
@@ -19160,6 +19713,164 @@ function ScribeCard(props) {
       />}
     </div>
   );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Sub-component: multi-select assay checkbox picker (A2 paired workflow)
+// ═══════════════════════════════════════════════════════════════════════
+// Analyst can pick 1 or 2 assays. Within total-protein class (BCA, Bradford,
+// P660) only ONE can be checked at a time — checking a new one auto-unchecks
+// the previous. DF is in the active-protein class and can pair with any one
+// total-protein OR stand alone.
+//
+// onChange(primaryKey, secondaryKey) is called with:
+//   - Single total-protein: primaryKey="bca"|"bradford"|"p660", secondary=null
+//   - Single DF: primaryKey="df", secondary=null
+//   - Paired: primaryKey=total-protein, secondary="df" (total always leads)
+// ═══════════════════════════════════════════════════════════════════════
+function ScribeAssayMultiSelect(props) {
+  var _open = useState(false);
+  var open = _open[0], setOpen = _open[1];
+  var wrapRef = useRef(null);
+  var TOTAL_PROTEIN_CLASS = ["bca", "bradford", "p660"];
+  var LABELS = { bca: "BCA", bradford: "Bradford", p660: "Pierce 660 nm", df: "Direct Fluorescence (GFP)" };
+  var SHORT = { bca: "BCA", bradford: "Bradford", p660: "P660", df: "DF (GFP)" };
+
+  // Which assays are currently selected? (from primary + secondary)
+  var selected = {};
+  if (props.assayKey) selected[props.assayKey] = true;
+  if (props.secondAssayKey) selected[props.secondAssayKey] = true;
+
+  // Compute summary label for the closed picker
+  var selectedKeys = Object.keys(selected);
+  // Order: total-protein first, then DF
+  selectedKeys.sort(function(a, b){
+    if (a === "df") return 1;
+    if (b === "df") return -1;
+    return 0;
+  });
+  var summary = selectedKeys.length ? selectedKeys.map(function(k){ return SHORT[k] || k; }).join(", ") : "Pick assay";
+
+  // Close picker when clicking outside
+  useEffect(function(){
+    if (!open) return;
+    var onDocClick = function(e){
+      if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDocClick);
+    return function(){ document.removeEventListener("mousedown", onDocClick); };
+  }, [open]);
+
+  var toggle = function(key){
+    // Compute new selection state
+    var isCurrentlySelected = !!selected[key];
+    var newSelected = Object.assign({}, selected);
+    if (isCurrentlySelected) {
+      delete newSelected[key];
+    } else {
+      // If turning ON a total-protein assay, unset the others in that class
+      if (TOTAL_PROTEIN_CLASS.indexOf(key) >= 0) {
+        TOTAL_PROTEIN_CLASS.forEach(function(k){ if (k !== key) delete newSelected[k]; });
+      }
+      newSelected[key] = true;
+    }
+    // Convert back to primary/secondary. Primary rule: total-protein first, DF second.
+    var totalPick = TOTAL_PROTEIN_CLASS.filter(function(k){ return newSelected[k]; })[0] || null;
+    var hasDF = !!newSelected.df;
+    var newPrimary, newSecondary;
+    if (totalPick && hasDF) {
+      newPrimary = totalPick;
+      newSecondary = "df";
+    } else if (totalPick) {
+      newPrimary = totalPick;
+      newSecondary = null;
+    } else if (hasDF) {
+      newPrimary = "df";
+      newSecondary = null;
+    } else {
+      // All unchecked — keep primary as-is (don't allow empty state); no-op
+      return;
+    }
+    props.onChange(newPrimary, newSecondary);
+  };
+
+  var pillStyle = {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 4,
+    background: "#fff",
+    border: "1px solid #cfdcea",
+    borderRadius: 4,
+    padding: "3px 8px",
+    fontSize: 11,
+    color: "#0b2a6f",
+    fontWeight: 500,
+    cursor: "pointer",
+    userSelect: "none",
+    minWidth: 90,
+  };
+  var arrowStyle = { fontSize: 8, color: "#8a99b8", marginLeft: 3 };
+  var openPanelStyle = {
+    position: "absolute",
+    top: "100%",
+    left: 0,
+    marginTop: 4,
+    background: "#fff",
+    border: "1px solid #dfe7f2",
+    borderRadius: 4,
+    boxShadow: "0 4px 12px rgba(0,0,0,0.08)",
+    padding: "5px 0",
+    zIndex: 20,
+    minWidth: 200,
+  };
+  var rowStyle = {
+    padding: "6px 12px",
+    fontSize: 11.5,
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    cursor: "pointer",
+  };
+  var cbStyle = function(checked){ return {
+    width: 14,
+    height: 14,
+    borderRadius: 3,
+    border: "1.5px solid " + (checked ? "#6a3fb5" : "#b8c4d8"),
+    background: checked ? "#6a3fb5" : "#fff",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    color: "#fff",
+    fontSize: 10,
+    fontWeight: 700,
+    flexShrink: 0,
+  };};
+
+  var ORDER = ["bca", "bradford", "p660", "df"];
+  return <span ref={wrapRef} style={{position:"relative",display:"inline-block"}}>
+    <span style={pillStyle} onClick={function(){setOpen(!open);}}>
+      <span>{summary}</span>
+      <span style={arrowStyle}>▾</span>
+    </span>
+    {open && <div style={openPanelStyle}>
+      {ORDER.map(function(key){
+        var checked = !!selected[key];
+        return <div
+          key={key}
+          style={rowStyle}
+          onClick={function(){ toggle(key); }}
+          onMouseEnter={function(e){ e.currentTarget.style.background = "#f4f6fb"; }}
+          onMouseLeave={function(e){ e.currentTarget.style.background = "transparent"; }}
+        >
+          <span style={cbStyle(checked)}>{checked ? "✓" : ""}</span>
+          <span style={{color:"#0b2a6f"}}>{LABELS[key]}</span>
+        </div>;
+      })}
+      <div style={{padding:"5px 12px",fontSize:9.5,color:"#8a99b8",borderTop:"1px solid #eef2f8",marginTop:4,fontStyle:"italic",lineHeight:1.3}}>
+        Total-protein assays (BCA, Bradford, P660) are mutually exclusive. DF can pair with any of them.
+      </div>
+    </div>}
+  </span>;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -19604,313 +20315,8 @@ function ScribeGFPWizard(props) {
   </div>;
 }
 
-function ScribeTool(props) {
-  // Two contexts:
-  //   - Standalone (from Tools tile): props.cfgContext is null/undefined.
-  //     Uses vendor defaults from SCRIBE_TEMPLATES; localstorage persists
-  //     across visits.
-  //   - Embedded (from Plate Assay's Scribe tab): props.cfgContext provides
-  //     { templateId, values, checks } pre-derived from the live assay state.
-  //
-  // Storage is UNIFIED across both contexts — if the analyst sets "Plate reader:
-  // Synergy 4" in the tile, it's remembered when they later use the in-assay
-  // tab. The cfgContext STILL provides cfg-derived auto-fills (which overlay
-  // empty fields, not stored values) so analysts see actual-assay numbers
-  // when in-assay without losing their cross-context defaults.
-  //
-  // props.embedded — when true, suppress PageHeader (host page already has one)
-  // props.cfgContext — { templateId, values, checks } | null
-  var embedded = !!props.embedded;
-  var cfgCtx = props.cfgContext || null;
+// v5d20 ScribeTool removed — replaced by ScribeCard (see chosenView === "scribe" and Plate Assay Scribe tab). Deletion date: 2026-07-16.
 
-  // Single storage key — both contexts share the same persisted state.
-  var STORAGE_KEY = "essf-scribe-state-v2";
-  var loadState = function() {
-    try {
-      var raw = localStorage.getItem(STORAGE_KEY);
-      if (!raw) return null;
-      return JSON.parse(raw);
-    } catch(e) { return null; }
-  };
-  var saveState = function(s) {
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(s)); } catch(e) {}
-  };
-
-  var initial = loadState() || {};
-
-  // If we have cfgContext (embedded path), prefer its templateId on first load
-  // so the analyst doesn't land on a stale "bca" choice when running an ELISA.
-  var initialTemplate = (cfgCtx && cfgCtx.templateId) || initial.activeTemplate || "bca";
-
-  var _tmpl = useState(initialTemplate),
-      activeTemplate = _tmpl[0], setActiveTemplate = _tmpl[1];
-  // Per-template values dict: { bca: {kitVendor: "...", ...}, bradford: {...}, fluor: {...} }
-  var _vals = useState(initial.values || {}),
-      allValues = _vals[0], setAllValues = _vals[1];
-  // Per-template checklist dict: { bca: {blankCorrected: true, ...}, ... }
-  var _check = useState(initial.checks || {}),
-      allChecks = _check[0], setAllChecks = _check[1];
-  var _copied = useState(false), copied = _copied[0], setCopied = _copied[1];
-  // Track which fields were auto-filled from the assay (so we can show a teal-tint hint)
-  var _autoFilled = useState({}), autoFilledFields = _autoFilled[0], setAutoFilledFields = _autoFilled[1];
-
-  // When cfgContext is provided (embedded path), merge its values/checks into
-  // state on first render — but only overwrite empty fields so analyst edits
-  // aren't blown away when cfg updates mid-session.
-  useEffect(function() {
-    if (!cfgCtx) return;
-    var ctxTid = cfgCtx.templateId || activeTemplate;
-    var existingVals = allValues[ctxTid] || {};
-    var existingChecks = allChecks[ctxTid] || {};
-    var mergedVals = Object.assign({}, existingVals);
-    var mergedChecks = Object.assign({}, existingChecks);
-    var autoMap = {};
-    if (cfgCtx.values) {
-      Object.keys(cfgCtx.values).forEach(function(k) {
-        if (mergedVals[k] === undefined || mergedVals[k] === "") {
-          mergedVals[k] = cfgCtx.values[k];
-          autoMap[k] = true;
-        }
-      });
-    }
-    if (cfgCtx.checks) {
-      Object.keys(cfgCtx.checks).forEach(function(k) {
-        if (mergedChecks[k] === undefined) {
-          mergedChecks[k] = cfgCtx.checks[k];
-        }
-      });
-    }
-    var nextAll = Object.assign({}, allValues); nextAll[ctxTid] = mergedVals;
-    var nextChecks = Object.assign({}, allChecks); nextChecks[ctxTid] = mergedChecks;
-    setAllValues(nextAll);
-    setAllChecks(nextChecks);
-    setAutoFilledFields(autoMap);
-    // Make sure the active template reflects the assay's actual type
-    if (cfgCtx.templateId && cfgCtx.templateId !== activeTemplate) {
-      setActiveTemplate(cfgCtx.templateId);
-    }
-  }, [cfgCtx ? cfgCtx.templateId : null]);  // re-run when context's template changes
-
-  var tmpl = SCRIBE_TEMPLATES[activeTemplate];
-  var values = allValues[activeTemplate] || {};
-  var checks = allChecks[activeTemplate] || {};
-
-  // Persist on every change
-  useEffect(function() {
-    saveState({ activeTemplate: activeTemplate, values: allValues, checks: allChecks });
-  }, [activeTemplate, allValues, allChecks]);
-
-  // Initialize defaults for a template on first visit (only fills empty fields)
-  useEffect(function() {
-    var tmplObj = SCRIBE_TEMPLATES[activeTemplate];
-    var existing = allValues[activeTemplate] || {};
-    var existingChecks = allChecks[activeTemplate] || {};
-    var changed = false;
-    var changedChecks = false;
-    tmplObj.sections.forEach(function(sec) {
-      sec.fields.forEach(function(f) {
-        if (f.default && (existing[f.id] === undefined || existing[f.id] === "")) {
-          existing[f.id] = f.default;
-          changed = true;
-        }
-      });
-    });
-    tmplObj.checklist.forEach(function(item) {
-      if (item.included && existingChecks[item.id] === undefined) {
-        existingChecks[item.id] = true;
-        changedChecks = true;
-      }
-    });
-    if (changed) setAllValues(Object.assign({}, allValues, (function(){var o={};o[activeTemplate]=existing;return o;})()));
-    if (changedChecks) setAllChecks(Object.assign({}, allChecks, (function(){var o={};o[activeTemplate]=existingChecks;return o;})()));
-  }, [activeTemplate]);
-
-  var setVal = function(fieldId, v) {
-    var next = Object.assign({}, values); next[fieldId] = v;
-    var nextAll = Object.assign({}, allValues); nextAll[activeTemplate] = next;
-    setAllValues(nextAll);
-  };
-  var setCheck = function(itemId, v) {
-    var next = Object.assign({}, checks); next[itemId] = v;
-    var nextAll = Object.assign({}, allChecks); nextAll[activeTemplate] = next;
-    setAllChecks(nextAll);
-  };
-
-  var paragraph = tmpl.paragraph(values, checks);
-
-  var copyParagraph = function() {
-    if (navigator && navigator.clipboard) {
-      navigator.clipboard.writeText(paragraph).then(function() {
-        setCopied(true);
-        setTimeout(function() { setCopied(false); }, 1800);
-      });
-    }
-  };
-
-  var resetTemplate = function() {
-    if (!window.confirm("Clear all fields and checks for " + tmpl.label + "?")) return;
-    var nextAll = Object.assign({}, allValues); nextAll[activeTemplate] = {};
-    setAllValues(nextAll);
-    var nextChecks = Object.assign({}, allChecks); nextChecks[activeTemplate] = {};
-    setAllChecks(nextChecks);
-  };
-
-  // Count missing slots in the paragraph (substring count of "[")
-  var missingCount = (paragraph.match(/\[/g) || []).length;
-
-  return (
-    <div style={embedded ? {padding:"0",maxWidth:"100%",margin:"0",boxSizing:"border-box"} : {padding:"0 0 2.5rem",maxWidth:1320,margin:"0 auto",boxSizing:"border-box"}}>
-      {!embedded && <PageHeader instructor={props.instructor} setInstructor={props.setInstructor} onBack={props.onBack} large={true} workspaceLabel="Scribe" />}
-      <div style={embedded ? {padding:"0"} : {padding:"1.25rem 16px 0"}}>
-
-        {/* Compact action bar: template dropdown + short tagline.
-            The sticky header above already shows "eSSF Bench → Scribe", so
-            there's no need for a hero card with another big Scribe icon and
-            heading. This bar is intentionally lightweight.
-            Embedded context shows nothing — the host page provides its own
-            tab header. */}
-        {!embedded && (
-          <div style={{display:"flex",alignItems:"center",gap:14,marginBottom:14,padding:"10px 14px",background:"#fff",border:"1px solid #dfe7f2",borderRadius:10}}>
-            <div style={{display:"flex",alignItems:"center",gap:8,flex:1}}>
-              <label htmlFor="scribe-template-select" style={{fontSize:11,color:"#5a6984",fontWeight:600,textTransform:"uppercase",letterSpacing:0.5}}>
-                Template
-              </label>
-              <select id="scribe-template-select"
-                      value={activeTemplate}
-                      onChange={function(e){ setActiveTemplate(e.target.value); }}
-                      style={{padding:"6px 10px",fontSize:12.5,fontWeight:600,color:"#0b2a6f",
-                              background:"#fff",border:"1px solid #9b6dc7",borderRadius:6,
-                              cursor:"pointer",fontFamily:"inherit",outline:"none",minWidth:200}}>
-                {Object.keys(SCRIBE_TEMPLATES).map(function(tid) {
-                  return <option key={tid} value={tid}>{SCRIBE_TEMPLATES[tid].label}</option>;
-                })}
-              </select>
-            </div>
-            <div style={{fontSize:11.5,color:"#8e9bb5",fontStyle:"italic",lineHeight:1.4}}>
-              {tmpl.description}
-            </div>
-          </div>
-        )}
-
-        {/* Two-column layout: form left, paragraph right */}
-        <div style={{display:"grid",gridTemplateColumns:"minmax(0, 1fr) minmax(0, 1fr)",gap:"1.25rem",alignItems:"start"}}>
-
-          {/* LEFT: form */}
-          <div>
-            {/* Sections */}
-            {tmpl.sections.map(function(sec) {
-              return (
-                <div key={sec.id} style={{background:"#fff",border:"1px solid #dfe7f2",borderRadius:12,padding:"14px 16px",marginBottom:12}}>
-                  <div style={{fontSize:11,fontWeight:700,color:"#4a2d8f",textTransform:"uppercase",letterSpacing:0.6,marginBottom:10}}>
-                    {sec.title}
-                  </div>
-                  {sec.fields.map(function(f) {
-                    var isAutoFilled = embedded && autoFilledFields[f.id] && values[f.id];
-                    var hasUserEdit = embedded && !autoFilledFields[f.id] && values[f.id];
-                    return (
-                      <div key={f.id} style={{marginBottom:9,display:"flex",alignItems:"center",gap:10}}>
-                        <label style={{flex:"0 0 175px",fontSize:11.5,color:"#5a6984",lineHeight:1.4}}>
-                          {f.label}
-                          {isAutoFilled && <span style={{display:"inline-block",marginLeft:6,fontSize:9,color:"#0c7a7c",fontWeight:600,textTransform:"uppercase",letterSpacing:0.3}}>from assay</span>}
-                        </label>
-                        <div style={{flex:1,display:"flex",alignItems:"center",gap:6}}>
-                          <input type="text" value={values[f.id] || ""}
-                                 onChange={function(e){
-                                   setVal(f.id, e.target.value);
-                                   // Once analyst edits a from-assay field, drop the badge
-                                   if (autoFilledFields[f.id]) {
-                                     var next = Object.assign({}, autoFilledFields);
-                                     delete next[f.id];
-                                     setAutoFilledFields(next);
-                                   }
-                                 }}
-                                 placeholder={f.placeholder || ""}
-                                 style={{flex:1,padding:"6px 9px",fontSize:11.5,
-                                         border:"1px solid "+(isAutoFilled ? "#7fc4c5" : "#dfe7f2"),
-                                         background: isAutoFilled ? "#edfbfb" : "#fff",
-                                         borderRadius:6,
-                                         fontFamily:"inherit",color:"#0b2a6f",outline:"none"}} />
-                          {f.suffix && <span style={{fontSize:11,color:"#8e9bb5",fontWeight:500,minWidth:38}}>{f.suffix}</span>}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              );
-            })}
-
-            {/* Checklist */}
-            <div style={{background:"#fff",border:"1px solid #dfe7f2",borderRadius:12,padding:"14px 16px",marginBottom:12}}>
-              <div style={{fontSize:11,fontWeight:700,color:"#4a2d8f",textTransform:"uppercase",letterSpacing:0.6,marginBottom:4}}>
-                What did you actually do?
-              </div>
-              <div style={{fontSize:10.5,color:"#8e9bb5",marginBottom:10,fontStyle:"italic",lineHeight:1.5}}>
-                Check only the items you actually performed. Unchecked items are omitted from the generated paragraph rather than declared false.
-              </div>
-              {tmpl.checklist.map(function(item) {
-                var checked = !!checks[item.id];
-                return (
-                  <label key={item.id} style={{display:"flex",alignItems:"flex-start",gap:9,padding:"5px 0",cursor:"pointer",fontSize:12,color:checked?"#0b2a6f":"#5a6984",lineHeight:1.5}}>
-                    <input type="checkbox" checked={checked}
-                           onChange={function(e){ setCheck(item.id, e.target.checked); }}
-                           style={{marginTop:3,accentColor:"#9b6dc7",cursor:"pointer"}} />
-                    <span>{item.label}</span>
-                  </label>
-                );
-              })}
-            </div>
-
-            {/* Reset button */}
-            <div style={{display:"flex",justifyContent:"flex-end",marginTop:4}}>
-              <button onClick={resetTemplate}
-                      style={{padding:"6px 12px",fontSize:10.5,color:"#8e9bb5",background:"transparent",border:"1px solid #dfe7f2",borderRadius:6,cursor:"pointer",fontFamily:"inherit"}}>
-                Clear all fields
-              </button>
-            </div>
-          </div>
-
-          {/* RIGHT: generated paragraph */}
-          <div style={{position:"sticky",top:90}}>
-            <div style={{background:"#fff",border:"1px solid #dfe7f2",borderRadius:12,padding:"14px 16px",marginBottom:12}}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:10}}>
-                <div style={{fontSize:11,fontWeight:700,color:"#4a2d8f",textTransform:"uppercase",letterSpacing:0.6}}>
-                  Generated method paragraph
-                </div>
-                {missingCount > 0 && (
-                  <div style={{fontSize:10.5,color:"#bf7a1a",fontWeight:600}}>
-                    {missingCount} slot{missingCount===1?"":"s"} not filled
-                  </div>
-                )}
-                {missingCount === 0 && (
-                  <div style={{fontSize:10.5,color:"#1a6e3a",fontWeight:600}}>
-                    {"\u2713"} complete
-                  </div>
-                )}
-              </div>
-              <div style={{fontSize:13,color:"#0b2a6f",lineHeight:1.75,padding:"12px 14px",background:"#fafbfd",border:"1px solid #eef3f8",borderRadius:8,fontFamily:'"Georgia", "Times New Roman", serif'}}>
-                {renderParagraphWithSlots(paragraph, values)}
-              </div>
-              <div style={{display:"flex",gap:8,marginTop:12,flexWrap:"wrap"}}>
-                <button onClick={copyParagraph}
-                        style={{padding:"8px 14px",fontSize:12,fontWeight:600,color:"#fff",
-                                background:copied?"#1a6e3a":"#9b6dc7",
-                                border:"none",borderRadius:8,cursor:"pointer",fontFamily:"inherit",
-                                transition:"background 0.15s"}}>
-                  {copied ? "\u2713 Copied to clipboard" : "Copy paragraph"}
-                </button>
-              </div>
-            </div>
-
-            {/* Helpful note */}
-            <div style={{background:"#F1EAFB",border:"1px solid #d4bce8",borderRadius:10,padding:"10px 14px",fontSize:11,color:"#5a3a8a",lineHeight:1.6}}>
-              <strong>How to use this for LIMS:</strong> fill out the fields and check off only what you actually did. The paragraph updates live. When complete, click Copy and paste into the LIMS method-description field. Bracketed slots like [vendor] show what's still missing.
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
 
 // Render paragraph with:
 //   - Unfilled bracketed slots like [vendor name]  → amber pill (the analyst
@@ -22788,9 +23194,9 @@ function App() {
   }
 
   // Scribe — method-description paragraph generator for LIMS.
-  // Landing-page entry uses the NEW ScribeCard (v14 mockup design).
-  // The OLD ScribeTool is still called from within Plate Assay's Scribe tab
-  // for the embedded/auto-fill context — it will be updated separately later.
+  // Single unified ScribeCard is used everywhere: standalone via this tile
+  // AND embedded inside Plate Assay's Scribe tab. Prefill prop (optional)
+  // pre-populates fields when opened from a Plate Assay context.
   if (chosenView === "scribe") {
     return <ScribeCard onBack={function(){ setChosenView(null); }} instructor={instructor} setInstructor={setInstructor} />;
   }
@@ -22800,9 +23206,16 @@ function App() {
     return <BioburdenTool onBack={function(){ setChosenView(null); }} instructor={instructor} setInstructor={setInstructor} />;
   }
 
-  // LIMS Formatter — pair samples with batch IDs for LIMS upload.
+  // Editor — Sample & Batch ID Editor. Verbatim copy of SampleBatchEditor.jsx
+  // from eSSF Helper (single source of truth). Wrapped in Bench's PageHeader
+  // chrome so the analyst gets the standard Back button + user badge.
   if (chosenView === "limsFormatter") {
-    return <LIMSFormatterTool onBack={function(){ setChosenView(null); }} instructor={instructor} setInstructor={setInstructor} />;
+    return (
+      <div>
+        <PageHeader instructor={instructor} setInstructor={setInstructor} onBack={function(){ setChosenView(null); }} large={true} workspaceLabel="Editor" />
+        <SampleBatchEditor showHeader={false} />
+      </div>
+    );
   }
 
   if(!on) return (
@@ -25866,7 +26279,7 @@ function App() {
               <strong>{"\u24d8"} Run analysis to auto-fill more fields.</strong> Until you analyze, Scribe uses vendor defaults. After analysis, fields like standard range, replicates, and R² will pre-populate from your actual data.
             </div>
             <div style={{maxWidth: 1320, margin: "0 auto"}}>
-              <ScribeTool embedded={true} cfgContext={preCtx} instructor={instructor} setInstructor={setInstructor} />
+              <ScribeCard prefill={scribeCfgContextToPrefill(preCtx, cfg)} instructor={instructor} setInstructor={setInstructor} />
             </div>
           </div>;
         }
@@ -26751,7 +27164,7 @@ function App() {
           <div>
             {/* ─── New unified Scribe (primary UI) ─────────────────────── */}
             <div style={{maxWidth: 1320, margin: "0 auto", marginBottom: 18}}>
-              <ScribeTool embedded={true} cfgContext={scribeCfgContext} instructor={instructor} setInstructor={setInstructor} />
+              <ScribeCard prefill={scribeCfgContextToPrefill(scribeCfgContext, cfg)} instructor={instructor} setInstructor={setInstructor} />
             </div>
 
             {/* ─── Legacy slot-fill UI (kept during transition) ────────── */}
